@@ -61,6 +61,13 @@ const app = Fastify({ logger: false });
 
 app.get("/.well-known/agent.json", async () => AGENT_CARD);
 
+app.get("/healthz", async () => ({
+  status: "ok",
+  agent: NAME,
+  uptime: process.uptime(),
+  skills: AGENT_CARD.skills.map(s => s.id),
+}));
+
 app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const data = request.body;
   if (data?.method !== "tasks/send") {

@@ -3,6 +3,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import Fastify from "fastify";
 import { join, dirname } from "path";
@@ -13,6 +17,13 @@ import { initRegistry, listMcpServers, listMcpTools, callMcpTool, refreshManifes
 import { getProjectContext, setProjectContext, getContextPreamble } from "./context.js";
 import { initPlugins, watchPlugins, pluginSkills } from "./skill-loader.js";
 import { getPersona, watchPersonas } from "./persona-loader.js";
+import { memory } from "./memory.js";
+import { AgentError, SkillNotFoundError, WorkerUnavailableError, formatError, toStatusError } from "./errors.js";
+import {
+  createTask, markWorking, markCompleted, markFailed, markCanceled, emitProgress,
+  getTask, listTasks, pruneTasks, toA2AResult, taskEvents,
+  type Task, type TaskState,
+} from "./task-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -28,6 +39,9 @@ const WORKERS = [
 const workerProcs: Array<ReturnType<typeof Bun.spawn>> = [];
 let workerCards: AgentCard[] = [];
 
+// Track worker health status
+const workerHealth = new Map<string, { healthy: boolean; failCount: number; lastCheck: number }>();
+
 // ── Spawn workers (with auto-respawn) ───────────────────────────
 function spawnWorker(w: typeof WORKERS[number]) {
   const proc = Bun.spawn(["bun", w.path], {
@@ -39,12 +53,51 @@ function spawnWorker(w: typeof WORKERS[number]) {
   // Auto-respawn on exit
   proc.exited.then(() => {
     process.stderr.write(`[orchestrator] ${w.name} exited — respawning in 2s\n`);
-    setTimeout(() => spawnWorker(w), 2000);
+    workerHealth.set(w.name, { healthy: false, failCount: 0, lastCheck: Date.now() });
+    setTimeout(() => {
+      spawnWorker(w);
+      // Re-discover after respawn
+      setTimeout(async () => {
+        try {
+          const card = await discoverAgent(`http://localhost:${w.port}`);
+          // Replace or add the card
+          workerCards = workerCards.filter(c => c.url !== card.url);
+          workerCards.push(card);
+          workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
+          process.stderr.write(`[orchestrator] re-discovered ${w.name} after respawn\n`);
+        } catch {
+          process.stderr.write(`[orchestrator] failed to re-discover ${w.name} after respawn\n`);
+        }
+      }, 2000);
+    }, 2000);
   });
 }
 
 function spawnWorkers() {
   for (const w of WORKERS) spawnWorker(w);
+}
+
+// ── Health-based readiness polling ──────────────────────────────
+async function waitForWorker(w: typeof WORKERS[number], maxWaitMs = 10_000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const res = await fetch(`http://localhost:${w.port}/healthz`);
+      if (res.ok) {
+        workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
+        return true;
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+  workerHealth.set(w.name, { healthy: false, failCount: 0, lastCheck: Date.now() });
+  return false;
+}
+
+async function waitForAllWorkers(): Promise<void> {
+  const results = await Promise.all(WORKERS.map(w => waitForWorker(w)));
+  const readyCount = results.filter(Boolean).length;
+  process.stderr.write(`[orchestrator] ${readyCount}/${WORKERS.length} workers ready\n`);
 }
 
 async function discoverWorkers(): Promise<AgentCard[]> {
@@ -60,10 +113,37 @@ async function discoverWorkers(): Promise<AgentCard[]> {
   return cards;
 }
 
+// Periodic liveness checks (every 30s)
+function startHealthMonitor() {
+  setInterval(async () => {
+    for (const w of WORKERS) {
+      try {
+        const res = await fetch(`http://localhost:${w.port}/healthz`);
+        if (res.ok) {
+          workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
+        } else {
+          throw new Error(`HTTP ${res.status}`);
+        }
+      } catch {
+        const prev = workerHealth.get(w.name) ?? { healthy: true, failCount: 0, lastCheck: 0 };
+        const failCount = prev.failCount + 1;
+        workerHealth.set(w.name, { healthy: failCount < 3, failCount, lastCheck: Date.now() });
+        if (failCount === 3) {
+          process.stderr.write(`[orchestrator] ${w.name} marked unhealthy (3 consecutive failures)\n`);
+        }
+      }
+    }
+  }, 30_000);
+}
+
 // ── Build skill-to-worker map ───────────────────────────────────
 function buildSkillRouter(cards: AgentCard[]): Map<string, string> {
   const map = new Map<string, string>();
   for (const card of cards) {
+    // Skip unhealthy workers
+    const wName = WORKERS.find(w => card.url.includes(`:${w.port}`))?.name;
+    if (wName && workerHealth.get(wName)?.healthy === false) continue;
+
     for (const skill of card.skills) {
       map.set(skill.id, card.url);
     }
@@ -78,62 +158,152 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
   const message = (args.message as string) ?? "";
   const skillArgs = (args.args as Record<string, unknown>) ?? {};
 
+  const startTime = Date.now();
+
   // Prepend project context if set
   const preamble = getContextPreamble();
   const enrichedMessage = preamble ? `${preamble}\n\n${message}` : message;
   const msgPayload = { role: "user", parts: [{ text: enrichedMessage }] };
 
-  // 1. Direct URL
-  if (agentUrl) {
-    return sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload });
-  }
-
-  // 2. Route by skillId
-  if (skillId) {
-    const router = buildSkillRouter(workerCards);
-    const url = router.get(skillId);
-    if (url) {
-      return sendTask(url, { skillId, args: skillArgs, message: msgPayload });
+  try {
+    // 1. Direct URL
+    if (agentUrl) {
+      const result = await sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload });
+      logRequest(skillId ?? "delegate", agentUrl, "completed", Date.now() - startTime);
+      return result;
     }
 
-    // Also check local skills (backwards compat)
-    const localSkill = SKILL_MAP.get(skillId);
-    if (localSkill) {
-      return localSkill.run({ ...skillArgs, prompt: message, command: message, url: message });
-    }
-
-    return `No worker found with skill: ${skillId}`;
-  }
-
-  // 3. Auto-route via ask_claude (using orchestrator persona)
-  const orchestratorPersona = getPersona("orchestrator");
-  const cardsJson = JSON.stringify(workerCards.map(c => ({
-    name: c.name, url: c.url,
-    skills: c.skills.map(s => s.id),
-  })));
-  const prompt = `${orchestratorPersona.systemPrompt}\n\nWorkers: ${cardsJson}. Task: ${message}. Reply JSON only: {"url":"...","skillId":"..."}`;
-
-  // Try to find ai worker
-  const aiUrl = workerCards.find(c => c.name === "ai-agent")?.url;
-  if (aiUrl) {
-    const response = await sendTask(aiUrl, {
-      skillId: "ask_claude",
-      args: { prompt },
-      message: { role: "user", parts: [{ text: prompt }] },
-    });
-    try {
-      const parsed = JSON.parse(response);
-      if (parsed.url && parsed.skillId) {
-        return sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload });
+    // 2. Route by skillId
+    if (skillId) {
+      const router = buildSkillRouter(workerCards);
+      const url = router.get(skillId);
+      if (url) {
+        const result = await sendTask(url, { skillId, args: skillArgs, message: msgPayload });
+        logRequest(skillId, url, "completed", Date.now() - startTime);
+        return result;
       }
-    } catch {}
-    return response;
-  }
 
-  return "No AI worker available for auto-routing";
+      // Also check local skills (backwards compat)
+      const localSkill = SKILL_MAP.get(skillId);
+      if (localSkill) {
+        return localSkill.run({ ...skillArgs, prompt: message, command: message, url: message });
+      }
+
+      throw new SkillNotFoundError(skillId);
+    }
+
+    // 3. Auto-route via ask_claude (using orchestrator persona)
+    const orchestratorPersona = getPersona("orchestrator");
+    const cardsJson = JSON.stringify(workerCards.map(c => ({
+      name: c.name, url: c.url,
+      skills: c.skills.map(s => s.id),
+    })));
+    const prompt = `${orchestratorPersona.systemPrompt}\n\nWorkers: ${cardsJson}. Task: ${message}. Reply JSON only: {"url":"...","skillId":"..."}`;
+
+    // Try to find ai worker
+    const aiUrl = workerCards.find(c => c.name === "ai-agent")?.url;
+    if (aiUrl) {
+      const response = await sendTask(aiUrl, {
+        skillId: "ask_claude",
+        args: { prompt },
+        message: { role: "user", parts: [{ text: prompt }] },
+      });
+      try {
+        const parsed = JSON.parse(response);
+        if (parsed.url && parsed.skillId) {
+          const result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload });
+          logRequest(parsed.skillId, parsed.url, "completed", Date.now() - startTime);
+          return result;
+        }
+      } catch {}
+      return response;
+    }
+
+    throw new WorkerUnavailableError("ai-agent", "needed for auto-routing");
+  } catch (err) {
+    logRequest(skillId ?? "delegate", agentUrl ?? "unknown", "failed", Date.now() - startTime);
+    throw err;
+  }
 }
 
-// ── Orchestrator skills (delegate + list_agents) ────────────────
+function logRequest(skill: string, worker: string, status: string, durationMs: number) {
+  process.stderr.write(`[orchestrator] skill=${skill} worker=${worker} → ${status} (${durationMs}ms)\n`);
+}
+
+// ── Execute a task with full lifecycle ──────────────────────────
+async function executeTask(
+  task: Task,
+  skillId: string | undefined,
+  args: Record<string, unknown>,
+  text: string,
+): Promise<void> {
+  markWorking(task.id);
+
+  try {
+    let resultText: string;
+
+    if (skillId === "delegate") {
+      resultText = await delegate({ ...args, message: text });
+    } else if (skillId === "list_agents") {
+      resultText = JSON.stringify(workerCards, null, 2);
+    } else if (skillId === "list_mcp_servers") {
+      resultText = JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
+    } else if (skillId === "use_mcp_tool") {
+      const toolName = (args?.toolName as string);
+      if (!toolName) throw new AgentError("INVALID_ARGS", "use_mcp_tool requires toolName");
+      resultText = await callMcpTool(toolName, (args?.args ?? {}) as Record<string, unknown>);
+    } else if (skillId === "get_project_context") {
+      resultText = JSON.stringify(getProjectContext(), null, 2);
+    } else if (skillId === "set_project_context") {
+      resultText = JSON.stringify(setProjectContext(args ?? {}), null, 2);
+    } else if (skillId === "memory_search") {
+      const query = (args?.query as string) ?? text;
+      const agent = args?.agent as string | undefined;
+      if (!query) throw new AgentError("INVALID_ARGS", "memory_search requires query");
+      resultText = JSON.stringify(memory.search(query, agent), null, 2);
+    } else if (skillId === "memory_list") {
+      const agent = (args?.agent as string) ?? "";
+      const prefix = args?.prefix as string | undefined;
+      if (!agent) throw new AgentError("INVALID_ARGS", "memory_list requires agent");
+      resultText = JSON.stringify(memory.listKeys(agent, prefix), null, 2);
+    } else if (skillId === "memory_cleanup") {
+      const maxAgeDays = (args?.maxAgeDays as number) ?? 30;
+      const count = memory.cleanup(maxAgeDays);
+      resultText = `Cleaned up ${count} memories older than ${maxAgeDays} days`;
+    } else if (skillId) {
+      // Check plugin skills first (hot-loaded)
+      const pluginSkill = pluginSkills.get(skillId);
+      if (pluginSkill) {
+        resultText = await pluginSkill.run(args ?? {});
+      } else {
+        // Try local skill
+        const localSkill = SKILL_MAP.get(skillId);
+        if (localSkill) {
+          resultText = await localSkill.run(args ?? { prompt: text, command: text, url: text });
+        } else {
+          // Route to worker
+          const router = buildSkillRouter(workerCards);
+          const url = router.get(skillId);
+          if (url) {
+            resultText = await sendTask(url, { skillId, args, message: { role: "user", parts: [{ text }] } });
+          } else {
+            throw new SkillNotFoundError(skillId);
+          }
+        }
+      }
+    } else {
+      // Auto-delegate
+      resultText = await delegate({ message: text });
+    }
+
+    markCompleted(task.id, resultText);
+  } catch (err) {
+    markFailed(task.id, toStatusError(err));
+    process.stderr.write(`[orchestrator] ${formatError(err, { taskId: task.id, skill: skillId })}\n`);
+  }
+}
+
+// ── Orchestrator skill definitions ──────────────────────────────
 const delegateSkill = {
   id: "delegate",
   name: "Delegate",
@@ -200,13 +370,54 @@ const setProjectContextSkill = {
   },
 };
 
+const memorySearchSkill = {
+  id: "memory_search",
+  name: "Memory Search",
+  description: "Full-text search across all agent memories",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      query: { type: "string", description: "Search query (FTS5 syntax supported)" },
+      agent: { type: "string", description: "Filter by agent name (optional)" },
+    },
+    required: ["query"],
+  },
+};
+
+const memoryListSkill = {
+  id: "memory_list",
+  name: "Memory List",
+  description: "List all memory keys for an agent, optionally filtered by prefix",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      agent: { type: "string", description: "Agent name" },
+      prefix: { type: "string", description: "Key prefix filter (optional)" },
+    },
+    required: ["agent"],
+  },
+};
+
+const memoryCleanupSkill = {
+  id: "memory_cleanup",
+  name: "Memory Cleanup",
+  description: "Delete memories older than N days",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      maxAgeDays: { type: "number", description: "Delete memories older than this many days (default: 30)" },
+    },
+  },
+};
+
 // ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
-  { name: "a2a-mcp-bridge", version: "3.0.0" },
-  { capabilities: { tools: {} } }
+  { name: "a2a-mcp-bridge", version: "4.0.0" },
+  { capabilities: { tools: {}, resources: {}, prompts: {} } }
 );
 
-// Gather all skills: existing local + delegate + list_agents + worker skills
+// ── MCP Tools ───────────────────────────────────────────────────
+
 function getAllToolDefs() {
   const tools = [
     // orchestrator tools
@@ -216,6 +427,10 @@ function getAllToolDefs() {
     { name: useMcpToolSkill.id, description: useMcpToolSkill.description, inputSchema: useMcpToolSkill.inputSchema },
     { name: getProjectContextSkill.id, description: getProjectContextSkill.description, inputSchema: getProjectContextSkill.inputSchema },
     { name: setProjectContextSkill.id, description: setProjectContextSkill.description, inputSchema: setProjectContextSkill.inputSchema },
+    // memory tools
+    { name: memorySearchSkill.id, description: memorySearchSkill.description, inputSchema: memorySearchSkill.inputSchema },
+    { name: memoryListSkill.id, description: memoryListSkill.description, inputSchema: memoryListSkill.inputSchema },
+    { name: memoryCleanupSkill.id, description: memoryCleanupSkill.description, inputSchema: memoryCleanupSkill.inputSchema },
     // local skills from skills.ts (backwards compat)
     ...SKILLS.map(s => ({ name: s.id, description: s.description, inputSchema: s.inputSchema })),
   ];
@@ -248,73 +463,248 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+  const startTime = Date.now();
 
-  // delegate
-  if (name === "delegate") {
-    const result = await delegate(args ?? {});
-    return { content: [{ type: "text", text: result }] };
+  try {
+    // delegate
+    if (name === "delegate") {
+      const result = await delegate(args ?? {});
+      return { content: [{ type: "text", text: result }] };
+    }
+
+    // list_agents
+    if (name === "list_agents") {
+      return { content: [{ type: "text", text: JSON.stringify(workerCards, null, 2) }] };
+    }
+
+    // list_mcp_servers
+    if (name === "list_mcp_servers") {
+      const servers = listMcpServers();
+      const tools = listMcpTools();
+      return { content: [{ type: "text", text: JSON.stringify({ servers, tools }, null, 2) }] };
+    }
+
+    // use_mcp_tool
+    if (name === "use_mcp_tool") {
+      const toolName = (args as any)?.toolName as string;
+      const toolArgs = ((args as any)?.args ?? {}) as Record<string, unknown>;
+      if (!toolName) throw new AgentError("INVALID_ARGS", "use_mcp_tool requires toolName");
+      const result = await callMcpTool(toolName, toolArgs);
+      return { content: [{ type: "text", text: result }] };
+    }
+
+    // get_project_context
+    if (name === "get_project_context") {
+      return { content: [{ type: "text", text: JSON.stringify(getProjectContext(), null, 2) }] };
+    }
+
+    // set_project_context
+    if (name === "set_project_context") {
+      const updated = setProjectContext(args as any ?? {});
+      return { content: [{ type: "text", text: `Project context updated:\n${JSON.stringify(updated, null, 2)}` }] };
+    }
+
+    // memory tools
+    if (name === "memory_search") {
+      const query = (args as any)?.query as string;
+      const agent = (args as any)?.agent as string | undefined;
+      if (!query) throw new AgentError("INVALID_ARGS", "memory_search requires query");
+      return { content: [{ type: "text", text: JSON.stringify(memory.search(query, agent), null, 2) }] };
+    }
+
+    if (name === "memory_list") {
+      const agent = (args as any)?.agent as string;
+      const prefix = (args as any)?.prefix as string | undefined;
+      if (!agent) throw new AgentError("INVALID_ARGS", "memory_list requires agent");
+      return { content: [{ type: "text", text: JSON.stringify(memory.listKeys(agent, prefix), null, 2) }] };
+    }
+
+    if (name === "memory_cleanup") {
+      const maxAgeDays = ((args as any)?.maxAgeDays as number) ?? 30;
+      const count = memory.cleanup(maxAgeDays);
+      return { content: [{ type: "text", text: `Cleaned up ${count} memories older than ${maxAgeDays} days` }] };
+    }
+
+    // plugin skill
+    const pluginSkill = pluginSkills.get(name);
+    if (pluginSkill) {
+      const result = await pluginSkill.run(args ?? {});
+      return { content: [{ type: "text", text: result }] };
+    }
+
+    // local skill (backwards compat)
+    const localSkill = SKILL_MAP.get(name);
+    if (localSkill) {
+      const result = await localSkill.run(args ?? {});
+      return { content: [{ type: "text", text: result }] };
+    }
+
+    // route to worker by skill id
+    const router = buildSkillRouter(workerCards);
+    const workerUrl = router.get(name);
+    if (workerUrl) {
+      const message = (args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "";
+      const result = await sendTask(workerUrl, {
+        skillId: name,
+        args: (args ?? {}) as Record<string, unknown>,
+        message: { role: "user", parts: [{ text: String(message) }] },
+      });
+      return { content: [{ type: "text", text: result }] };
+    }
+
+    throw new SkillNotFoundError(name);
+  } catch (err) {
+    const errMsg = err instanceof AgentError ? `[${err.code}] ${err.message}` : String(err);
+    process.stderr.write(`[orchestrator] MCP tool=${name} → error (${Date.now() - startTime}ms): ${errMsg}\n`);
+    return { content: [{ type: "text", text: `Error: ${errMsg}` }], isError: true };
   }
+});
 
-  // list_agents
-  if (name === "list_agents") {
-    return { content: [{ type: "text", text: JSON.stringify(workerCards, null, 2) }] };
-  }
+// ── MCP Resources ───────────────────────────────────────────────
 
-  // list_mcp_servers
-  if (name === "list_mcp_servers") {
-    const servers = listMcpServers();
-    const tools = listMcpTools();
-    return { content: [{ type: "text", text: JSON.stringify({ servers, tools }, null, 2) }] };
-  }
+server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  const resources: Array<{ uri: string; name: string; description: string; mimeType: string }> = [];
 
-  // use_mcp_tool
-  if (name === "use_mcp_tool") {
-    const toolName = (args as any)?.toolName as string;
-    const toolArgs = ((args as any)?.args ?? {}) as Record<string, unknown>;
-    if (!toolName) throw new Error("use_mcp_tool requires toolName");
-    const result = await callMcpTool(toolName, toolArgs);
-    return { content: [{ type: "text", text: result }] };
-  }
+  // Project context
+  resources.push({
+    uri: "a2a://context",
+    name: "Project Context",
+    description: "Current project context (summary, goals, stack, notes)",
+    mimeType: "application/json",
+  });
 
-  // get_project_context
-  if (name === "get_project_context") {
-    return { content: [{ type: "text", text: JSON.stringify(getProjectContext(), null, 2) }] };
-  }
-
-  // set_project_context
-  if (name === "set_project_context") {
-    const updated = setProjectContext(args as any ?? {});
-    return { content: [{ type: "text", text: `Project context updated:\n${JSON.stringify(updated, null, 2)}` }] };
-  }
-
-  // plugin skill
-  const pluginSkill = pluginSkills.get(name);
-  if (pluginSkill) {
-    const result = await pluginSkill.run(args ?? {});
-    return { content: [{ type: "text", text: result }] };
-  }
-
-  // local skill (backwards compat)
-  const localSkill = SKILL_MAP.get(name);
-  if (localSkill) {
-    const result = await localSkill.run(args ?? {});
-    return { content: [{ type: "text", text: result }] };
-  }
-
-  // route to worker by skill id
-  const router = buildSkillRouter(workerCards);
-  const workerUrl = router.get(name);
-  if (workerUrl) {
-    const message = (args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "";
-    const result = await sendTask(workerUrl, {
-      skillId: name,
-      args: (args ?? {}) as Record<string, unknown>,
-      message: { role: "user", parts: [{ text: String(message) }] },
+  // Worker agent cards
+  for (const card of workerCards) {
+    resources.push({
+      uri: `a2a://workers/${encodeURIComponent(card.name)}/card`,
+      name: `${card.name} Agent Card`,
+      description: `Agent card for ${card.name}: ${card.description}`,
+      mimeType: "application/json",
     });
-    return { content: [{ type: "text", text: result }] };
   }
 
-  throw new Error(`Unknown tool: ${name}`);
+  // Worker health status
+  resources.push({
+    uri: "a2a://health",
+    name: "Worker Health",
+    description: "Health status of all worker agents",
+    mimeType: "application/json",
+  });
+
+  // Task list
+  resources.push({
+    uri: "a2a://tasks",
+    name: "Task List",
+    description: "List of all active and recent tasks",
+    mimeType: "application/json",
+  });
+
+  return { resources };
+});
+
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const { uri } = request.params;
+
+  if (uri === "a2a://context") {
+    return {
+      contents: [{ uri, mimeType: "application/json", text: JSON.stringify(getProjectContext(), null, 2) }],
+    };
+  }
+
+  if (uri === "a2a://health") {
+    const health: Record<string, unknown> = {};
+    for (const w of WORKERS) {
+      health[w.name] = workerHealth.get(w.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+    }
+    return {
+      contents: [{ uri, mimeType: "application/json", text: JSON.stringify(health, null, 2) }],
+    };
+  }
+
+  if (uri === "a2a://tasks") {
+    return {
+      contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listTasks(), null, 2) }],
+    };
+  }
+
+  const workerMatch = uri.match(/^a2a:\/\/workers\/([^/]+)\/card$/);
+  if (workerMatch) {
+    const name = decodeURIComponent(workerMatch[1]);
+    const card = workerCards.find(c => c.name === name);
+    if (!card) throw new AgentError("TASK_NOT_FOUND", `Worker not found: ${name}`);
+    return {
+      contents: [{ uri, mimeType: "application/json", text: JSON.stringify(card, null, 2) }],
+    };
+  }
+
+  throw new AgentError("TASK_NOT_FOUND", `Resource not found: ${uri}`);
+});
+
+// ── MCP Prompts ─────────────────────────────────────────────────
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  const prompts: Array<{ name: string; description: string; arguments?: Array<{ name: string; description: string; required?: boolean }> }> = [];
+
+  // Persona-based prompts
+  const personaNames = ["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent"];
+  for (const name of personaNames) {
+    const persona = getPersona(name);
+    if (persona.systemPrompt) {
+      prompts.push({
+        name: `persona-${name}`,
+        description: `System prompt for the ${name} persona`,
+      });
+    }
+  }
+
+  // Delegate with context prompt
+  prompts.push({
+    name: "delegate-task",
+    description: "Delegate a task with project context automatically injected",
+    arguments: [
+      { name: "message", description: "The task message to delegate", required: true },
+      { name: "skillId", description: "Optional skill ID to target", required: false },
+    ],
+  });
+
+  return { prompts };
+});
+
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  const { name, arguments: promptArgs } = request.params;
+
+  // Persona prompts
+  if (name.startsWith("persona-")) {
+    const personaName = name.replace("persona-", "");
+    const persona = getPersona(personaName);
+    return {
+      messages: [{
+        role: "user" as const,
+        content: { type: "text" as const, text: persona.systemPrompt || `(no system prompt configured for ${personaName})` },
+      }],
+    };
+  }
+
+  // Delegate-task prompt
+  if (name === "delegate-task") {
+    const message = (promptArgs as any)?.message ?? "";
+    const skillId = (promptArgs as any)?.skillId;
+    const preamble = getContextPreamble();
+    const enriched = preamble ? `${preamble}\n\n${message}` : message;
+
+    const parts: string[] = [`Task: ${enriched}`];
+    if (skillId) parts.push(`Target skill: ${skillId}`);
+    parts.push(`\nAvailable workers:\n${workerCards.map(c => `- ${c.name}: ${c.skills.map(s => s.id).join(", ")}`).join("\n")}`);
+
+    return {
+      messages: [{
+        role: "user" as const,
+        content: { type: "text" as const, text: parts.join("\n") },
+      }],
+    };
+  }
+
+  throw new AgentError("TASK_NOT_FOUND", `Prompt not found: ${name}`);
 });
 
 // ── A2A HTTP auth ────────────────────────────────────────────────
@@ -343,6 +733,9 @@ async function startHttpServer() {
     const allSkills: Array<{ id: string; name: string; description: string }> = [
       { id: "delegate", name: "Delegate", description: delegateSkill.description },
       { id: "list_agents", name: "List Agents", description: listAgentsSkill.description },
+      { id: "memory_search", name: "Memory Search", description: memorySearchSkill.description },
+      { id: "memory_list", name: "Memory List", description: memoryListSkill.description },
+      { id: "memory_cleanup", name: "Memory Cleanup", description: memoryCleanupSkill.description },
       ...SKILLS.map(({ id, name, description }) => ({ id, name, description })),
     ];
     for (const card of workerCards) {
@@ -356,12 +749,27 @@ async function startHttpServer() {
       name: "Local A2A Orchestrator",
       description: "MCP + A2A orchestrator with multi-agent workers",
       url: "http://localhost:8080",
-      version: "3.0.0",
-      capabilities: { streaming: false },
+      version: "4.0.0",
+      capabilities: { streaming: true },
       skills: allSkills,
     };
   });
 
+  // Health check for orchestrator itself
+  app.get("/healthz", async () => {
+    const workerStatus: Record<string, boolean> = {};
+    for (const w of WORKERS) {
+      workerStatus[w.name] = workerHealth.get(w.name)?.healthy ?? false;
+    }
+    return {
+      status: "ok",
+      uptime: process.uptime(),
+      workers: workerStatus,
+      tasks: { total: listTasks().length, active: listTasks("working").length },
+    };
+  });
+
+  // tasks/send — create task, execute async, return immediately with status
   app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
@@ -369,7 +777,29 @@ async function startHttpServer() {
     }
 
     const data = request.body;
-    if (data?.method !== "tasks/send") {
+    const method = data?.method;
+
+    // tasks/get — poll task status
+    if (method === "tasks/get") {
+      const taskId = data.params?.id as string;
+      const task = getTask(taskId);
+      if (!task) {
+        return { jsonrpc: "2.0", id: data.id, error: { code: -32602, message: `Task not found: ${taskId}` } };
+      }
+      return { jsonrpc: "2.0", id: data.id, result: toA2AResult(task) };
+    }
+
+    // tasks/cancel
+    if (method === "tasks/cancel") {
+      const taskId = data.params?.id as string;
+      const task = markCanceled(taskId);
+      if (!task) {
+        return { jsonrpc: "2.0", id: data.id, error: { code: -32602, message: `Task not found or already terminal: ${taskId}` } };
+      }
+      return { jsonrpc: "2.0", id: data.id, result: toA2AResult(task) };
+    }
+
+    if (method !== "tasks/send") {
       reply.code(404);
       return { jsonrpc: "2.0", error: { code: -32601, message: "Method not found" } };
     }
@@ -377,53 +807,82 @@ async function startHttpServer() {
     const { skillId, args, message, id: taskId } = data.params ?? {};
     const text: string = message?.parts?.[0]?.text ?? "";
 
-    let resultText: string;
+    // Create task in store
+    const task = createTask({ id: taskId, skillId });
 
-    if (skillId === "delegate") {
-      resultText = await delegate({ ...args, message: text });
-    } else if (skillId === "list_agents") {
-      resultText = JSON.stringify(workerCards, null, 2);
-    } else if (skillId === "list_mcp_servers") {
-      resultText = JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
-    } else if (skillId === "use_mcp_tool") {
-      const toolName = (args?.toolName as string);
-      if (!toolName) { resultText = "use_mcp_tool requires toolName"; }
-      else { resultText = await callMcpTool(toolName, (args?.args ?? {}) as Record<string, unknown>); }
-    } else if (skillId === "get_project_context") {
-      resultText = JSON.stringify(getProjectContext(), null, 2);
-    } else if (skillId === "set_project_context") {
-      resultText = JSON.stringify(setProjectContext(args ?? {}), null, 2);
-    } else if (skillId) {
-      // Check plugin skills first (hot-loaded)
-      const pluginSkill = pluginSkills.get(skillId);
-      if (pluginSkill) {
-        resultText = await pluginSkill.run(args ?? {});
-      } else {
-        // Try local skill
-        const localSkill = SKILL_MAP.get(skillId);
-        if (localSkill) {
-          resultText = await localSkill.run(args ?? { prompt: text, command: text, url: text });
-        } else {
-          // Route to worker
-          const router = buildSkillRouter(workerCards);
-          const url = router.get(skillId);
-          if (url) {
-            resultText = await sendTask(url, { skillId, args, message: { role: "user", parts: [{ text }] } });
-          } else {
-            resultText = `Unknown skill: ${skillId}`;
-          }
-        }
-      }
-    } else {
-      // Auto-delegate
-      resultText = await delegate({ message: text });
-    }
+    // Execute asynchronously (task lifecycle managed by executeTask)
+    executeTask(task, skillId, args ?? {}, text);
 
+    // Return submitted status immediately
     return {
       jsonrpc: "2.0", id: data.id,
-      result: { id: taskId, status: { state: "completed" },
-        artifacts: [{ parts: [{ text: resultText }] }] },
+      result: toA2AResult(task),
     };
+  });
+
+  // SSE streaming endpoint — subscribe to task events
+  app.get<{ Params: { taskId: string } }>("/stream/:taskId", async (request, reply) => {
+    const { taskId } = request.params;
+    const task = getTask(taskId);
+
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    });
+
+    // Send current state
+    if (task) {
+      reply.raw.write(`data: ${JSON.stringify({ type: "state_change", taskId, state: task.state })}\n\n`);
+
+      // If already terminal, send final state and close
+      if (task.state === "completed" || task.state === "failed" || task.state === "canceled") {
+        reply.raw.write(`data: ${JSON.stringify(toA2AResult(task))}\n\n`);
+        reply.raw.end();
+        return;
+      }
+    }
+
+    // Subscribe to task events
+    const handler = (event: any) => {
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+
+      // Close stream on terminal state
+      if (event.state === "completed" || event.state === "failed" || event.state === "canceled") {
+        const finalTask = getTask(taskId);
+        if (finalTask) {
+          reply.raw.write(`data: ${JSON.stringify(toA2AResult(finalTask))}\n\n`);
+        }
+        reply.raw.end();
+        taskEvents.removeListener(`task:${taskId}`, handler);
+      }
+    };
+
+    taskEvents.on(`task:${taskId}`, handler);
+
+    // Cleanup on client disconnect
+    request.raw.on("close", () => {
+      taskEvents.removeListener(`task:${taskId}`, handler);
+    });
+  });
+
+  // SSE streaming endpoint — subscribe to all task events
+  app.get("/stream", async (request, reply) => {
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    });
+
+    const handler = (event: any) => {
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    taskEvents.on("task", handler);
+
+    request.raw.on("close", () => {
+      taskEvents.removeListener("task", handler);
+    });
   });
 
   await app.listen({ port: 8080, host: "0.0.0.0" });
@@ -447,8 +906,8 @@ async function main() {
   // Spawn workers
   spawnWorkers();
 
-  // Wait for workers to start
-  await new Promise(r => setTimeout(r, 1500));
+  // Wait for workers using health checks (replaces hardcoded 1.5s delay)
+  await waitForAllWorkers();
 
   // Discover worker cards
   workerCards = await discoverWorkers();
@@ -456,6 +915,15 @@ async function main() {
   for (const card of workerCards) {
     process.stderr.write(`  - ${card.name}: ${card.skills.map(s => s.id).join(", ")}\n`);
   }
+
+  // Start periodic health monitoring
+  startHealthMonitor();
+
+  // Prune old tasks every hour
+  setInterval(() => {
+    const pruned = pruneTasks(60 * 60 * 1000); // 1 hour
+    if (pruned > 0) process.stderr.write(`[orchestrator] pruned ${pruned} old tasks\n`);
+  }, 60 * 60 * 1000);
 
   // Start HTTP + MCP
   await startHttpServer();
