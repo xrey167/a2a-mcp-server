@@ -338,6 +338,16 @@ async function startHttpServer() {
       resultText = await delegate({ ...args, message: text });
     } else if (skillId === "list_agents") {
       resultText = JSON.stringify(workerCards, null, 2);
+    } else if (skillId === "list_mcp_servers") {
+      resultText = JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
+    } else if (skillId === "use_mcp_tool") {
+      const toolName = (args?.toolName as string);
+      if (!toolName) { resultText = "use_mcp_tool requires toolName"; }
+      else { resultText = await callMcpTool(toolName, (args?.args ?? {}) as Record<string, unknown>); }
+    } else if (skillId === "get_project_context") {
+      resultText = JSON.stringify(getProjectContext(), null, 2);
+    } else if (skillId === "set_project_context") {
+      resultText = JSON.stringify(setProjectContext(args ?? {}), null, 2);
     } else if (skillId) {
       // Try local first
       const localSkill = SKILL_MAP.get(skillId);
