@@ -83,6 +83,13 @@ bun src/server.ts
 | `search_notes` / `list_notes` | Search or list vault notes |
 | `remember` / `recall` | Persistent key-value memory (SQLite + Obsidian dual-write) |
 
+#### Plugins (hot-reloaded, no restart needed)
+
+| Tool | Description |
+|---|---|
+| `get_timestamp` | Current time as ISO 8601 and Unix epoch |
+| `sync_secrets` | Cross-platform credential sync — AES-256-GCM encrypted push/pull of Claude, Gemini, Codex OAuth tokens and MCP API keys via the a2a-server's own memory endpoint |
+
 ### A2A Protocol
 
 Each agent exposes:
@@ -107,12 +114,78 @@ curl -X POST http://localhost:8081/stream \
   -d '{"params":{"skillId":"run_shell","args":{"command":"ping -c 3 1.1.1.1"}}}'
 ```
 
+## Personas
+
+Each agent loads a persona from `src/personas/<agent-name>.md` on startup and hot-reloads on file change (no restart needed). Frontmatter controls `model` and `temperature`; the body is the system prompt.
+
+```markdown
+---
+model: claude-sonnet-4-6
+temperature: 0.3
+---
+You are the orchestrator of a local multi-agent system...
+```
+
+Persona files: `orchestrator`, `shell-agent`, `web-agent`, `ai-agent`, `code-agent`, `knowledge-agent`.
+
+## Plugins
+
+Drop a new skill into `src/plugins/<name>/index.ts` and export `skills: Skill[]` — it loads automatically within seconds.
+
+```typescript
+import type { Skill } from "../../skills.js";
+export const skills: Skill[] = [{
+  id: "my_skill",
+  name: "My Skill",
+  description: "Does something useful",
+  run: async (args) => "result",
+}];
+```
+
+Declarative (prompt-based) skills can also be defined in your Obsidian vault under `_plugins/<name>/plugin.md`.
+
 ## Auth
 
 | Service | Method |
 |---|---|
 | Claude API | `ANTHROPIC_API_KEY` env, or automatic OAuth via Claude Code |
 | OpenAI / Codex | ChatGPT OAuth via `codex login` — stored in `~/.codex/auth.json` |
+| External MCPs | API keys, bearer tokens, or OAuth2 configured in `~/.a2a-mcp-auth.json` |
+
+### External MCP Auth (`~/.a2a-mcp-auth.json`)
+
+```json
+{
+  "my-mcp-server": { "type": "bearer", "token": "tok_..." },
+  "other-server": { "type": "header", "headers": { "X-API-Key": "..." } },
+  "oauth-server": {
+    "type": "oauth2",
+    "accessToken": "...", "refreshToken": "...",
+    "clientId": "...", "clientSecret": "...",
+    "tokenUrl": "https://...", "expiresAt": 1234567890
+  }
+}
+```
+
+### Credential Sync (`sync_secrets`)
+
+Sync OAuth tokens and API keys across machines using the a2a-server's own memory as an encrypted central store:
+
+```bash
+# Configure once per machine
+sync_secrets { action: "configure", serverUrl: "http://your-server:8080", passphrase: "secret" }
+
+# Push from primary machine
+sync_secrets { action: "push" }
+
+# Pull on every new machine
+sync_secrets { action: "pull" }
+
+# Check sync state
+sync_secrets { action: "status" }
+```
+
+Services synced: `~/.claude/credentials.json`, `~/.gemini/oauth_creds.json`, `~/.codex/auth.json`, `~/.a2a-mcp-auth.json`. All encrypted with AES-256-GCM before storage.
 
 ## Adding a Worker
 
