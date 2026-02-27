@@ -317,6 +317,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   throw new Error(`Unknown tool: ${name}`);
 });
 
+// ── A2A HTTP auth ────────────────────────────────────────────────
+// Set A2A_API_KEY env var to require Bearer auth from non-loopback callers.
+// Loopback (127.0.0.1 / ::1) is always trusted so local plugins/workers work.
+const A2A_API_KEY = process.env.A2A_API_KEY ?? undefined;
+
+function isLoopback(ip: string): boolean {
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
+function checkAuth(request: { ip: string; headers: Record<string, string | string[] | undefined> }): boolean {
+  if (!A2A_API_KEY) return true;          // no key set → open (local-only mode)
+  if (isLoopback(request.ip)) return true; // loopback always trusted
+  const auth = request.headers["authorization"];
+  const token = Array.isArray(auth) ? auth[0] : auth;
+  return token === `Bearer ${A2A_API_KEY}`;
+}
+
 // ── A2A HTTP Server ─────────────────────────────────────────────
 async function startHttpServer() {
   const app = Fastify({ logger: false });
@@ -346,6 +363,11 @@ async function startHttpServer() {
   });
 
   app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized — set Authorization: Bearer <A2A_API_KEY>" } };
+    }
+
     const data = request.body;
     if (data?.method !== "tasks/send") {
       reply.code(404);
@@ -404,8 +426,9 @@ async function startHttpServer() {
     };
   });
 
-  await app.listen({ port: 8080, host: "localhost" });
-  process.stderr.write(`[orchestrator] A2A HTTP server on http://localhost:8080\n`);
+  await app.listen({ port: 8080, host: "0.0.0.0" });
+  const authStatus = A2A_API_KEY ? `auth: Bearer required for remote` : `auth: none (set A2A_API_KEY to enable)`;
+  process.stderr.write(`[orchestrator] A2A HTTP server on http://localhost:8080 — ${authStatus}\n`);
 }
 
 // ── Start ───────────────────────────────────────────────────────

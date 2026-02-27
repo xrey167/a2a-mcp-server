@@ -209,6 +209,32 @@ sync_secrets { action: "status" }
 
 Services synced: `~/.claude/credentials.json`, `~/.gemini/oauth_creds.json`, `~/.codex/auth.json`, `~/.a2a-mcp-auth.json`. All encrypted with AES-256-GCM before storage.
 
+## Remote Deployment & Security
+
+The A2A HTTP server binds to `0.0.0.0:8080`. To expose it safely over Tailscale, a VPS, or ngrok:
+
+```bash
+# Set a secret before starting the server
+export A2A_API_KEY="your-secret-key"
+bun src/server.ts
+```
+
+- **Loopback (127.0.0.1 / ::1)** is always trusted — local plugins, workers, and `sync_secrets` continue to work without any header.
+- **All other callers** must send `Authorization: Bearer <A2A_API_KEY>`.
+- If `A2A_API_KEY` is not set, the server runs in open mode (same as before — fine for local-only use).
+
+Combine with `sync_secrets` to push the key to other machines:
+
+```bash
+# On primary machine:
+sync_secrets { action: "configure", passphrase: "encryption-secret" }
+sync_secrets { action: "push" }
+
+# On new machine (after setting SYNC_SERVER_URL):
+sync_secrets { action: "pull" }
+# ~/.a2a-mcp-auth.json now has credentials; set A2A_API_KEY from it
+```
+
 ## Adding a Worker
 
 1. Create `src/workers/<name>.ts` — Fastify on a new port with an `AGENT_CARD` and skill handlers
