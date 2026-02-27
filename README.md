@@ -49,18 +49,39 @@ bun src/server.ts
 
 ### MCP Tools
 
+#### Orchestrator
+
 | Tool | Description |
 |---|---|
-| `delegate` | Route a task to the best worker — by `agentUrl`, `skillId`, or AI auto-pick |
+| `delegate` | Route a task to the best worker — by `agentUrl`, `skillId`, or AI auto-pick. Project context prepended automatically. |
 | `list_agents` | Return all worker agent cards and their skills |
+| `list_mcp_servers` | List all external MCP servers from `~/.claude.json` and their tool counts |
+| `use_mcp_tool` | Call a tool on any external MCP server (lazy-connected on first use) |
+| `get_project_context` | Return the current project context (summary, goals, stack, notes) |
+| `set_project_context` | Set project context injected into every `delegate` call — persisted to Obsidian + cache |
+
+#### System / Web / AI / Data
+
+| Tool | Description |
+|---|---|
 | `run_shell` | Execute a shell command |
+| `read_file` / `write_file` | Read or write a file |
 | `fetch_url` | Fetch content from a URL |
+| `call_api` | HTTP request with method, headers, JSON body |
 | `ask_claude` | Send a prompt to Claude (OAuth or API key) |
+| `search_files` | Glob file search |
+| `query_sqlite` | Read-only SQL query against a `.db` file |
+| `call_a2a_agent` | Send a task directly to any A2A agent URL |
+
+#### Workers (also callable directly)
+
+| Tool | Description |
+|---|---|
 | `codex_exec` | Execute a coding task via OpenAI Codex |
-| `create_note` | Create a note in the Obsidian vault |
-| `search_notes` | Full-text search across all vault notes |
-| `remember` / `recall` | Persistent key-value memory |
-| *(+ all worker skills directly)* | |
+| `codex_review` | Code review via Codex CLI |
+| `create_note` / `read_note` / `update_note` | Manage notes in the Obsidian vault |
+| `search_notes` / `list_notes` | Search or list vault notes |
+| `remember` / `recall` | Persistent key-value memory (SQLite + Obsidian dual-write) |
 
 ### A2A Protocol
 
