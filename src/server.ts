@@ -28,16 +28,23 @@ const WORKERS = [
 const workerProcs: Array<ReturnType<typeof Bun.spawn>> = [];
 let workerCards: AgentCard[] = [];
 
-// ── Spawn workers ───────────────────────────────────────────────
+// ── Spawn workers (with auto-respawn) ───────────────────────────
+function spawnWorker(w: typeof WORKERS[number]) {
+  const proc = Bun.spawn(["bun", w.path], {
+    stderr: "inherit",
+    stdout: "ignore",
+  });
+  workerProcs.push(proc);
+  process.stderr.write(`[orchestrator] spawned ${w.name} (pid ${proc.pid})\n`);
+  // Auto-respawn on exit
+  proc.exited.then(() => {
+    process.stderr.write(`[orchestrator] ${w.name} exited — respawning in 2s\n`);
+    setTimeout(() => spawnWorker(w), 2000);
+  });
+}
+
 function spawnWorkers() {
-  for (const w of WORKERS) {
-    const proc = Bun.spawn(["bun", w.path], {
-      stderr: "inherit",
-      stdout: "ignore",
-    });
-    workerProcs.push(proc);
-    process.stderr.write(`[orchestrator] spawned ${w.name} (pid ${proc.pid})\n`);
-  }
+  for (const w of WORKERS) spawnWorker(w);
 }
 
 async function discoverWorkers(): Promise<AgentCard[]> {

@@ -28,8 +28,8 @@ const AGENT_CARD = {
 function runClaudeCLI(prompt: string, model: string): string {
   const result = spawnSync(
     "claude",
-    ["-p", prompt, "--model", model, "--output-format", "text"],
-    { encoding: "utf-8", timeout: 30_000, env: { ...process.env, CLAUDECODE: undefined } as NodeJS.ProcessEnv }
+    ["-p", prompt, "--model", model, "--output-format", "text", "--dangerously-skip-permissions"],
+    { encoding: "utf-8", timeout: 60_000, env: { ...process.env, CLAUDECODE: undefined } as NodeJS.ProcessEnv }
   );
   if (result.error) throw new Error(result.error.message);
   if (result.status !== 0) throw new Error(result.stderr || "claude CLI failed");
