@@ -89,6 +89,7 @@ bun src/server.ts
 |---|---|
 | `get_timestamp` | Current time as ISO 8601 and Unix epoch |
 | `sync_secrets` | Cross-platform credential sync — AES-256-GCM encrypted push/pull of Claude, Gemini, Codex OAuth tokens and MCP API keys via the a2a-server's own memory endpoint |
+| `oauth_setup` | Browser OAuth2 flow for any provider (Google, GitHub, Linear). Opens browser, captures redirect, exchanges code for tokens, saves to `~/.a2a-mcp-auth.json`. Actions: start, refresh, list, revoke. |
 
 ### A2A Protocol
 
@@ -166,6 +167,27 @@ Declarative (prompt-based) skills can also be defined in your Obsidian vault und
   }
 }
 ```
+
+### OAuth Setup (`oauth_setup`)
+
+Authenticate to any OAuth2 MCP server without leaving Claude:
+
+```bash
+# Google OAuth for Stitch (requires Google Cloud OAuth2 client)
+oauth_setup { action: "start", provider: "google", serverName: "stitch",
+              clientId: "YOUR_CLIENT_ID.apps.googleusercontent.com",
+              clientSecret: "YOUR_CLIENT_SECRET" }
+
+# Refresh an expired token automatically
+oauth_setup { action: "refresh", serverName: "stitch" }
+
+# List all stored credentials
+oauth_setup { action: "list" }
+```
+
+Flow: opens browser → user authenticates → redirect captured at `http://localhost:9876/callback` → tokens saved to `~/.a2a-mcp-auth.json`. The `mcp-auth.ts` layer auto-refreshes expired tokens on every `use_mcp_tool` call.
+
+For Google/Stitch you need a Google Cloud project with the Cloud Platform API enabled and an OAuth2 web client with `http://localhost:9876/callback` as an authorized redirect URI.
 
 ### Credential Sync (`sync_secrets`)
 
