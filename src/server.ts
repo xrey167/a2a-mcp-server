@@ -36,26 +36,35 @@ const WORKERS = [
   { name: "knowledge", path: join(__dirname, "workers/knowledge.ts"), port: 8085 },
 ];
 
-const workerProcs: Array<ReturnType<typeof Bun.spawn>> = [];
+const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 let workerCards: AgentCard[] = [];
 
 // Track worker health status
 const workerHealth = new Map<string, { healthy: boolean; failCount: number; lastCheck: number }>();
 
+// Cached skill router — rebuilt when worker cards change
+let skillRouterCache: Map<string, string> | null = null;
+
 // ── Spawn workers (with auto-respawn) ───────────────────────────
+const respawning = new Set<string>();
+
 function spawnWorker(w: typeof WORKERS[number]) {
   const proc = Bun.spawn(["bun", w.path], {
     stderr: "inherit",
     stdout: "ignore",
   });
-  workerProcs.push(proc);
+  workerProcs.set(w.name, proc);
   process.stderr.write(`[orchestrator] spawned ${w.name} (pid ${proc.pid})\n`);
   // Auto-respawn on exit
   proc.exited.then(() => {
+    if (respawning.has(w.name)) return; // prevent multiple respawn attempts
+    respawning.add(w.name);
     process.stderr.write(`[orchestrator] ${w.name} exited — respawning in 2s\n`);
     workerHealth.set(w.name, { healthy: false, failCount: 0, lastCheck: Date.now() });
+    invalidateSkillRouter();
     setTimeout(() => {
       spawnWorker(w);
+      respawning.delete(w.name);
       // Re-discover after respawn
       setTimeout(async () => {
         try {
@@ -64,6 +73,7 @@ function spawnWorker(w: typeof WORKERS[number]) {
           workerCards = workerCards.filter(c => c.url !== card.url);
           workerCards.push(card);
           workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
+          invalidateSkillRouter();
           process.stderr.write(`[orchestrator] re-discovered ${w.name} after respawn\n`);
         } catch {
           process.stderr.write(`[orchestrator] failed to re-discover ${w.name} after respawn\n`);
@@ -127,17 +137,26 @@ function startHealthMonitor() {
       } catch {
         const prev = workerHealth.get(w.name) ?? { healthy: true, failCount: 0, lastCheck: 0 };
         const failCount = prev.failCount + 1;
-        workerHealth.set(w.name, { healthy: failCount < 3, failCount, lastCheck: Date.now() });
-        if (failCount === 3) {
+        const wasHealthy = prev.healthy;
+        const nowHealthy = failCount < 3;
+        workerHealth.set(w.name, { healthy: nowHealthy, failCount, lastCheck: Date.now() });
+        if (wasHealthy && !nowHealthy) {
           process.stderr.write(`[orchestrator] ${w.name} marked unhealthy (3 consecutive failures)\n`);
+          invalidateSkillRouter();
         }
       }
     }
   }, 30_000);
 }
 
-// ── Build skill-to-worker map ───────────────────────────────────
+// ── Build skill-to-worker map (cached) ──────────────────────────
+function invalidateSkillRouter() {
+  skillRouterCache = null;
+}
+
 function buildSkillRouter(cards: AgentCard[]): Map<string, string> {
+  if (skillRouterCache) return skillRouterCache;
+
   const map = new Map<string, string>();
   for (const card of cards) {
     // Skip unhealthy workers
@@ -148,6 +167,7 @@ function buildSkillRouter(cards: AgentCard[]): Map<string, string> {
       map.set(skill.id, card.url);
     }
   }
+  skillRouterCache = map;
   return map;
 }
 
@@ -761,7 +781,9 @@ async function startHttpServer() {
     const task = createTask({ id: taskId, skillId });
 
     // Execute asynchronously (task lifecycle managed by executeTask)
-    executeTask(task, skillId, args ?? {}, text);
+    executeTask(task, skillId, args ?? {}, text).catch((err) => {
+      process.stderr.write(`[orchestrator] unhandled executeTask error taskId=${task.id}: ${err}\n`);
+    });
 
     // Return submitted status immediately
     return {
@@ -775,35 +797,50 @@ async function startHttpServer() {
     const { taskId } = request.params;
     const task = getTask(taskId);
 
+    // Return 404 for non-existent tasks instead of subscribing indefinitely
+    if (!task) {
+      reply.code(404);
+      return { error: "Task not found", taskId };
+    }
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
     });
 
-    // Send current state
-    if (task) {
-      reply.raw.write(`data: ${JSON.stringify({ type: "state_change", taskId, state: task.state })}\n\n`);
-
-      // If already terminal, send final state and close
-      if (task.state === "completed" || task.state === "failed" || task.state === "canceled") {
-        reply.raw.write(`data: ${JSON.stringify(toA2AResult(task))}\n\n`);
-        reply.raw.end();
-        return;
+    /** Safe write — catches errors from closed/broken connections */
+    function safeWrite(data: string): boolean {
+      try {
+        reply.raw.write(data);
+        return true;
+      } catch {
+        return false;
       }
+    }
+
+    // Send current state
+    safeWrite(`data: ${JSON.stringify({ type: "state_change", taskId, state: task.state })}\n\n`);
+
+    // If already terminal, send final state and close
+    if (task.state === "completed" || task.state === "failed" || task.state === "canceled") {
+      safeWrite(`data: ${JSON.stringify(toA2AResult(task))}\n\n`);
+      reply.raw.end();
+      return;
     }
 
     // Subscribe to task events
     const handler = (event: any) => {
-      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      if (!safeWrite(`data: ${JSON.stringify(event)}\n\n`)) {
+        taskEvents.removeListener(`task:${taskId}`, handler);
+        return;
+      }
 
       // Close stream on terminal state
       if (event.state === "completed" || event.state === "failed" || event.state === "canceled") {
-        const finalTask = getTask(taskId);
-        if (finalTask) {
-          reply.raw.write(`data: ${JSON.stringify(toA2AResult(finalTask))}\n\n`);
-        }
-        reply.raw.end();
+        // Use event data directly to avoid race condition with pruning
+        safeWrite(`data: ${JSON.stringify({ type: "final", taskId, state: event.state, result: event.result ?? event.error })}\n\n`);
+        try { reply.raw.end(); } catch {}
         taskEvents.removeListener(`task:${taskId}`, handler);
       }
     };
@@ -825,7 +862,12 @@ async function startHttpServer() {
     });
 
     const handler = (event: any) => {
-      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      try {
+        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      } catch {
+        // Client disconnected — remove listener
+        taskEvents.removeListener("task", handler);
+      }
     };
 
     taskEvents.on("task", handler);
@@ -869,11 +911,13 @@ async function main() {
   // Start periodic health monitoring
   startHealthMonitor();
 
-  // Prune old tasks every hour
+  // Prune old tasks periodically (configurable via TASK_RETENTION_HOURS, default: 1 hour)
+  const retentionHours = parseFloat(process.env.TASK_RETENTION_HOURS ?? "1");
+  const retentionMs = retentionHours * 60 * 60 * 1000;
   setInterval(() => {
-    const pruned = pruneTasks(60 * 60 * 1000); // 1 hour
-    if (pruned > 0) process.stderr.write(`[orchestrator] pruned ${pruned} old tasks\n`);
-  }, 60 * 60 * 1000);
+    const pruned = pruneTasks(retentionMs);
+    if (pruned > 0) process.stderr.write(`[orchestrator] pruned ${pruned} old tasks (retention: ${retentionHours}h)\n`);
+  }, retentionMs);
 
   // Start HTTP + MCP
   await startHttpServer();
@@ -882,17 +926,21 @@ async function main() {
 }
 
 // Cleanup on exit
+function killAllWorkers() {
+  for (const proc of workerProcs.values()) proc.kill();
+}
+
 process.on("SIGINT", () => {
-  for (const proc of workerProcs) proc.kill();
+  killAllWorkers();
   process.exit(0);
 });
 process.on("SIGTERM", () => {
-  for (const proc of workerProcs) proc.kill();
+  killAllWorkers();
   process.exit(0);
 });
 
 main().catch((err) => {
   process.stderr.write(`Fatal error: ${err}\n`);
-  for (const proc of workerProcs) proc.kill();
+  killAllWorkers();
   process.exit(1);
 });
