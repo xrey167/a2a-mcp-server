@@ -12,6 +12,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { getAuthHeaders } from "./mcp-auth.js";
 
 const CLAUDE_JSON = join(homedir(), ".claude.json");
 const MANIFEST_PATH = join(homedir(), ".a2a-mcp-manifest.json");
@@ -100,16 +101,25 @@ async function connectServer(name: string): Promise<Client> {
 
   const client = new Client({ name: `a2a-proxy-${name}`, version: "1.0.0" });
 
+  // Merge static config headers with dynamic auth headers (mcp-auth.ts)
+  const authHeaders = await getAuthHeaders(name);
+
   let transport;
   if (cfg.type === "stdio") {
+    // For stdio, inject bearer token as env var if auth is configured
+    const bearerToken = authHeaders["Authorization"]?.replace("Bearer ", "");
     transport = new StdioClientTransport({
       command: cfg.command,
       args: cfg.args ?? [],
-      env: { ...process.env, ...(cfg.env ?? {}) } as Record<string, string>,
+      env: {
+        ...process.env,
+        ...(cfg.env ?? {}),
+        ...(bearerToken ? { MCP_AUTH_TOKEN: bearerToken } : {}),
+      } as Record<string, string>,
     });
   } else {
     transport = new StreamableHTTPClientTransport(new URL(cfg.url), {
-      requestInit: { headers: cfg.headers ?? {} },
+      requestInit: { headers: { ...(cfg.headers ?? {}), ...authHeaders } },
     });
   }
 

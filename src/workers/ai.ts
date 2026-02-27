@@ -4,6 +4,8 @@ import { spawnSync } from "child_process";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
 import { memory } from "../memory.js";
+import { getPersona, watchPersonas } from "../persona-loader.js";
+import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
 
 const PORT = 8083;
 const NAME = "ai-agent";
@@ -38,11 +40,13 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
   switch (skillId) {
     case "ask_claude": {
       const prompt = (args.prompt as string) ?? text;
-      const model = (args.model as string) ?? "claude-sonnet-4-6";
+      const persona = getPersona(NAME);
+      const model = (args.model as string) ?? persona.model;
       try {
         const client = new Anthropic();
         const message = await client.messages.create({
           model, max_tokens: 1024,
+          system: persona.systemPrompt || undefined,
           messages: [{ role: "user", content: prompt }],
         });
         const block = message.content[0];
@@ -83,8 +87,12 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       if (key) return memory.get(NAME, key) ?? `No memory found for key: ${key}`;
       return JSON.stringify(memory.all(NAME), null, 2);
     }
-    default:
+    default: {
+      // Check dynamically loaded plugin skills
+      const plugin = pluginSkills.get(skillId);
+      if (plugin) return plugin.run(args);
       return `Unknown skill: ${skillId}`;
+    }
   }
 }
 
@@ -110,6 +118,11 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
       artifacts: [{ parts: [{ text: resultText }] }] },
   };
 });
+
+// Init persona + plugin hot-reload
+getPersona(NAME); // warm cache
+watchPersonas();
+initPlugins().then(() => watchPlugins());
 
 app.listen({ port: PORT, host: "localhost" }).then(() => {
   process.stderr.write(`[${NAME}] listening on http://localhost:${PORT}\n`);

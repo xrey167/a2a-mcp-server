@@ -11,6 +11,8 @@ import { SKILLS, SKILL_MAP } from "./skills.js";
 import { sendTask, discoverAgent, type AgentCard } from "./a2a.js";
 import { initRegistry, listMcpServers, listMcpTools, callMcpTool, refreshManifest } from "./mcp-registry.js";
 import { getProjectContext, setProjectContext, getContextPreamble } from "./context.js";
+import { initPlugins, watchPlugins, pluginSkills } from "./skill-loader.js";
+import { getPersona, watchPersonas } from "./persona-loader.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -96,12 +98,13 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
     return `No worker found with skill: ${skillId}`;
   }
 
-  // 3. Auto-route via ask_claude
+  // 3. Auto-route via ask_claude (using orchestrator persona)
+  const orchestratorPersona = getPersona("orchestrator");
   const cardsJson = JSON.stringify(workerCards.map(c => ({
     name: c.name, url: c.url,
     skills: c.skills.map(s => s.id),
   })));
-  const prompt = `Workers: ${cardsJson}. Task: ${message}. Reply JSON only: {"url":"...","skillId":"..."}`;
+  const prompt = `${orchestratorPersona.systemPrompt}\n\nWorkers: ${cardsJson}. Task: ${message}. Reply JSON only: {"url":"...","skillId":"..."}`;
 
   // Try to find ai worker
   const aiUrl = workerCards.find(c => c.name === "ai-agent")?.url;
@@ -210,6 +213,12 @@ function getAllToolDefs() {
     ...SKILLS.map(s => ({ name: s.id, description: s.description, inputSchema: s.inputSchema })),
   ];
 
+  // Plugin skills (dynamically loaded from src/plugins/ and vault _plugins/)
+  for (const skill of pluginSkills.values()) {
+    if (tools.some(t => t.name === skill.id)) continue;
+    tools.push({ name: skill.id, description: `[plugin] ${skill.description}`, inputSchema: skill.inputSchema });
+  }
+
   // Also expose worker skills directly
   for (const card of workerCards) {
     for (const skill of card.skills) {
@@ -269,6 +278,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === "set_project_context") {
     const updated = setProjectContext(args as any ?? {});
     return { content: [{ type: "text", text: `Project context updated:\n${JSON.stringify(updated, null, 2)}` }] };
+  }
+
+  // plugin skill
+  const pluginSkill = pluginSkills.get(name);
+  if (pluginSkill) {
+    const result = await pluginSkill.run(args ?? {});
+    return { content: [{ type: "text", text: result }] };
   }
 
   // local skill (backwards compat)
@@ -349,18 +365,24 @@ async function startHttpServer() {
     } else if (skillId === "set_project_context") {
       resultText = JSON.stringify(setProjectContext(args ?? {}), null, 2);
     } else if (skillId) {
-      // Try local first
-      const localSkill = SKILL_MAP.get(skillId);
-      if (localSkill) {
-        resultText = await localSkill.run(args ?? { prompt: text, command: text, url: text });
+      // Check plugin skills first (hot-loaded)
+      const pluginSkill = pluginSkills.get(skillId);
+      if (pluginSkill) {
+        resultText = await pluginSkill.run(args ?? {});
       } else {
-        // Route to worker
-        const router = buildSkillRouter(workerCards);
-        const url = router.get(skillId);
-        if (url) {
-          resultText = await sendTask(url, { skillId, args, message: { role: "user", parts: [{ text }] } });
+        // Try local skill
+        const localSkill = SKILL_MAP.get(skillId);
+        if (localSkill) {
+          resultText = await localSkill.run(args ?? { prompt: text, command: text, url: text });
         } else {
-          resultText = `Unknown skill: ${skillId}`;
+          // Route to worker
+          const router = buildSkillRouter(workerCards);
+          const url = router.get(skillId);
+          if (url) {
+            resultText = await sendTask(url, { skillId, args, message: { role: "user", parts: [{ text }] } });
+          } else {
+            resultText = `Unknown skill: ${skillId}`;
+          }
         }
       }
     } else {
@@ -383,6 +405,14 @@ async function startHttpServer() {
 async function main() {
   // Init external MCP registry (reads ~/.claude.json, builds manifest, no connections yet)
   await initRegistry();
+
+  // Init personas + plugin skills with hot-reload
+  getPersona("orchestrator"); // warm cache
+  watchPersonas();
+  await initPlugins();
+  watchPlugins(() => {
+    process.stderr.write(`[orchestrator] plugin skills reloaded: ${pluginSkills.size} total\n`);
+  });
 
   // Spawn workers
   spawnWorkers();
