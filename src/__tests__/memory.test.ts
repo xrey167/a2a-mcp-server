@@ -89,21 +89,40 @@ describe("Memory - listKeys", () => {
 });
 
 describe("Memory - cleanup", () => {
-  test("cleanup removes old entries", () => {
-    // Set up a fresh key
-    memory.set(TEST_AGENT, "cleanup_recent", "still here");
-
-    // cleanup with 0 days should remove everything (all timestamps are in the past or present)
-    // But since we just wrote, it should be recent enough
-    const removed = memory.cleanup(0);
-    // All items should be removed since 0 days means "anything older than now"
-    expect(removed).toBeGreaterThanOrEqual(0);
-  });
-
   test("cleanup with large maxAge keeps recent entries", () => {
     memory.set(TEST_AGENT, "cleanup_keep", "keep me");
     const removed = memory.cleanup(365); // 365 days
-    // Should not remove the entry we just wrote
+    // Should not remove the entry we just wrote (it's seconds old, not 365 days)
     expect(memory.get(TEST_AGENT, "cleanup_keep")).toBe("keep me");
+  });
+
+  test("cleanup with zero days removes all entries", () => {
+    // Write a known entry, verify it exists
+    const uniqueKey = `cleanup_zero_${Date.now()}`;
+    memory.set(TEST_AGENT, uniqueKey, "ephemeral");
+    expect(memory.get(TEST_AGENT, uniqueKey)).toBe("ephemeral");
+
+    // Wait 1.1 seconds so the unixepoch timestamp is strictly in the past
+    Bun.sleepSync(1100);
+
+    const removed = memory.cleanup(0);
+    expect(removed).toBeGreaterThanOrEqual(1);
+    // The entry should now be gone
+    expect(memory.get(TEST_AGENT, uniqueKey)).toBeNull();
+  });
+});
+
+describe("Memory - path safety", () => {
+  test("noteFile sanitizes path traversal in agent name", () => {
+    // This should not throw or create files outside MEMORY_DIR
+    memory.set("../../../etc", "test_key_safety", "safe value");
+    expect(memory.get("../../../etc", "test_key_safety")).toBe("safe value");
+    memory.forget("../../../etc", "test_key_safety");
+  });
+
+  test("noteFile sanitizes path traversal in key", () => {
+    memory.set(TEST_AGENT, "../../passwd", "safe value");
+    expect(memory.get(TEST_AGENT, "../../passwd")).toBe("safe value");
+    memory.forget(TEST_AGENT, "../../passwd");
   });
 });

@@ -151,6 +151,21 @@ function buildSkillRouter(cards: AgentCard[]): Map<string, string> {
   return map;
 }
 
+// ── URL validation (SSRF prevention) ────────────────────────────
+/** Only allow HTTP URLs pointing to known localhost worker ports or the orchestrator. */
+function isAllowedUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") return false;
+    const port = parseInt(parsed.port || "80", 10);
+    const allowedPorts = new Set([8080, ...WORKERS.map(w => w.port)]);
+    return allowedPorts.has(port);
+  } catch {
+    return false;
+  }
+}
+
 // ── Delegate skill ──────────────────────────────────────────────
 async function delegate(args: Record<string, unknown>): Promise<string> {
   const agentUrl = args.agentUrl as string | undefined;
@@ -166,8 +181,11 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
   const msgPayload = { role: "user", parts: [{ text: enrichedMessage }] };
 
   try {
-    // 1. Direct URL
+    // 1. Direct URL (validated against allowed worker URLs)
     if (agentUrl) {
+      if (!isAllowedUrl(agentUrl)) {
+        throw new AgentError("ROUTING_ERROR", `URL not allowed: ${agentUrl}. Only localhost worker URLs are permitted.`);
+      }
       const result = await sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload });
       logRequest(skillId ?? "delegate", agentUrl, "completed", Date.now() - startTime);
       return result;
@@ -211,6 +229,11 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
       try {
         const parsed = JSON.parse(response);
         if (parsed.url && parsed.skillId) {
+          // Validate AI-generated URL to prevent SSRF
+          if (!isAllowedUrl(parsed.url)) {
+            process.stderr.write(`[orchestrator] AI auto-route returned disallowed URL: ${parsed.url}\n`);
+            return `Error: AI suggested a URL that is not a known worker: ${parsed.url}`;
+          }
           const result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload });
           logRequest(parsed.skillId, parsed.url, "completed", Date.now() - startTime);
           return result;
@@ -230,6 +253,66 @@ function logRequest(skill: string, worker: string, status: string, durationMs: n
   process.stderr.write(`[orchestrator] skill=${skill} worker=${worker} → ${status} (${durationMs}ms)\n`);
 }
 
+// ── Centralized skill dispatch ──────────────────────────────────
+/** Dispatch a skill by name with args and fallback text. Used by both MCP and A2A handlers. */
+async function dispatchSkill(skillId: string | undefined, args: Record<string, unknown>, text: string): Promise<string> {
+  if (skillId === "delegate") {
+    return delegate({ ...args, message: text });
+  }
+  if (skillId === "list_agents") {
+    return JSON.stringify(workerCards, null, 2);
+  }
+  if (skillId === "list_mcp_servers") {
+    return JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
+  }
+  if (skillId === "use_mcp_tool") {
+    const toolName = (args?.toolName as string);
+    if (!toolName) throw new AgentError("INVALID_ARGS", "use_mcp_tool requires toolName");
+    return callMcpTool(toolName, (args?.args ?? {}) as Record<string, unknown>);
+  }
+  if (skillId === "get_project_context") {
+    return JSON.stringify(getProjectContext(), null, 2);
+  }
+  if (skillId === "set_project_context") {
+    return JSON.stringify(setProjectContext(args ?? {}), null, 2);
+  }
+  if (skillId === "memory_search") {
+    const query = (args?.query as string) ?? text;
+    const agent = args?.agent as string | undefined;
+    if (!query) throw new AgentError("INVALID_ARGS", "memory_search requires query");
+    return JSON.stringify(memory.search(query, agent), null, 2);
+  }
+  if (skillId === "memory_list") {
+    const agent = (args?.agent as string) ?? "";
+    const prefix = args?.prefix as string | undefined;
+    if (!agent) throw new AgentError("INVALID_ARGS", "memory_list requires agent");
+    return JSON.stringify(memory.listKeys(agent, prefix), null, 2);
+  }
+  if (skillId === "memory_cleanup") {
+    const maxAgeDays = (args?.maxAgeDays as number) ?? 30;
+    const count = memory.cleanup(maxAgeDays);
+    return `Cleaned up ${count} memories older than ${maxAgeDays} days`;
+  }
+  if (skillId) {
+    // Check plugin skills first (hot-loaded)
+    const pluginSkill = pluginSkills.get(skillId);
+    if (pluginSkill) return pluginSkill.run(args ?? {});
+
+    // Try local skill (backwards compat)
+    const localSkill = SKILL_MAP.get(skillId);
+    if (localSkill) return localSkill.run(args ?? { prompt: text, command: text, url: text });
+
+    // Route to worker
+    const router = buildSkillRouter(workerCards);
+    const url = router.get(skillId);
+    if (url) return sendTask(url, { skillId, args, message: { role: "user", parts: [{ text }] } });
+
+    throw new SkillNotFoundError(skillId);
+  }
+  // Auto-delegate
+  return delegate({ message: text });
+}
+
 // ── Execute a task with full lifecycle ──────────────────────────
 async function executeTask(
   task: Task,
@@ -240,62 +323,7 @@ async function executeTask(
   markWorking(task.id);
 
   try {
-    let resultText: string;
-
-    if (skillId === "delegate") {
-      resultText = await delegate({ ...args, message: text });
-    } else if (skillId === "list_agents") {
-      resultText = JSON.stringify(workerCards, null, 2);
-    } else if (skillId === "list_mcp_servers") {
-      resultText = JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
-    } else if (skillId === "use_mcp_tool") {
-      const toolName = (args?.toolName as string);
-      if (!toolName) throw new AgentError("INVALID_ARGS", "use_mcp_tool requires toolName");
-      resultText = await callMcpTool(toolName, (args?.args ?? {}) as Record<string, unknown>);
-    } else if (skillId === "get_project_context") {
-      resultText = JSON.stringify(getProjectContext(), null, 2);
-    } else if (skillId === "set_project_context") {
-      resultText = JSON.stringify(setProjectContext(args ?? {}), null, 2);
-    } else if (skillId === "memory_search") {
-      const query = (args?.query as string) ?? text;
-      const agent = args?.agent as string | undefined;
-      if (!query) throw new AgentError("INVALID_ARGS", "memory_search requires query");
-      resultText = JSON.stringify(memory.search(query, agent), null, 2);
-    } else if (skillId === "memory_list") {
-      const agent = (args?.agent as string) ?? "";
-      const prefix = args?.prefix as string | undefined;
-      if (!agent) throw new AgentError("INVALID_ARGS", "memory_list requires agent");
-      resultText = JSON.stringify(memory.listKeys(agent, prefix), null, 2);
-    } else if (skillId === "memory_cleanup") {
-      const maxAgeDays = (args?.maxAgeDays as number) ?? 30;
-      const count = memory.cleanup(maxAgeDays);
-      resultText = `Cleaned up ${count} memories older than ${maxAgeDays} days`;
-    } else if (skillId) {
-      // Check plugin skills first (hot-loaded)
-      const pluginSkill = pluginSkills.get(skillId);
-      if (pluginSkill) {
-        resultText = await pluginSkill.run(args ?? {});
-      } else {
-        // Try local skill
-        const localSkill = SKILL_MAP.get(skillId);
-        if (localSkill) {
-          resultText = await localSkill.run(args ?? { prompt: text, command: text, url: text });
-        } else {
-          // Route to worker
-          const router = buildSkillRouter(workerCards);
-          const url = router.get(skillId);
-          if (url) {
-            resultText = await sendTask(url, { skillId, args, message: { role: "user", parts: [{ text }] } });
-          } else {
-            throw new SkillNotFoundError(skillId);
-          }
-        }
-      }
-    } else {
-      // Auto-delegate
-      resultText = await delegate({ message: text });
-    }
-
+    const resultText = await dispatchSkill(skillId, args, text);
     markCompleted(task.id, resultText);
   } catch (err) {
     markFailed(task.id, toStatusError(err));
@@ -464,95 +492,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   const startTime = Date.now();
+  const text = (args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "";
 
   try {
-    // delegate
-    if (name === "delegate") {
-      const result = await delegate(args ?? {});
-      return { content: [{ type: "text", text: result }] };
-    }
-
-    // list_agents
-    if (name === "list_agents") {
-      return { content: [{ type: "text", text: JSON.stringify(workerCards, null, 2) }] };
-    }
-
-    // list_mcp_servers
-    if (name === "list_mcp_servers") {
-      const servers = listMcpServers();
-      const tools = listMcpTools();
-      return { content: [{ type: "text", text: JSON.stringify({ servers, tools }, null, 2) }] };
-    }
-
-    // use_mcp_tool
-    if (name === "use_mcp_tool") {
-      const toolName = (args as any)?.toolName as string;
-      const toolArgs = ((args as any)?.args ?? {}) as Record<string, unknown>;
-      if (!toolName) throw new AgentError("INVALID_ARGS", "use_mcp_tool requires toolName");
-      const result = await callMcpTool(toolName, toolArgs);
-      return { content: [{ type: "text", text: result }] };
-    }
-
-    // get_project_context
-    if (name === "get_project_context") {
-      return { content: [{ type: "text", text: JSON.stringify(getProjectContext(), null, 2) }] };
-    }
-
-    // set_project_context
-    if (name === "set_project_context") {
-      const updated = setProjectContext(args as any ?? {});
-      return { content: [{ type: "text", text: `Project context updated:\n${JSON.stringify(updated, null, 2)}` }] };
-    }
-
-    // memory tools
-    if (name === "memory_search") {
-      const query = (args as any)?.query as string;
-      const agent = (args as any)?.agent as string | undefined;
-      if (!query) throw new AgentError("INVALID_ARGS", "memory_search requires query");
-      return { content: [{ type: "text", text: JSON.stringify(memory.search(query, agent), null, 2) }] };
-    }
-
-    if (name === "memory_list") {
-      const agent = (args as any)?.agent as string;
-      const prefix = (args as any)?.prefix as string | undefined;
-      if (!agent) throw new AgentError("INVALID_ARGS", "memory_list requires agent");
-      return { content: [{ type: "text", text: JSON.stringify(memory.listKeys(agent, prefix), null, 2) }] };
-    }
-
-    if (name === "memory_cleanup") {
-      const maxAgeDays = ((args as any)?.maxAgeDays as number) ?? 30;
-      const count = memory.cleanup(maxAgeDays);
-      return { content: [{ type: "text", text: `Cleaned up ${count} memories older than ${maxAgeDays} days` }] };
-    }
-
-    // plugin skill
-    const pluginSkill = pluginSkills.get(name);
-    if (pluginSkill) {
-      const result = await pluginSkill.run(args ?? {});
-      return { content: [{ type: "text", text: result }] };
-    }
-
-    // local skill (backwards compat)
-    const localSkill = SKILL_MAP.get(name);
-    if (localSkill) {
-      const result = await localSkill.run(args ?? {});
-      return { content: [{ type: "text", text: result }] };
-    }
-
-    // route to worker by skill id
-    const router = buildSkillRouter(workerCards);
-    const workerUrl = router.get(name);
-    if (workerUrl) {
-      const message = (args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "";
-      const result = await sendTask(workerUrl, {
-        skillId: name,
-        args: (args ?? {}) as Record<string, unknown>,
-        message: { role: "user", parts: [{ text: String(message) }] },
-      });
-      return { content: [{ type: "text", text: result }] };
-    }
-
-    throw new SkillNotFoundError(name);
+    const result = await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, String(text));
+    return { content: [{ type: "text", text: result }] };
   } catch (err) {
     const errMsg = err instanceof AgentError ? `[${err.code}] ${err.message}` : String(err);
     process.stderr.write(`[orchestrator] MCP tool=${name} → error (${Date.now() - startTime}ms): ${errMsg}\n`);
@@ -631,13 +575,13 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   if (workerMatch) {
     const name = decodeURIComponent(workerMatch[1]);
     const card = workerCards.find(c => c.name === name);
-    if (!card) throw new AgentError("TASK_NOT_FOUND", `Worker not found: ${name}`);
+    if (!card) throw new AgentError("ROUTING_ERROR", `Worker not found: ${name}`);
     return {
       contents: [{ uri, mimeType: "application/json", text: JSON.stringify(card, null, 2) }],
     };
   }
 
-  throw new AgentError("TASK_NOT_FOUND", `Resource not found: ${uri}`);
+  throw new AgentError("ROUTING_ERROR", `Resource not found: ${uri}`);
 });
 
 // ── MCP Prompts ─────────────────────────────────────────────────
@@ -673,9 +617,15 @@ server.setRequestHandler(ListPromptsRequestSchema, async () => {
 server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   const { name, arguments: promptArgs } = request.params;
 
+  // Allowed persona names (prevents path traversal via persona-../../etc/passwd)
+  const ALLOWED_PERSONAS = new Set(["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent"]);
+
   // Persona prompts
   if (name.startsWith("persona-")) {
     const personaName = name.replace("persona-", "");
+    if (!ALLOWED_PERSONAS.has(personaName)) {
+      throw new AgentError("INVALID_ARGS", `Unknown persona: ${personaName}`);
+    }
     const persona = getPersona(personaName);
     return {
       messages: [{
@@ -704,7 +654,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
     };
   }
 
-  throw new AgentError("TASK_NOT_FOUND", `Prompt not found: ${name}`);
+  throw new AgentError("ROUTING_ERROR", `Prompt not found: ${name}`);
 });
 
 // ── A2A HTTP auth ────────────────────────────────────────────────

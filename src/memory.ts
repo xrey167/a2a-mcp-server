@@ -34,10 +34,22 @@ try {
   db.run(`INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`);
 } catch {}
 
+/** Sanitize a path component to prevent directory traversal. */
+function safeName(name: string): string {
+  return name.replace(/[\/\\\.]+/g, "_").replace(/^_+|_+$/g, "") || "unnamed";
+}
+
 function noteFile(agent: string, key: string) {
-  const dir = join(MEMORY_DIR, agent);
+  const safeAgent = safeName(agent);
+  const safeKey = safeName(key);
+  const dir = join(MEMORY_DIR, safeAgent);
   mkdirSync(dir, { recursive: true });
-  return join(dir, `${key}.md`);
+  const filePath = join(dir, `${safeKey}.md`);
+  // Ensure the resolved path is still within MEMORY_DIR
+  if (!filePath.startsWith(MEMORY_DIR)) {
+    throw new Error(`Invalid memory path: ${filePath}`);
+  }
+  return filePath;
 }
 
 export const memory = {
