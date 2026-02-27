@@ -9,6 +9,8 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { SKILLS, SKILL_MAP } from "./skills.js";
 import { sendTask, discoverAgent, type AgentCard } from "./a2a.js";
+import { initRegistry, listMcpServers, listMcpTools, callMcpTool, refreshManifest } from "./mcp-registry.js";
+import { getProjectContext, setProjectContext, getContextPreamble } from "./context.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -67,7 +69,10 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
   const message = (args.message as string) ?? "";
   const skillArgs = (args.args as Record<string, unknown>) ?? {};
 
-  const msgPayload = { role: "user", parts: [{ text: message }] };
+  // Prepend project context if set
+  const preamble = getContextPreamble();
+  const enrichedMessage = preamble ? `${preamble}\n\n${message}` : message;
+  const msgPayload = { role: "user", parts: [{ text: enrichedMessage }] };
 
   // 1. Direct URL
   if (agentUrl) {
@@ -142,6 +147,49 @@ const listAgentsSkill = {
   inputSchema: { type: "object" as const, properties: {} },
 };
 
+const listMcpServersSkill = {
+  id: "list_mcp_servers",
+  name: "List MCP Servers",
+  description: "Return all external MCP servers registered in ~/.claude.json and their tool counts",
+  inputSchema: { type: "object" as const, properties: {} },
+};
+
+const useMcpToolSkill = {
+  id: "use_mcp_tool",
+  name: "Use MCP Tool",
+  description: "Call a tool on an external MCP server (lazy-connected on first use)",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      toolName: { type: "string", description: "Name of the MCP tool to call" },
+      args: { type: "object", description: "Arguments to pass to the tool" },
+    },
+    required: ["toolName"],
+  },
+};
+
+const getProjectContextSkill = {
+  id: "get_project_context",
+  name: "Get Project Context",
+  description: "Return the current project context (summary, goals, stack, notes)",
+  inputSchema: { type: "object" as const, properties: {} },
+};
+
+const setProjectContextSkill = {
+  id: "set_project_context",
+  name: "Set Project Context",
+  description: "Set or update the project context injected into all agent delegate calls",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      summary: { type: "string", description: "1-3 sentence project summary" },
+      goals: { type: "array", items: { type: "string" }, description: "Current sprint goals" },
+      stack: { type: "array", items: { type: "string" }, description: "Tech stack tags" },
+      notes: { type: "string", description: "Freeform context notes" },
+    },
+  },
+};
+
 // ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
   { name: "a2a-mcp-bridge", version: "3.0.0" },
@@ -151,9 +199,13 @@ const server = new Server(
 // Gather all skills: existing local + delegate + list_agents + worker skills
 function getAllToolDefs() {
   const tools = [
-    // delegate and list_agents
+    // orchestrator tools
     { name: delegateSkill.id, description: delegateSkill.description, inputSchema: delegateSkill.inputSchema },
     { name: listAgentsSkill.id, description: listAgentsSkill.description, inputSchema: listAgentsSkill.inputSchema },
+    { name: listMcpServersSkill.id, description: listMcpServersSkill.description, inputSchema: listMcpServersSkill.inputSchema },
+    { name: useMcpToolSkill.id, description: useMcpToolSkill.description, inputSchema: useMcpToolSkill.inputSchema },
+    { name: getProjectContextSkill.id, description: getProjectContextSkill.description, inputSchema: getProjectContextSkill.inputSchema },
+    { name: setProjectContextSkill.id, description: setProjectContextSkill.description, inputSchema: setProjectContextSkill.inputSchema },
     // local skills from skills.ts (backwards compat)
     ...SKILLS.map(s => ({ name: s.id, description: s.description, inputSchema: s.inputSchema })),
   ];
@@ -190,6 +242,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // list_agents
   if (name === "list_agents") {
     return { content: [{ type: "text", text: JSON.stringify(workerCards, null, 2) }] };
+  }
+
+  // list_mcp_servers
+  if (name === "list_mcp_servers") {
+    const servers = listMcpServers();
+    const tools = listMcpTools();
+    return { content: [{ type: "text", text: JSON.stringify({ servers, tools }, null, 2) }] };
+  }
+
+  // use_mcp_tool
+  if (name === "use_mcp_tool") {
+    const toolName = (args as any)?.toolName as string;
+    const toolArgs = ((args as any)?.args ?? {}) as Record<string, unknown>;
+    if (!toolName) throw new Error("use_mcp_tool requires toolName");
+    const result = await callMcpTool(toolName, toolArgs);
+    return { content: [{ type: "text", text: result }] };
+  }
+
+  // get_project_context
+  if (name === "get_project_context") {
+    return { content: [{ type: "text", text: JSON.stringify(getProjectContext(), null, 2) }] };
+  }
+
+  // set_project_context
+  if (name === "set_project_context") {
+    const updated = setProjectContext(args as any ?? {});
+    return { content: [{ type: "text", text: `Project context updated:\n${JSON.stringify(updated, null, 2)}` }] };
   }
 
   // local skill (backwards compat)
@@ -292,6 +371,9 @@ async function startHttpServer() {
 
 // ── Start ───────────────────────────────────────────────────────
 async function main() {
+  // Init external MCP registry (reads ~/.claude.json, builds manifest, no connections yet)
+  await initRegistry();
+
   // Spawn workers
   spawnWorkers();
 
