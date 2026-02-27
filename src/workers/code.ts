@@ -24,18 +24,17 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
     case "codex_exec": {
       const prompt = (args.prompt as string) ?? text;
       const result = spawnSync(
-        "codex", ["exec", prompt, "-c", 'sandbox_permissions=["disk-full-read-access","network"]'],
-        { encoding: "utf-8", timeout: 60_000 }
+        "codex", ["exec", "--full-auto", prompt],
+        { encoding: "utf-8", timeout: 120_000 }
       );
       if (result.error) return `Error: ${result.error.message}`;
       if (result.status !== 0) return `Exit ${result.status}: ${result.stderr?.trim() || result.stdout?.trim()}`;
       return result.stdout?.trim() || "(no output)";
     }
     case "codex_review": {
-      const prompt = (args.prompt as string) ?? text;
       const result = spawnSync(
-        "codex", ["exec", "review", "-c", 'sandbox_permissions=["disk-full-read-access"]'],
-        { encoding: "utf-8", timeout: 60_000 }
+        "codex", ["exec", "review", "--full-auto"],
+        { encoding: "utf-8", timeout: 120_000 }
       );
       if (result.error) return `Error: ${result.error.message}`;
       if (result.status !== 0) return `Exit ${result.status}: ${result.stderr?.trim() || result.stdout?.trim()}`;
