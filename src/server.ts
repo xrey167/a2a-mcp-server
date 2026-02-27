@@ -5,109 +5,97 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import Fastify from "fastify";
-import { randomUUID } from "crypto";
+import { SKILLS, SKILL_MAP } from "./skills.js";
 
 // ── MCP Server ───────────────────────────────────────────────────
 const server = new Server(
-  { name: "a2a-mcp-bridge", version: "1.0.0" },
+  { name: "a2a-mcp-bridge", version: "2.0.0" },
   { capabilities: { tools: {} } }
 );
 
-// ── A2A Agent Card ───────────────────────────────────────────────
+// ── A2A Agent Card (auto-generated from skill registry) ──────────
 const AGENT_CARD = {
   name: "Local A2A Agent",
-  description: "Local MCP server with A2A support",
+  description: "MCP + A2A server with system, web, Claude and data skills",
   url: "http://localhost:8080",
-  version: "1.0.0",
+  version: "2.0.0",
   capabilities: { streaming: false },
-  skills: [{ id: "echo", name: "Echo", description: "Echoes a message back" }],
+  skills: SKILLS.map(({ id, name, description }) => ({ id, name, description })),
 };
 
-// ── MCP Tools (Claude sieht diese) ──────────────────────────────
+// ── MCP: expose all skills as tools ─────────────────────────────
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "call_a2a_agent",
-      description: "Send a task to an A2A agent via HTTP",
-      inputSchema: {
-        type: "object",
-        properties: {
-          agent_url: { type: "string" },
-          message: { type: "string" },
-        },
-        required: ["agent_url", "message"],
-      },
-    },
-  ],
+  tools: SKILLS.map((skill) => ({
+    name: skill.id,
+    description: skill.description,
+    inputSchema: skill.inputSchema,
+  })),
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  if (name === "call_a2a_agent") {
-    const result = await sendA2ATask(
-      args!.agent_url as string,
-      args!.message as string
-    );
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
-  }
-  throw new Error(`Unknown tool: ${name}`);
+  const skill = SKILL_MAP.get(name);
+  if (!skill) throw new Error(`Unknown tool: ${name}`);
+  const result = await skill.run(args ?? {});
+  return { content: [{ type: "text", text: result }] };
 });
 
-// ── A2A Client (ruft andere Agents auf) ─────────────────────────
-async function sendA2ATask(agentUrl: string, message: string) {
-  const response = await fetch(agentUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      method: "tasks/send",
-      id: randomUUID(),
-      params: {
-        id: randomUUID(),
-        message: { role: "user", parts: [{ text: message }] },
-      },
-    }),
-  });
-  return response.json();
-}
-
-// ── A2A HTTP Server (andere Agents können diesen aufrufen) ───────
+// ── A2A HTTP Server ──────────────────────────────────────────────
 async function startHttpServer() {
   const app = Fastify({ logger: false });
 
   app.get("/.well-known/agent.json", async () => AGENT_CARD);
 
-  app.post("/", async (request, reply) => {
-    const data = request.body as Record<string, any>;
-    const method = data?.method;
+  app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
+    const data = request.body;
 
-    if (method === "tasks/send") {
-      const msg = data.params.message.parts[0].text;
+    if (data?.method !== "tasks/send") {
+      reply.code(404);
       return {
         jsonrpc: "2.0",
-        id: data.id,
-        result: {
-          id: data.params.id,
-          status: { state: "completed" },
-          artifacts: [{ parts: [{ text: `Echo: ${msg}` }] }],
-        },
+        error: { code: -32601, message: "Method not found" },
       };
     }
 
-    reply.code(404);
+    const { skillId, args, message, id: taskId } = data.params ?? {};
+    const text: string = message?.parts?.[0]?.text ?? "";
+
+    let resultText: string;
+
+    if (skillId) {
+      const skill = SKILL_MAP.get(skillId);
+      if (!skill) {
+        reply.code(404);
+        return {
+          jsonrpc: "2.0",
+          id: data.id,
+          error: { code: -32601, message: `Skill not found: ${skillId}` },
+        };
+      }
+      resultText = await skill.run(args ?? { prompt: text, command: text, url: text });
+    } else {
+      resultText = `Echo: ${text}`;
+    }
+
     return {
       jsonrpc: "2.0",
-      error: { code: -32601, message: "Method not found" },
+      id: data.id,
+      result: {
+        id: taskId,
+        status: { state: "completed" },
+        artifacts: [{ parts: [{ text: resultText }] }],
+      },
     };
   });
 
   await app.listen({ port: 8080, host: "localhost" });
-  process.stderr.write("A2A HTTP server running on http://localhost:8080\n");
+  process.stderr.write(`A2A HTTP server running on http://localhost:8080\n`);
+  process.stderr.write(
+    `Skills: ${SKILLS.map((s) => s.id).join(", ")}\n`
+  );
 }
 
-// ── Beide Server gleichzeitig starten ────────────────────────────
+// ── Start ────────────────────────────────────────────────────────
 async function main() {
   await startHttpServer();
   const transport = new StdioServerTransport();
