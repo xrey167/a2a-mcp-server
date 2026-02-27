@@ -1,0 +1,27 @@
+import { randomUUID } from "crypto";
+
+export interface AgentCard {
+  name: string; description: string; url: string; version: string;
+  capabilities: { streaming: boolean };
+  skills: Array<{ id: string; name: string; description: string }>;
+}
+
+export async function sendTask(agentUrl: string, params: {
+  skillId?: string; args?: Record<string, unknown>;
+  message: { role: string; parts: Array<{ text: string }> };
+}): Promise<string> {
+  const res = await fetch(agentUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "tasks/send", id: randomUUID(),
+      params: { id: randomUUID(), ...params } }),
+  });
+  const json = await res.json() as any;
+  if (json.error) throw new Error(json.error.message ?? JSON.stringify(json.error));
+  return json.result?.artifacts?.[0]?.parts?.[0]?.text ?? JSON.stringify(json.result);
+}
+
+export async function discoverAgent(agentUrl: string): Promise<AgentCard> {
+  const res = await fetch(`${agentUrl}/.well-known/agent.json`);
+  return res.json();
+}

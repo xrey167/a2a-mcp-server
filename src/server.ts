@@ -5,56 +5,249 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import Fastify from "fastify";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { SKILLS, SKILL_MAP } from "./skills.js";
+import { sendTask, discoverAgent, type AgentCard } from "./a2a.js";
 
-// ── MCP Server ───────────────────────────────────────────────────
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// ── Worker definitions ──────────────────────────────────────────
+const WORKERS = [
+  { name: "shell",     path: join(__dirname, "workers/shell.ts"),     port: 8081 },
+  { name: "web",       path: join(__dirname, "workers/web.ts"),       port: 8082 },
+  { name: "ai",        path: join(__dirname, "workers/ai.ts"),        port: 8083 },
+  { name: "code",      path: join(__dirname, "workers/code.ts"),      port: 8084 },
+  { name: "knowledge", path: join(__dirname, "workers/knowledge.ts"), port: 8085 },
+];
+
+const workerProcs: Array<ReturnType<typeof Bun.spawn>> = [];
+let workerCards: AgentCard[] = [];
+
+// ── Spawn workers ───────────────────────────────────────────────
+function spawnWorkers() {
+  for (const w of WORKERS) {
+    const proc = Bun.spawn(["bun", w.path], {
+      stderr: "inherit",
+      stdout: "ignore",
+    });
+    workerProcs.push(proc);
+    process.stderr.write(`[orchestrator] spawned ${w.name} (pid ${proc.pid})\n`);
+  }
+}
+
+async function discoverWorkers(): Promise<AgentCard[]> {
+  const cards: AgentCard[] = [];
+  for (const w of WORKERS) {
+    try {
+      const card = await discoverAgent(`http://localhost:${w.port}`);
+      cards.push(card);
+    } catch (err) {
+      process.stderr.write(`[orchestrator] failed to discover ${w.name}: ${err}\n`);
+    }
+  }
+  return cards;
+}
+
+// ── Build skill-to-worker map ───────────────────────────────────
+function buildSkillRouter(cards: AgentCard[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const card of cards) {
+    for (const skill of card.skills) {
+      map.set(skill.id, card.url);
+    }
+  }
+  return map;
+}
+
+// ── Delegate skill ──────────────────────────────────────────────
+async function delegate(args: Record<string, unknown>): Promise<string> {
+  const agentUrl = args.agentUrl as string | undefined;
+  const skillId = args.skillId as string | undefined;
+  const message = (args.message as string) ?? "";
+  const skillArgs = (args.args as Record<string, unknown>) ?? {};
+
+  const msgPayload = { role: "user", parts: [{ text: message }] };
+
+  // 1. Direct URL
+  if (agentUrl) {
+    return sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload });
+  }
+
+  // 2. Route by skillId
+  if (skillId) {
+    const router = buildSkillRouter(workerCards);
+    const url = router.get(skillId);
+    if (url) {
+      return sendTask(url, { skillId, args: skillArgs, message: msgPayload });
+    }
+
+    // Also check local skills (backwards compat)
+    const localSkill = SKILL_MAP.get(skillId);
+    if (localSkill) {
+      return localSkill.run({ ...skillArgs, prompt: message, command: message, url: message });
+    }
+
+    return `No worker found with skill: ${skillId}`;
+  }
+
+  // 3. Auto-route via ask_claude
+  const cardsJson = JSON.stringify(workerCards.map(c => ({
+    name: c.name, url: c.url,
+    skills: c.skills.map(s => s.id),
+  })));
+  const prompt = `Workers: ${cardsJson}. Task: ${message}. Reply JSON only: {"url":"...","skillId":"..."}`;
+
+  // Try to find ai worker
+  const aiUrl = workerCards.find(c => c.name === "ai-agent")?.url;
+  if (aiUrl) {
+    const response = await sendTask(aiUrl, {
+      skillId: "ask_claude",
+      args: { prompt },
+      message: { role: "user", parts: [{ text: prompt }] },
+    });
+    try {
+      const parsed = JSON.parse(response);
+      if (parsed.url && parsed.skillId) {
+        return sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload });
+      }
+    } catch {}
+    return response;
+  }
+
+  return "No AI worker available for auto-routing";
+}
+
+// ── Orchestrator skills (delegate + list_agents) ────────────────
+const delegateSkill = {
+  id: "delegate",
+  name: "Delegate",
+  description: "Route a task to the best worker agent. Provide agentUrl, skillId, or let AI pick.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      agentUrl: { type: "string", description: "Direct URL of the target agent (optional)" },
+      skillId: { type: "string", description: "Skill ID to route to (optional)" },
+      message: { type: "string", description: "Task message" },
+      args: { type: "object", description: "Arguments for the target skill" },
+    },
+    required: ["message"],
+  },
+};
+
+const listAgentsSkill = {
+  id: "list_agents",
+  name: "List Agents",
+  description: "Return JSON of all worker agent cards and their skills",
+  inputSchema: { type: "object" as const, properties: {} },
+};
+
+// ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
-  { name: "a2a-mcp-bridge", version: "2.0.0" },
+  { name: "a2a-mcp-bridge", version: "3.0.0" },
   { capabilities: { tools: {} } }
 );
 
-// ── A2A Agent Card (auto-generated from skill registry) ──────────
-const AGENT_CARD = {
-  name: "Local A2A Agent",
-  description: "MCP + A2A server with system, web, Claude and data skills",
-  url: "http://localhost:8080",
-  version: "2.0.0",
-  capabilities: { streaming: false },
-  skills: SKILLS.map(({ id, name, description }) => ({ id, name, description })),
-};
+// Gather all skills: existing local + delegate + list_agents + worker skills
+function getAllToolDefs() {
+  const tools = [
+    // delegate and list_agents
+    { name: delegateSkill.id, description: delegateSkill.description, inputSchema: delegateSkill.inputSchema },
+    { name: listAgentsSkill.id, description: listAgentsSkill.description, inputSchema: listAgentsSkill.inputSchema },
+    // local skills from skills.ts (backwards compat)
+    ...SKILLS.map(s => ({ name: s.id, description: s.description, inputSchema: s.inputSchema })),
+  ];
 
-// ── MCP: expose all skills as tools ─────────────────────────────
+  // Also expose worker skills directly
+  for (const card of workerCards) {
+    for (const skill of card.skills) {
+      // Skip if already registered (local skills take priority)
+      if (tools.some(t => t.name === skill.id)) continue;
+      tools.push({
+        name: skill.id,
+        description: `[${card.name}] ${skill.description}`,
+        inputSchema: { type: "object" as const, properties: { message: { type: "string" } }, required: [] as string[] },
+      });
+    }
+  }
+
+  return tools;
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: SKILLS.map((skill) => ({
-    name: skill.id,
-    description: skill.description,
-    inputSchema: skill.inputSchema,
-  })),
+  tools: getAllToolDefs(),
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  const skill = SKILL_MAP.get(name);
-  if (!skill) throw new Error(`Unknown tool: ${name}`);
-  const result = await skill.run(args ?? {});
-  return { content: [{ type: "text", text: result }] };
+
+  // delegate
+  if (name === "delegate") {
+    const result = await delegate(args ?? {});
+    return { content: [{ type: "text", text: result }] };
+  }
+
+  // list_agents
+  if (name === "list_agents") {
+    return { content: [{ type: "text", text: JSON.stringify(workerCards, null, 2) }] };
+  }
+
+  // local skill (backwards compat)
+  const localSkill = SKILL_MAP.get(name);
+  if (localSkill) {
+    const result = await localSkill.run(args ?? {});
+    return { content: [{ type: "text", text: result }] };
+  }
+
+  // route to worker by skill id
+  const router = buildSkillRouter(workerCards);
+  const workerUrl = router.get(name);
+  if (workerUrl) {
+    const message = (args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "";
+    const result = await sendTask(workerUrl, {
+      skillId: name,
+      args: (args ?? {}) as Record<string, unknown>,
+      message: { role: "user", parts: [{ text: String(message) }] },
+    });
+    return { content: [{ type: "text", text: result }] };
+  }
+
+  throw new Error(`Unknown tool: ${name}`);
 });
 
-// ── A2A HTTP Server ──────────────────────────────────────────────
+// ── A2A HTTP Server ─────────────────────────────────────────────
 async function startHttpServer() {
   const app = Fastify({ logger: false });
 
-  app.get("/.well-known/agent.json", async () => AGENT_CARD);
+  // Agent card: merge all worker skills
+  app.get("/.well-known/agent.json", async () => {
+    const allSkills: Array<{ id: string; name: string; description: string }> = [
+      { id: "delegate", name: "Delegate", description: delegateSkill.description },
+      { id: "list_agents", name: "List Agents", description: listAgentsSkill.description },
+      ...SKILLS.map(({ id, name, description }) => ({ id, name, description })),
+    ];
+    for (const card of workerCards) {
+      for (const skill of card.skills) {
+        if (!allSkills.some(s => s.id === skill.id)) {
+          allSkills.push(skill);
+        }
+      }
+    }
+    return {
+      name: "Local A2A Orchestrator",
+      description: "MCP + A2A orchestrator with multi-agent workers",
+      url: "http://localhost:8080",
+      version: "3.0.0",
+      capabilities: { streaming: false },
+      skills: allSkills,
+    };
+  });
 
   app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     const data = request.body;
-
     if (data?.method !== "tasks/send") {
       reply.code(404);
-      return {
-        jsonrpc: "2.0",
-        error: { code: -32601, message: "Method not found" },
-      };
+      return { jsonrpc: "2.0", error: { code: -32601, message: "Method not found" } };
     }
 
     const { skillId, args, message, id: taskId } = data.params ?? {};
@@ -62,47 +255,74 @@ async function startHttpServer() {
 
     let resultText: string;
 
-    if (skillId) {
-      const skill = SKILL_MAP.get(skillId);
-      if (!skill) {
-        reply.code(404);
-        return {
-          jsonrpc: "2.0",
-          id: data.id,
-          error: { code: -32601, message: `Skill not found: ${skillId}` },
-        };
+    if (skillId === "delegate") {
+      resultText = await delegate({ ...args, message: text });
+    } else if (skillId === "list_agents") {
+      resultText = JSON.stringify(workerCards, null, 2);
+    } else if (skillId) {
+      // Try local first
+      const localSkill = SKILL_MAP.get(skillId);
+      if (localSkill) {
+        resultText = await localSkill.run(args ?? { prompt: text, command: text, url: text });
+      } else {
+        // Route to worker
+        const router = buildSkillRouter(workerCards);
+        const url = router.get(skillId);
+        if (url) {
+          resultText = await sendTask(url, { skillId, args, message: { role: "user", parts: [{ text }] } });
+        } else {
+          resultText = `Unknown skill: ${skillId}`;
+        }
       }
-      resultText = await skill.run(args ?? { prompt: text, command: text, url: text });
     } else {
-      resultText = `Echo: ${text}`;
+      // Auto-delegate
+      resultText = await delegate({ message: text });
     }
 
     return {
-      jsonrpc: "2.0",
-      id: data.id,
-      result: {
-        id: taskId,
-        status: { state: "completed" },
-        artifacts: [{ parts: [{ text: resultText }] }],
-      },
+      jsonrpc: "2.0", id: data.id,
+      result: { id: taskId, status: { state: "completed" },
+        artifacts: [{ parts: [{ text: resultText }] }] },
     };
   });
 
   await app.listen({ port: 8080, host: "localhost" });
-  process.stderr.write(`A2A HTTP server running on http://localhost:8080\n`);
-  process.stderr.write(
-    `Skills: ${SKILLS.map((s) => s.id).join(", ")}\n`
-  );
+  process.stderr.write(`[orchestrator] A2A HTTP server on http://localhost:8080\n`);
 }
 
-// ── Start ────────────────────────────────────────────────────────
+// ── Start ───────────────────────────────────────────────────────
 async function main() {
+  // Spawn workers
+  spawnWorkers();
+
+  // Wait for workers to start
+  await new Promise(r => setTimeout(r, 1500));
+
+  // Discover worker cards
+  workerCards = await discoverWorkers();
+  process.stderr.write(`[orchestrator] discovered ${workerCards.length} workers\n`);
+  for (const card of workerCards) {
+    process.stderr.write(`  - ${card.name}: ${card.skills.map(s => s.id).join(", ")}\n`);
+  }
+
+  // Start HTTP + MCP
   await startHttpServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
+// Cleanup on exit
+process.on("SIGINT", () => {
+  for (const proc of workerProcs) proc.kill();
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  for (const proc of workerProcs) proc.kill();
+  process.exit(0);
+});
+
 main().catch((err) => {
   process.stderr.write(`Fatal error: ${err}\n`);
+  for (const proc of workerProcs) proc.kill();
   process.exit(1);
 });
