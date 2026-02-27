@@ -5,6 +5,35 @@ import Anthropic from "@anthropic-ai/sdk";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
 
+// ── Auth helper ───────────────────────────────────────────────────
+// Prefer ANTHROPIC_API_KEY if set (CI / non-macOS).
+// Otherwise use the SDK directly — the MCP subprocess inherits
+// Claude Code's env which already has auth configured.
+function getAnthropicClient(): Anthropic {
+  if (process.env.ANTHROPIC_API_KEY) {
+    return new Anthropic();
+  }
+  // When spawned by Claude Code the auth env is forwarded automatically
+  return new Anthropic();
+}
+
+// Fallback: run `claude -p` as subprocess (handles OAuth refresh).
+// Used when SDK auth fails or as an explicit sub-agent call.
+function runClaudeCLI(prompt: string, model: string): string {
+  const result = spawnSync(
+    "claude",
+    ["-p", prompt, "--model", model, "--output-format", "text"],
+    {
+      encoding: "utf-8",
+      timeout: 30_000,
+      env: { ...process.env, CLAUDECODE: undefined } as NodeJS.ProcessEnv,
+    }
+  );
+  if (result.error) throw new Error(result.error.message);
+  if (result.status !== 0) throw new Error(result.stderr || "claude CLI failed");
+  return result.stdout.trim();
+}
+
 export interface SkillArgs {
   [key: string]: unknown;
 }
@@ -146,17 +175,20 @@ const askClaude: Skill = {
     required: ["prompt"],
   },
   run: async ({ prompt, model = "claude-sonnet-4-6" }) => {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return "Error: ANTHROPIC_API_KEY not set. Get one at console.anthropic.com and add it via: claude mcp add --scope user -e ANTHROPIC_API_KEY=sk-... a2a-mcp-bridge -- bun /Users/xrey/Developer/a2a-mcp-server/src/server.ts";
+    try {
+      // Try SDK first (works when ANTHROPIC_API_KEY is set)
+      const client = getAnthropicClient();
+      const message = await client.messages.create({
+        model: model as string,
+        max_tokens: 1024,
+        messages: [{ role: "user", content: prompt as string }],
+      });
+      const block = message.content[0];
+      return block.type === "text" ? block.text : JSON.stringify(block);
+    } catch {
+      // Fallback: claude CLI (uses OAuth via Claude Code, handles refresh)
+      return runClaudeCLI(prompt as string, model as string);
     }
-    const client = new Anthropic();
-    const message = await client.messages.create({
-      model: model as string,
-      max_tokens: 1024,
-      messages: [{ role: "user", content: prompt as string }],
-    });
-    const block = message.content[0];
-    return block.type === "text" ? block.text : JSON.stringify(block);
   },
 };
 
