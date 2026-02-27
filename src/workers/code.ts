@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { spawnSync } from "child_process";
 import { memory } from "../memory.js";
+import { getPersona, watchPersonas } from "../persona-loader.js";
 
 const PORT = 8084;
 const NAME = "code-agent";
@@ -78,6 +79,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
       artifacts: [{ parts: [{ text: resultText }] }] },
   };
 });
+
+getPersona(NAME);
+watchPersonas();
 
 app.listen({ port: PORT, host: "localhost" }).then(() => {
   process.stderr.write(`[${NAME}] listening on http://localhost:${PORT}\n`);

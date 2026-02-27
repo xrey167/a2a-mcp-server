@@ -3,6 +3,7 @@ import { spawnSync, spawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { memory } from "../memory.js";
 import { randomUUID } from "crypto";
+import { getPersona, watchPersonas } from "../persona-loader.js";
 
 const PORT = 8081;
 const NAME = "shell-agent";
@@ -114,6 +115,9 @@ app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
     });
   });
 });
+
+getPersona(NAME);
+watchPersonas();
 
 app.listen({ port: PORT, host: "localhost" }).then(() => {
   process.stderr.write(`[${NAME}] listening on http://localhost:${PORT}\n`);

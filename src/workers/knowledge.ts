@@ -4,6 +4,7 @@ import { join, dirname, basename } from "path";
 import { homedir } from "os";
 import { Glob } from "bun";
 import { memory } from "../memory.js";
+import { getPersona, watchPersonas } from "../persona-loader.js";
 
 const PORT = 8085;
 const NAME = "knowledge-agent";
@@ -121,6 +122,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
       artifacts: [{ parts: [{ text: resultText }] }] },
   };
 });
+
+getPersona(NAME);
+watchPersonas();
 
 app.listen({ port: PORT, host: "localhost" }).then(() => {
   process.stderr.write(`[${NAME}] listening on http://localhost:${PORT}\n`);
