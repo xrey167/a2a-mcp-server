@@ -1,9 +1,9 @@
 import Fastify from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
-import { spawnSync } from "child_process";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
-import { memory } from "../memory.js";
+import { handleMemorySkill } from "../worker-memory.js";
+import { runClaudeCLI } from "../claude-cli.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
 
@@ -25,18 +25,9 @@ const AGENT_CARD = {
   ],
 };
 
-function runClaudeCLI(prompt: string, model: string): string {
-  const result = spawnSync(
-    "claude",
-    ["-p", prompt, "--model", model, "--output-format", "text", "--dangerously-skip-permissions"],
-    { encoding: "utf-8", timeout: 60_000, env: { ...process.env, CLAUDECODE: undefined } as NodeJS.ProcessEnv }
-  );
-  if (result.error) throw new Error(result.error.message);
-  if (result.status !== 0) throw new Error(result.stderr || "claude CLI failed");
-  return result.stdout.trim();
-}
-
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string | Record<string, unknown>> {
+  const memResult = handleMemorySkill(NAME, skillId, args);
+  if (memResult !== null) return memResult;
   switch (skillId) {
     case "ask_claude": {
       const prompt = (args.prompt as string) ?? text;
@@ -68,6 +59,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     case "query_sqlite": {
       const database = args.database as string;
       const sql = args.sql as string;
+      if (!sql.trim().toUpperCase().startsWith("SELECT")) {
+        return "Only SELECT queries are allowed";
+      }
       const db = new Database(database, { readonly: true });
       try {
         const rows = db.query(sql).all();
@@ -75,17 +69,6 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       } finally {
         db.close();
       }
-    }
-    case "remember": {
-      const key = args.key as string;
-      const value = args.value as string;
-      memory.set(NAME, key, value);
-      return `Remembered: ${key}`;
-    }
-    case "recall": {
-      const key = args.key as string | undefined;
-      if (key) return memory.get(NAME, key) ?? `No memory found for key: ${key}`;
-      return JSON.stringify(memory.all(NAME), null, 2);
     }
     default: {
       // Check dynamically loaded plugin skills

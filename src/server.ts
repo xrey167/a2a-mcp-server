@@ -26,13 +26,15 @@ const WORKERS = [
   { name: "ai",        path: join(__dirname, "workers/ai.ts"),        port: 8083 },
   { name: "code",      path: join(__dirname, "workers/code.ts"),      port: 8084 },
   { name: "knowledge", path: join(__dirname, "workers/knowledge.ts"), port: 8085 },
+  { name: "design",    path: join(__dirname, "workers/design.ts"),    port: 8086 },
 ];
 
 const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
+const workerFailures = new Map<string, number>();
 const respawning = new Set<string>();
 let workerCards: AgentCard[] = [];
 
-// ── Spawn workers (with auto-respawn) ───────────────────────────
+// ── Spawn workers (with exponential-backoff auto-respawn) ────────
 function spawnWorker(w: typeof WORKERS[number]) {
   respawning.delete(w.name);
   const proc = Bun.spawn(["bun", w.path], {
@@ -41,12 +43,14 @@ function spawnWorker(w: typeof WORKERS[number]) {
   });
   workerProcs.set(w.name, proc);
   process.stderr.write(`[orchestrator] spawned ${w.name} (pid ${proc.pid})\n`);
-  // Auto-respawn on exit — guard against double-scheduling
-  proc.exited.then(() => {
+  proc.exited.then((exitCode) => {
     if (respawning.has(w.name)) return;
     respawning.add(w.name);
-    process.stderr.write(`[orchestrator] ${w.name} exited — respawning in 2s\n`);
-    setTimeout(() => spawnWorker(w), 2000);
+    const n = (workerFailures.get(w.name) ?? 0) + 1;
+    workerFailures.set(w.name, n);
+    const delayMs = Math.min(1_000 * (2 ** (n - 1)), 60_000);
+    process.stderr.write(`[orchestrator] ${w.name} exited (code ${exitCode}, failure #${n}) — respawning in ${delayMs}ms\n`);
+    setTimeout(() => spawnWorker(w), delayMs);
   });
 }
 
@@ -68,6 +72,7 @@ async function discoverWorkers(): Promise<AgentCard[]> {
     }
     if (card) {
       cards.push(card);
+      workerFailures.delete(w.name); // reset backoff on successful startup
     } else {
       process.stderr.write(`[orchestrator] failed to discover ${w.name} after 5 attempts\n`);
     }
@@ -374,6 +379,23 @@ const setProjectContextSkill = {
   },
 };
 
+const designWorkflowSkill = {
+  id: "design_workflow",
+  name: "Design Workflow",
+  description: "Full design pipeline: Gemini suggests screens → creates a Stitch project → generates each screen. Returns project ID and per-screen results.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      appConcept: { type: "string", description: "App or feature concept to design (e.g. 'a meditation timer for iOS')" },
+      title: { type: "string", description: "Stitch project title (defaults to appConcept)" },
+      deviceType: { type: "string", description: "Target device: MOBILE (default), DESKTOP, TABLET, or AGNOSTIC", enum: ["MOBILE", "DESKTOP", "TABLET", "AGNOSTIC"] },
+      screensOnly: { type: "boolean", description: "Generate a single enhanced screen instead of a full multi-screen flow (default: false)" },
+      modelId: { type: "string", description: "Stitch model to use: GEMINI_3_FLASH (default) or GEMINI_3_PRO", enum: ["GEMINI_3_FLASH", "GEMINI_3_PRO"] },
+    },
+    required: ["appConcept"],
+  },
+};
+
 // ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
   { name: "a2a-mcp-bridge", version: "3.0.0" },
@@ -395,6 +417,7 @@ function getAllToolDefs() {
     { name: useMcpToolSkill.id, description: useMcpToolSkill.description, inputSchema: useMcpToolSkill.inputSchema },
     { name: getProjectContextSkill.id, description: getProjectContextSkill.description, inputSchema: getProjectContextSkill.inputSchema },
     { name: setProjectContextSkill.id, description: setProjectContextSkill.description, inputSchema: setProjectContextSkill.inputSchema },
+    { name: designWorkflowSkill.id, description: designWorkflowSkill.description, inputSchema: designWorkflowSkill.inputSchema },
     // local skills from skills.ts (backwards compat)
     ...SKILLS.map(s => ({ name: s.id, description: s.description, inputSchema: s.inputSchema })),
   ];
@@ -598,6 +621,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: "text", text: `Project context updated:\n${JSON.stringify(updated, null, 2)}` }] };
   }
 
+  // design_workflow — Gemini prompt engineering + Stitch project creation
+  if (name === "design_workflow") {
+    const appConcept = (args as any)?.appConcept as string;
+    if (!appConcept) throw new Error("design_workflow requires appConcept");
+
+    const title = ((args as any)?.title as string) ?? appConcept;
+    const deviceType = ((args as any)?.deviceType as string) ?? "MOBILE";
+    const screensOnly = !!((args as any)?.screensOnly);
+    const modelId = ((args as any)?.modelId as string) ?? "GEMINI_3_FLASH";
+
+    const designWorkerUrl = workerCards.find(c => c.name === "design-agent")?.url ?? "http://localhost:8086";
+
+    // Step 1: Create Stitch project
+    const projectRaw = await callMcpTool("create_project", { title });
+    let projectId: string;
+    try {
+      const proj = JSON.parse(projectRaw);
+      projectId = (proj.name as string).replace("projects/", "");
+    } catch {
+      return { content: [{ type: "text", text: `Failed to parse Stitch project response:\n${projectRaw}` }] };
+    }
+
+    const lines: string[] = [`Project created: ${projectId}\n`];
+
+    if (screensOnly) {
+      // Single screen: enhance concept → generate one screen
+      const enhanced = await sendTask(designWorkerUrl, {
+        skillId: "enhance_ui_prompt",
+        args: { description: appConcept, deviceType: deviceType.toLowerCase() },
+        message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
+      });
+      const screenResult = await callMcpTool("generate_screen_from_text", {
+        projectId, prompt: enhanced, deviceType, modelId,
+      });
+      lines.push(`**${title}**\n${screenResult}`);
+    } else {
+      // Multi-screen: suggest screens → generate each
+      const screensJson = await sendTask(designWorkerUrl, {
+        skillId: "suggest_screens",
+        args: { appConcept, deviceType: deviceType.toLowerCase() },
+        message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
+      });
+      let screens: Array<{ name: string; prompt: string }>;
+      try {
+        screens = JSON.parse(screensJson);
+      } catch {
+        return { content: [{ type: "text", text: `Failed to parse screen suggestions:\n${screensJson}` }] };
+      }
+      for (const screen of screens) {
+        try {
+          const result = await callMcpTool("generate_screen_from_text", {
+            projectId, prompt: screen.prompt, deviceType, modelId,
+          });
+          lines.push(`**${screen.name}**\n${result}`);
+        } catch (err) {
+          lines.push(`**${screen.name}** — error: ${err}`);
+        }
+      }
+    }
+
+    return { content: [{ type: "text", text: lines.join("\n\n") }] };
+  }
+
   // plugin skill
   const pluginSkill = pluginSkills.get(name);
   if (pluginSkill) {
@@ -725,6 +811,50 @@ async function startHttpServer() {
       resultText = JSON.stringify(getProjectContext(), null, 2);
     } else if (skillId === "set_project_context") {
       resultText = JSON.stringify(setProjectContext(args ?? {}), null, 2);
+    } else if (skillId === "delegate_async") {
+      const sessionId = args?.sessionId as string | undefined;
+      const skillIdArg = args?.skillId as string | undefined;
+      const agentUrl = args?.agentUrl as string | undefined;
+      const taskId = createTask({ sessionId, skillId: skillIdArg, agentUrl });
+      delegate({ ...args, message: text })
+        .then(result => completeTask(taskId, result))
+        .catch(err => {
+          try { failTask(taskId, String(err)); }
+          catch (e) { process.stderr.write(`[orchestrator] failTask error: ${e}\n`); }
+        });
+      resultText = JSON.stringify({ taskId });
+    } else if (skillId === "get_task_result") {
+      pruneStale();
+      const taskId = args?.taskId as string | undefined;
+      if (!taskId) { resultText = "get_task_result requires taskId"; }
+      else {
+        const record = getTask(taskId);
+        if (!record) resultText = JSON.stringify({ status: "not_found" });
+        else if (record.state === "pending") resultText = JSON.stringify({ status: "pending" });
+        else if (record.state === "completed") resultText = JSON.stringify({ status: "completed", result: record.result });
+        else resultText = JSON.stringify({ status: "failed", error: record.error });
+      }
+    } else if (skillId === "get_session_history") {
+      pruneStaleSessionsImpl();
+      const sessionId = args?.sessionId as string | undefined;
+      if (!sessionId) { resultText = "get_session_history requires sessionId"; }
+      else { resultText = JSON.stringify(loadSessionHistory(sessionId), null, 2); }
+    } else if (skillId === "clear_session") {
+      const sessionId = args?.sessionId as string | undefined;
+      if (!sessionId) { resultText = "clear_session requires sessionId"; }
+      else { memory.forget(SESSION_AGENT, sessionId); resultText = `Session ${sessionId} cleared`; }
+    } else if (skillId === "register_agent") {
+      const url = args?.url as string | undefined;
+      if (!url) { resultText = "register_agent requires url"; }
+      else {
+        const apiKey = args?.apiKey as string | undefined;
+        const card = await registerAgent(url, apiKey);
+        resultText = JSON.stringify(card, null, 2);
+      }
+    } else if (skillId === "unregister_agent") {
+      const url = args?.url as string | undefined;
+      if (!url) { resultText = "unregister_agent requires url"; }
+      else { const existed = unregisterAgent(url); resultText = existed ? `Unregistered: ${url}` : `Not found: ${url}`; }
     } else if (skillId) {
       // Check plugin skills first (hot-loaded)
       const pluginSkill = pluginSkills.get(skillId);

@@ -1,32 +1,15 @@
-import { spawnSync } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
 import { sendTask } from "./a2a.js";
+import { runClaudeCLI } from "./claude-cli.js";
 
 // ── Auth helper ───────────────────────────────────────────────────
 // The SDK reads ANTHROPIC_API_KEY automatically; Claude Code's OAuth
 // env is forwarded to subprocesses, so new Anthropic() always works.
 function getAnthropicClient(): Anthropic {
   return new Anthropic();
-}
-
-// Fallback: run `claude -p` as subprocess (handles OAuth refresh).
-// Used when SDK auth fails or as an explicit sub-agent call.
-function runClaudeCLI(prompt: string, model: string): string {
-  const result = spawnSync(
-    "claude",
-    ["-p", prompt, "--model", model, "--output-format", "text"],
-    {
-      encoding: "utf-8",
-      timeout: 30_000,
-      env: { ...process.env, CLAUDECODE: undefined } as NodeJS.ProcessEnv,
-    }
-  );
-  if (result.error) throw new Error(result.error.message);
-  if (result.status !== 0) throw new Error(result.stderr || "claude CLI failed");
-  return result.stdout.trim();
 }
 
 export interface SkillArgs {
@@ -224,6 +207,9 @@ const querySqlite: Skill = {
     required: ["database", "sql"],
   },
   run: async ({ database, sql }) => {
+    if (!(sql as string).trim().toUpperCase().startsWith("SELECT")) {
+      return "Only SELECT queries are allowed";
+    }
     const db = new Database(database as string, { readonly: true });
     try {
       const rows = db.query(sql as string).all();

@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { memory } from "../memory.js";
+import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 
 const PORT = 8082;
@@ -20,6 +20,8 @@ const AGENT_CARD = {
 };
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
+  const memResult = handleMemorySkill(NAME, skillId, args);
+  if (memResult !== null) return memResult;
   switch (skillId) {
     case "fetch_url": {
       const url = (args.url as string) ?? text;
@@ -42,17 +44,6 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       });
       return `HTTP ${res.status}\n${await res.text()}`;
     }
-    case "remember": {
-      const key = args.key as string;
-      const value = args.value as string;
-      memory.set(NAME, key, value);
-      return `Remembered: ${key}`;
-    }
-    case "recall": {
-      const key = args.key as string | undefined;
-      if (key) return memory.get(NAME, key) ?? `No memory found for key: ${key}`;
-      return JSON.stringify(memory.all(NAME), null, 2);
-    }
     default:
       return `Unknown skill: ${skillId}`;
   }
@@ -72,7 +63,12 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const { skillId, args, message, id: taskId } = data.params ?? {};
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "fetch_url";
-  const resultText = await handleSkill(sid, args ?? { url: text }, text);
+  let resultText: string;
+  try {
+    resultText = await handleSkill(sid, args ?? { url: text }, text);
+  } catch (err) {
+    resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+  }
 
   return {
     jsonrpc: "2.0", id: data.id,

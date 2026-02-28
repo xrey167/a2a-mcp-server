@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { join } from "path";
 import { homedir } from "os";
-import { writeFileSync, mkdirSync } from "fs";
+import { writeFileSync, mkdirSync, unlinkSync } from "fs";
 
 const VAULT = process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/a2a-knowledge");
 const MEMORY_DIR = join(VAULT, "_memory");
@@ -39,5 +39,6 @@ export const memory = {
   },
   forget(agent: string, key: string) {
     db.run(`DELETE FROM memory WHERE agent=? AND key=?`, [agent, key]);
+    try { unlinkSync(noteFile(agent, key)); } catch {} // clean up markdown file too
   },
 };

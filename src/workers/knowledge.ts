@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname, basename, resolve } from "path";
 import { homedir } from "os";
 import { Glob } from "bun";
-import { memory } from "../memory.js";
+import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 
 const PORT = 8085;
@@ -45,6 +45,8 @@ function buildFrontmatter(tags?: string[]): string {
 }
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
+  const memResult = handleMemorySkill(NAME, skillId, args);
+  if (memResult !== null) return memResult;
   switch (skillId) {
     case "create_note": {
       const title = args.title as string;
@@ -91,17 +93,6 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         notes.push(file);
       }
       return notes.length > 0 ? notes.join("\n") : "No notes found";
-    }
-    case "remember": {
-      const key = args.key as string;
-      const value = args.value as string;
-      memory.set(NAME, key, value);
-      return `Remembered: ${key}`;
-    }
-    case "recall": {
-      const key = args.key as string | undefined;
-      if (key) return memory.get(NAME, key) ?? `No memory found for key: ${key}`;
-      return JSON.stringify(memory.all(NAME), null, 2);
     }
     default:
       return `Unknown skill: ${skillId}`;

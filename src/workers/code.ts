@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { spawnSync } from "child_process";
-import { memory } from "../memory.js";
+import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 
 const PORT = 8084;
@@ -21,6 +21,8 @@ const AGENT_CARD = {
 };
 
 function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string {
+  const memResult = handleMemorySkill(NAME, skillId, args);
+  if (memResult !== null) return memResult;
   switch (skillId) {
     case "codex_exec": {
       const prompt = (args.prompt as string) ?? text;
@@ -41,17 +43,6 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       if (result.status !== 0) return `Exit ${result.status}: ${result.stderr?.trim() || result.stdout?.trim()}`;
       return result.stdout?.trim() || "(no output)";
     }
-    case "remember": {
-      const key = args.key as string;
-      const value = args.value as string;
-      memory.set(NAME, key, value);
-      return `Remembered: ${key}`;
-    }
-    case "recall": {
-      const key = args.key as string | undefined;
-      if (key) return memory.get(NAME, key) ?? `No memory found for key: ${key}`;
-      return JSON.stringify(memory.all(NAME), null, 2);
-    }
     default:
       return `Unknown skill: ${skillId}`;
   }
@@ -71,7 +62,12 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const { skillId, args, message, id: taskId } = data.params ?? {};
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "codex_exec";
-  const resultText = handleSkill(sid, args ?? { prompt: text }, text);
+  let resultText: string;
+  try {
+    resultText = handleSkill(sid, args ?? { prompt: text }, text);
+  } catch (err) {
+    resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+  }
 
   return {
     jsonrpc: "2.0", id: data.id,
