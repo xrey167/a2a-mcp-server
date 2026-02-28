@@ -37,6 +37,7 @@ const WORKERS = [
 const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 const workerFailures = new Map<string, number>();
 const respawning = new Set<string>();
+const respawnTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let workerCards: AgentCard[] = [];
 
 interface WorkerHealth { healthy: boolean; failCount: number; lastCheck: number; uptime?: number; }
@@ -58,7 +59,10 @@ function spawnWorker(w: typeof WORKERS[number]) {
     workerFailures.set(w.name, n);
     const delayMs = Math.min(1_000 * (2 ** (n - 1)), 60_000);
     process.stderr.write(`[orchestrator] ${w.name} exited (code ${exitCode}, failure #${n}) — respawning in ${delayMs}ms\n`);
-    setTimeout(() => spawnWorker(w), delayMs);
+    const timer = setTimeout(() => spawnWorker(w), delayMs);
+    respawnTimers.set(w.name, timer);
+  }).catch((err) => {
+    process.stderr.write(`[orchestrator] ${w.name} proc.exited error: ${err}\n`);
   });
 }
 
@@ -67,25 +71,22 @@ function spawnWorkers() {
 }
 
 async function discoverWorkers(): Promise<AgentCard[]> {
-  const cards: AgentCard[] = [];
-  for (const w of WORKERS) {
-    let card: AgentCard | null = null;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        card = await discoverAgent(`http://localhost:${w.port}`);
-        break;
-      } catch {
-        if (attempt < 4) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+  const results = await Promise.allSettled(
+    WORKERS.map(async (w) => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const card = await discoverAgent(`http://localhost:${w.port}`);
+          workerFailures.delete(w.name); // reset backoff on successful startup
+          return card;
+        } catch {
+          if (attempt < 4) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+        }
       }
-    }
-    if (card) {
-      cards.push(card);
-      workerFailures.delete(w.name); // reset backoff on successful startup
-    } else {
       process.stderr.write(`[orchestrator] failed to discover ${w.name} after 5 attempts\n`);
-    }
-  }
-  return cards;
+      return null;
+    })
+  );
+  return results.flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 }
 
 // ── Build skill-to-worker map ───────────────────────────────────
@@ -627,7 +628,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     let res: Response;
     try {
-      res = await fetch("http://localhost:8081/stream", {
+      const shellPort = WORKERS.find(w => w.name === "shell")?.port ?? 8081;
+      res = await fetch(`http://localhost:${shellPort}/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ params: { args: { command } } }),
@@ -930,6 +932,7 @@ async function pollWorkerHealth() {
       const prev = workerHealth.get(w.name);
       workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now(), uptime: body.uptime });
       if (prev && !prev.healthy) {
+        workerFailures.delete(w.name); // reset backoff counter on recovery
         process.stderr.write(`[orchestrator] ${w.name} recovered\n`);
       }
     } catch {
@@ -1163,17 +1166,15 @@ async function main() {
 }
 
 // Cleanup on exit
-process.on("SIGINT", () => {
+function shutdownWorkers() {
+  for (const timer of respawnTimers.values()) clearTimeout(timer);
   for (const proc of workerProcs.values()) proc.kill();
-  process.exit(0);
-});
-process.on("SIGTERM", () => {
-  for (const proc of workerProcs.values()) proc.kill();
-  process.exit(0);
-});
+}
+process.on("SIGINT",  () => { shutdownWorkers(); process.exit(0); });
+process.on("SIGTERM", () => { shutdownWorkers(); process.exit(0); });
 
 main().catch((err) => {
   process.stderr.write(`Fatal error: ${err}\n`);
-  for (const proc of workerProcs.values()) proc.kill();
+  shutdownWorkers();
   process.exit(1);
 });
