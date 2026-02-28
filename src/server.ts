@@ -103,6 +103,21 @@ function saveSessionHistory(sessionId: string, history: SessionMessage[]): void 
   memory.set(SESSION_AGENT, sessionId, JSON.stringify(history.slice(-(MAX_TURNS * 2))));
 }
 
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function pruneStaleSessionsImpl(): void {
+  const cutoff = Date.now() - SESSION_TTL_MS;
+  for (const [sessionId, value] of Object.entries(memory.all(SESSION_AGENT))) {
+    try {
+      const hist = JSON.parse(value) as SessionMessage[];
+      const lastTs = hist[hist.length - 1]?.ts ?? 0;
+      if (lastTs < cutoff) memory.forget(SESSION_AGENT, sessionId);
+    } catch {
+      memory.forget(SESSION_AGENT, sessionId);
+    }
+  }
+}
+
 // ── Delegate skill ──────────────────────────────────────────────
 async function delegate(args: Record<string, unknown>): Promise<string> {
   const agentUrl = args.agentUrl as string | undefined;
@@ -302,6 +317,7 @@ const runShellStreamSkill = {
     type: "object" as const,
     properties: {
       command: { type: "string", description: "Shell command to run" },
+      timeoutMs: { type: "number", description: "Timeout in milliseconds (default 120000)" },
     },
     required: ["command"],
   },
@@ -414,13 +430,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === "run_shell_stream") {
     const command = (args as any)?.command as string;
     if (!command) throw new Error("run_shell_stream requires command");
+    const timeoutMs = ((args as any)?.timeoutMs as number) ?? 120_000;
     const progressToken = (request.params as any)._meta?.progressToken;
 
     const res = await fetchWithTimeout("http://localhost:8081/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ params: { args: { command } } }),
-    }, 120_000);
+    }, timeoutMs);
 
     if (!res.ok) throw new Error(`Shell stream error: HTTP ${res.status}`);
 
@@ -485,6 +502,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // get_session_history
   if (name === "get_session_history") {
+    pruneStaleSessionsImpl(); // lazy GC
     const sessionId = (args as any)?.sessionId as string;
     if (!sessionId) throw new Error("get_session_history requires sessionId");
     return { content: [{ type: "text", text: JSON.stringify(loadSessionHistory(sessionId), null, 2) }] };
