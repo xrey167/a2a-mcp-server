@@ -36,7 +36,7 @@ function runClaudeCLI(prompt: string, model: string): string {
   return result.stdout.trim();
 }
 
-async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
+async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string | Record<string, unknown>> {
   switch (skillId) {
     case "ask_claude": {
       const prompt = (args.prompt as string) ?? text;
@@ -71,7 +71,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const db = new Database(database, { readonly: true });
       try {
         const rows = db.query(sql).all();
-        return JSON.stringify(rows, null, 2);
+        return { kind: "data" as const, data: rows };
       } finally {
         db.close();
       }
@@ -110,12 +110,15 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const { skillId, args, message, id: taskId } = data.params ?? {};
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "ask_claude";
-  const resultText = await handleSkill(sid, args ?? { prompt: text }, text);
+  const result = await handleSkill(sid, args ?? { prompt: text }, text);
+  const part = typeof result === "string"
+    ? { kind: "text" as const, text: result }
+    : result;
 
   return {
     jsonrpc: "2.0", id: data.id,
     result: { id: taskId, status: { state: "completed" },
-      artifacts: [{ parts: [{ kind: "text" as const, text: resultText }] }] },
+      artifacts: [{ parts: [part] }] },
   };
 });
 
