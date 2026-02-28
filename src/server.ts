@@ -3,6 +3,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import Fastify from "fastify";
 import { join, dirname } from "path";
@@ -14,8 +18,9 @@ import { getProjectContext, setProjectContext, getContextPreamble } from "./cont
 import { initPlugins, watchPlugins, pluginSkills } from "./skill-loader.js";
 import { getPersona, watchPersonas } from "./persona-loader.js";
 import { memory } from "./memory.js";
-import { createTask, completeTask, failTask, getTask, pruneStale } from "./task-store.js";
+import { createTask, markWorking, markCompleted, markFailed, markCanceled, getTask, listTasks, pruneTasks, toA2AResult } from "./task-store.js";
 import { initAgentRegistry, registerAgent, unregisterAgent, getExternalCards, getRegistryEntries, getAgentApiKey } from "./agent-registry.js";
+import { AgentError } from "./errors.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -33,6 +38,9 @@ const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 const workerFailures = new Map<string, number>();
 const respawning = new Set<string>();
 let workerCards: AgentCard[] = [];
+
+interface WorkerHealth { healthy: boolean; failCount: number; lastCheck: number; uptime?: number; }
+const workerHealth = new Map<string, WorkerHealth>();
 
 // ── Spawn workers (with exponential-backoff auto-respawn) ────────
 function spawnWorker(w: typeof WORKERS[number]) {
@@ -336,6 +344,47 @@ const listAgentsSkill = {
   inputSchema: { type: "object" as const, properties: {} },
 };
 
+const memorySearchSkill = {
+  id: "memory_search",
+  name: "Memory Search",
+  description: "Full-text search across all agent memories",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      query: { type: "string", description: "Search query" },
+      agent: { type: "string", description: "Filter by agent name (optional)" },
+    },
+    required: ["query"],
+  },
+};
+
+const memoryListSkill = {
+  id: "memory_list",
+  name: "Memory List",
+  description: "List all memory keys for an agent, optionally filtered by prefix",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      agent: { type: "string", description: "Agent name" },
+      prefix: { type: "string", description: "Key prefix filter (optional)" },
+    },
+    required: ["agent"],
+  },
+};
+
+const memoryCleanupSkill = {
+  id: "memory_cleanup",
+  name: "Memory Cleanup",
+  description: "Delete memories older than a given number of days",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      maxAgeDays: { type: "number", description: "Delete memories older than this many days" },
+    },
+    required: ["maxAgeDays"],
+  },
+};
+
 const listMcpServersSkill = {
   id: "list_mcp_servers",
   name: "List MCP Servers",
@@ -413,6 +462,9 @@ function getAllToolDefs() {
     { name: unregisterAgentSkill.id, description: unregisterAgentSkill.description, inputSchema: unregisterAgentSkill.inputSchema },
     { name: runShellStreamSkill.id, description: runShellStreamSkill.description, inputSchema: runShellStreamSkill.inputSchema },
     { name: listAgentsSkill.id, description: listAgentsSkill.description, inputSchema: listAgentsSkill.inputSchema },
+    { name: memorySearchSkill.id, description: memorySearchSkill.description, inputSchema: memorySearchSkill.inputSchema },
+    { name: memoryListSkill.id, description: memoryListSkill.description, inputSchema: memoryListSkill.inputSchema },
+    { name: memoryCleanupSkill.id, description: memoryCleanupSkill.description, inputSchema: memoryCleanupSkill.inputSchema },
     { name: listMcpServersSkill.id, description: listMcpServersSkill.description, inputSchema: listMcpServersSkill.inputSchema },
     { name: useMcpToolSkill.id, description: useMcpToolSkill.description, inputSchema: useMcpToolSkill.inputSchema },
     { name: getProjectContextSkill.id, description: getProjectContextSkill.description, inputSchema: getProjectContextSkill.inputSchema },
@@ -446,6 +498,117 @@ function getAllToolDefs() {
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: getAllToolDefs(),
 }));
+
+// ── MCP Resources ───────────────────────────────────────────────
+
+server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  const resources: Array<{ uri: string; name: string; description: string; mimeType: string }> = [
+    { uri: "a2a://context", name: "Project Context", description: "Current project context (summary, goals, stack, notes)", mimeType: "application/json" },
+    { uri: "a2a://health", name: "Worker Health", description: "Health status of all worker agents", mimeType: "application/json" },
+    { uri: "a2a://tasks", name: "Task List", description: "List of all active and recent tasks", mimeType: "application/json" },
+  ];
+  for (const card of workerCards) {
+    resources.push({
+      uri: `a2a://workers/${encodeURIComponent(card.name)}/card`,
+      name: `${card.name} Agent Card`,
+      description: `Agent card for ${card.name}: ${card.description}`,
+      mimeType: "application/json",
+    });
+  }
+  return { resources };
+});
+
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const { uri } = request.params;
+
+  if (uri === "a2a://context") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(getProjectContext(), null, 2) }] };
+  }
+
+  if (uri === "a2a://health") {
+    const health: Record<string, unknown> = {};
+    for (const w of WORKERS) {
+      health[w.name] = workerHealth.get(w.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+    }
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(health, null, 2) }] };
+  }
+
+  if (uri === "a2a://tasks") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listTasks(), null, 2) }] };
+  }
+
+  const workerMatch = uri.match(/^a2a:\/\/workers\/([^/]+)\/card$/);
+  if (workerMatch) {
+    const name = decodeURIComponent(workerMatch[1]);
+    const card = workerCards.find(c => c.name === name);
+    if (!card) throw new AgentError("ROUTING_ERROR", `Worker not found: ${name}`);
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(card, null, 2) }] };
+  }
+
+  throw new AgentError("ROUTING_ERROR", `Resource not found: ${uri}`);
+});
+
+// ── MCP Prompts ─────────────────────────────────────────────────
+
+const ALLOWED_PERSONAS = new Set(["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent"]);
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  const prompts: Array<{ name: string; description: string; arguments?: Array<{ name: string; description: string; required?: boolean }> }> = [];
+
+  for (const name of ALLOWED_PERSONAS) {
+    const persona = getPersona(name);
+    if (persona.systemPrompt) {
+      prompts.push({ name: `persona-${name}`, description: `System prompt for the ${name} persona` });
+    }
+  }
+
+  prompts.push({
+    name: "delegate-task",
+    description: "Delegate a task with project context automatically injected",
+    arguments: [
+      { name: "message", description: "The task message to delegate", required: true },
+      { name: "skillId", description: "Optional skill ID to target", required: false },
+    ],
+  });
+
+  return { prompts };
+});
+
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  const { name, arguments: promptArgs } = request.params;
+
+  if (name.startsWith("persona-")) {
+    const personaName = name.replace("persona-", "");
+    if (!ALLOWED_PERSONAS.has(personaName)) {
+      throw new AgentError("INVALID_ARGS", `Unknown persona: ${personaName}`);
+    }
+    const persona = getPersona(personaName);
+    return {
+      messages: [{
+        role: "user" as const,
+        content: { type: "text" as const, text: persona.systemPrompt || `(no system prompt configured for ${personaName})` },
+      }],
+    };
+  }
+
+  if (name === "delegate-task") {
+    const message = (promptArgs as any)?.message ?? "";
+    const skillId = (promptArgs as any)?.skillId;
+    const preamble = getContextPreamble();
+    const enriched = preamble ? `${preamble}\n\n${message}` : message;
+    const parts: string[] = [`Task: ${enriched}`];
+    if (skillId) parts.push(`Target skill: ${skillId}`);
+    parts.push(`\nAvailable workers:\n${workerCards.map(c => `- ${c.name}: ${c.skills.map(s => s.id).join(", ")}`).join("\n")}`);
+    return {
+      messages: [{
+        role: "user" as const,
+        content: { type: "text" as const, text: parts.join("\n") },
+      }],
+    };
+  }
+
+  throw new AgentError("ROUTING_ERROR", `Prompt not found: ${name}`);
+});
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
@@ -529,29 +692,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // delegate_async
   if (name === "delegate_async") {
-    const sessionId = (args as any)?.sessionId as string | undefined;
     const skillId = (args as any)?.skillId as string | undefined;
     const agentUrl = (args as any)?.agentUrl as string | undefined;
-    const taskId = createTask({ sessionId, skillId, agentUrl });
+    const task = createTask({ skillId, workerUrl: agentUrl });
+    markWorking(task.id);
     delegate(args ?? {})
-      .then(result => completeTask(taskId, result))
+      .then(result => markCompleted(task.id, result))
       .catch(err => {
-        try { failTask(taskId, String(err)); }
-        catch (e) { process.stderr.write(`[orchestrator] failTask error: ${e}\n`); }
+        try { markFailed(task.id, { code: "TASK_FAILED", message: String(err) }); }
+        catch (e) { process.stderr.write(`[orchestrator] markFailed error: ${e}\n`); }
       });
-    return { content: [{ type: "text", text: JSON.stringify({ taskId }) }] };
+    return { content: [{ type: "text", text: JSON.stringify({ taskId: task.id }) }] };
   }
 
   // get_task_result
   if (name === "get_task_result") {
-    pruneStale();
+    pruneTasks(7 * 24 * 60 * 60 * 1000);
     const taskId = (args as any)?.taskId as string;
     if (!taskId) throw new Error("get_task_result requires taskId");
-    const record = getTask(taskId);
-    if (!record) return { content: [{ type: "text", text: JSON.stringify({ status: "not_found" }) }] };
-    if (record.state === "pending") return { content: [{ type: "text", text: JSON.stringify({ status: "pending" }) }] };
-    if (record.state === "completed") return { content: [{ type: "text", text: JSON.stringify({ status: "completed", result: record.result }) }] };
-    return { content: [{ type: "text", text: JSON.stringify({ status: "failed", error: record.error }) }] };
+    const task = getTask(taskId);
+    if (!task) return { content: [{ type: "text", text: JSON.stringify({ status: "not_found" }) }] };
+    if (task.state === "submitted" || task.state === "working") return { content: [{ type: "text", text: JSON.stringify({ status: "pending", state: task.state }) }] };
+    if (task.state === "completed") return { content: [{ type: "text", text: JSON.stringify({ status: "completed", result: task.artifacts[0]?.parts[0]?.text }) }] };
+    if (task.state === "canceled") return { content: [{ type: "text", text: JSON.stringify({ status: "canceled" }) }] };
+    return { content: [{ type: "text", text: JSON.stringify({ status: "failed", error: task.error }) }] };
   }
 
   // get_session_history
@@ -592,6 +756,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
     const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, hasApiKey: !!e.apiKey }));
     return { content: [{ type: "text", text: JSON.stringify([...builtin, ...external], null, 2) }] };
+  }
+
+  // memory_search
+  if (name === "memory_search") {
+    const query = (args as any)?.query as string;
+    if (!query) throw new Error("memory_search requires query");
+    const agent = (args as any)?.agent as string | undefined;
+    const results = memory.search(query, agent);
+    return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+  }
+
+  // memory_list
+  if (name === "memory_list") {
+    const agent = (args as any)?.agent as string;
+    if (!agent) throw new Error("memory_list requires agent");
+    const prefix = (args as any)?.prefix as string | undefined;
+    const keys = memory.listKeys(agent, prefix);
+    return { content: [{ type: "text", text: JSON.stringify(keys, null, 2) }] };
+  }
+
+  // memory_cleanup
+  if (name === "memory_cleanup") {
+    const maxAgeDays = (args as any)?.maxAgeDays as number;
+    if (!maxAgeDays || maxAgeDays <= 0) throw new Error("memory_cleanup requires maxAgeDays > 0");
+    const count = memory.cleanup(maxAgeDays);
+    return { content: [{ type: "text", text: `Deleted ${count} memories older than ${maxAgeDays} days` }] };
   }
 
   // list_mcp_servers
@@ -731,6 +921,28 @@ function checkAuth(request: { ip: string; headers: Record<string, string | strin
   return token === `Bearer ${A2A_API_KEY}`;
 }
 
+// ── Worker health polling ────────────────────────────────────────
+async function pollWorkerHealth() {
+  for (const w of WORKERS) {
+    try {
+      const res = await fetchWithTimeout(`http://localhost:${w.port}/healthz`, {}, 3_000);
+      const body = await res.json() as { uptime?: number };
+      const prev = workerHealth.get(w.name);
+      workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now(), uptime: body.uptime });
+      if (prev && !prev.healthy) {
+        process.stderr.write(`[orchestrator] ${w.name} recovered\n`);
+      }
+    } catch {
+      const prev = workerHealth.get(w.name);
+      const failCount = (prev?.failCount ?? 0) + 1;
+      workerHealth.set(w.name, { healthy: failCount < 3, failCount, lastCheck: Date.now() });
+      if (failCount === 3) {
+        process.stderr.write(`[orchestrator] ${w.name} marked unhealthy after ${failCount} failures\n`);
+      }
+    }
+  }
+}
+
 // ── A2A HTTP Server ─────────────────────────────────────────────
 async function startHttpServer() {
   const app = Fastify({ logger: false });
@@ -771,18 +983,19 @@ async function startHttpServer() {
     if (data?.method === "tasks/get") {
       const taskId = data.params?.id as string | undefined;
       if (!taskId) return { jsonrpc: "2.0", id: data.id, error: { code: -32602, message: "Invalid params: id required" } };
-      pruneStale();
-      const record = getTask(taskId);
-      if (!record) return { jsonrpc: "2.0", id: data.id, result: { id: taskId, status: { state: "unknown" } } };
-      const stateMap: Record<string, string> = { pending: "working", completed: "completed", failed: "failed" };
-      const taskResult: Record<string, unknown> = { id: taskId, status: { state: stateMap[record.state] ?? "unknown" }, contextId: record.sessionId };
-      if (record.state === "completed" && record.result) {
-        taskResult.artifacts = [{ parts: [{ kind: "text", text: record.result }] }];
-      }
-      if (record.state === "failed" && record.error) {
-        (taskResult.status as Record<string, unknown>).message = { role: "agent", parts: [{ kind: "text", text: record.error }] };
-      }
-      return { jsonrpc: "2.0", id: data.id, result: taskResult };
+      pruneTasks(7 * 24 * 60 * 60 * 1000);
+      const task = getTask(taskId);
+      if (!task) return { jsonrpc: "2.0", id: data.id, result: { id: taskId, status: { state: "unknown" } } };
+      return { jsonrpc: "2.0", id: data.id, result: toA2AResult(task) };
+    }
+
+    // tasks/cancel — A2A spec endpoint for canceling a task
+    if (data?.method === "tasks/cancel") {
+      const taskId = data.params?.id as string | undefined;
+      if (!taskId) return { jsonrpc: "2.0", id: data.id, error: { code: -32602, message: "Invalid params: id required" } };
+      const task = markCanceled(taskId);
+      if (!task) return { jsonrpc: "2.0", id: data.id, result: { id: taskId, status: { state: "unknown" } } };
+      return { jsonrpc: "2.0", id: data.id, result: toA2AResult(task) };
     }
 
     if (data?.method !== "tasks/send") {
@@ -812,27 +1025,28 @@ async function startHttpServer() {
     } else if (skillId === "set_project_context") {
       resultText = JSON.stringify(setProjectContext(args ?? {}), null, 2);
     } else if (skillId === "delegate_async") {
-      const sessionId = args?.sessionId as string | undefined;
       const skillIdArg = args?.skillId as string | undefined;
       const agentUrl = args?.agentUrl as string | undefined;
-      const taskId = createTask({ sessionId, skillId: skillIdArg, agentUrl });
+      const task = createTask({ skillId: skillIdArg, workerUrl: agentUrl });
+      markWorking(task.id);
       delegate({ ...args, message: text })
-        .then(result => completeTask(taskId, result))
+        .then(result => markCompleted(task.id, result))
         .catch(err => {
-          try { failTask(taskId, String(err)); }
-          catch (e) { process.stderr.write(`[orchestrator] failTask error: ${e}\n`); }
+          try { markFailed(task.id, { code: "TASK_FAILED", message: String(err) }); }
+          catch (e) { process.stderr.write(`[orchestrator] markFailed error: ${e}\n`); }
         });
-      resultText = JSON.stringify({ taskId });
+      resultText = JSON.stringify({ taskId: task.id });
     } else if (skillId === "get_task_result") {
-      pruneStale();
+      pruneTasks(7 * 24 * 60 * 60 * 1000);
       const taskId = args?.taskId as string | undefined;
       if (!taskId) { resultText = "get_task_result requires taskId"; }
       else {
-        const record = getTask(taskId);
-        if (!record) resultText = JSON.stringify({ status: "not_found" });
-        else if (record.state === "pending") resultText = JSON.stringify({ status: "pending" });
-        else if (record.state === "completed") resultText = JSON.stringify({ status: "completed", result: record.result });
-        else resultText = JSON.stringify({ status: "failed", error: record.error });
+        const task = getTask(taskId);
+        if (!task) resultText = JSON.stringify({ status: "not_found" });
+        else if (task.state === "submitted" || task.state === "working") resultText = JSON.stringify({ status: "pending", state: task.state });
+        else if (task.state === "completed") resultText = JSON.stringify({ status: "completed", result: task.artifacts[0]?.parts[0]?.text });
+        else if (task.state === "canceled") resultText = JSON.stringify({ status: "canceled" });
+        else resultText = JSON.stringify({ status: "failed", error: task.error });
       }
     } else if (skillId === "get_session_history") {
       pruneStaleSessionsImpl();
@@ -888,6 +1102,14 @@ async function startHttpServer() {
     };
   });
 
+  app.get("/healthz", async () => {
+    const health: Record<string, unknown> = {};
+    for (const w of WORKERS) {
+      health[w.name] = workerHealth.get(w.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+    }
+    return { status: "ok", agent: "orchestrator", uptime: process.uptime(), workers: health };
+  });
+
   await app.listen({ port: 8080, host: "0.0.0.0" });
   const authStatus = A2A_API_KEY ? `auth: Bearer required for remote` : `auth: none (set A2A_API_KEY to enable)`;
   process.stderr.write(`[orchestrator] A2A HTTP server on http://localhost:8080 — ${authStatus}\n`);
@@ -919,6 +1141,11 @@ async function main() {
 
   // Start HTTP + MCP
   await startHttpServer();
+
+  // Start periodic health checks (every 30s)
+  pollWorkerHealth().catch(() => {});
+  setInterval(() => pollWorkerHealth().catch(() => {}), 30_000);
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
