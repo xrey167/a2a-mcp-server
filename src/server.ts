@@ -448,7 +448,7 @@ const designWorkflowSkill = {
 // ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
   { name: "a2a-mcp-bridge", version: "3.0.0" },
-  { capabilities: { tools: {} } }
+  { capabilities: { tools: {}, resources: {}, prompts: {} } }
 );
 
 function getAllToolDefs() {
@@ -1069,6 +1069,18 @@ async function startHttpServer() {
       const url = args?.url as string | undefined;
       if (!url) { resultText = "unregister_agent requires url"; }
       else { const existed = unregisterAgent(url); resultText = existed ? `Unregistered: ${url}` : `Not found: ${url}`; }
+    } else if (skillId === "memory_search") {
+      const query = args?.query as string | undefined;
+      if (!query) { resultText = "memory_search requires query"; }
+      else { const agent = args?.agent as string | undefined; resultText = JSON.stringify(memory.search(query, agent), null, 2); }
+    } else if (skillId === "memory_list") {
+      const agent = args?.agent as string | undefined;
+      if (!agent) { resultText = "memory_list requires agent"; }
+      else { const prefix = args?.prefix as string | undefined; resultText = JSON.stringify(memory.listKeys(agent, prefix), null, 2); }
+    } else if (skillId === "memory_cleanup") {
+      const maxAgeDays = args?.maxAgeDays as number | undefined;
+      if (!maxAgeDays || maxAgeDays <= 0) { resultText = "memory_cleanup requires maxAgeDays > 0"; }
+      else { const count = memory.cleanup(maxAgeDays); resultText = `Deleted ${count} memories older than ${maxAgeDays} days`; }
     } else if (skillId) {
       // Check plugin skills first (hot-loaded)
       const pluginSkill = pluginSkills.get(skillId);

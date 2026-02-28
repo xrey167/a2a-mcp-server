@@ -1,3 +1,4 @@
+import { spawnSync } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { Database } from "bun:sqlite";
