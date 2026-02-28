@@ -90,24 +90,28 @@ describe("Memory - listKeys", () => {
 
 describe("Memory - cleanup", () => {
   test("cleanup with large maxAge keeps recent entries", () => {
-    memory.set(TEST_AGENT, "cleanup_keep", "keep me");
-    const removed = memory.cleanup(365); // 365 days
-    // Should not remove the entry we just wrote (it's seconds old, not 365 days)
-    expect(memory.get(TEST_AGENT, "cleanup_keep")).toBe("keep me");
+    const uniqueKey = `cleanup_keep_${Date.now()}`;
+    memory.set(TEST_AGENT, uniqueKey, "keep me");
+    const removed = memory.cleanup(365); // 365 days — entry is seconds old, not 365 days
+    expect(memory.get(TEST_AGENT, uniqueKey)).toBe("keep me");
+    // Verify zero entries were removed (all test entries are fresh)
+    expect(removed).toBe(0);
+    memory.forget(TEST_AGENT, uniqueKey);
   });
 
-  test("cleanup with zero days removes all entries", () => {
+  test("cleanup with zero days removes entries older than 0 days", () => {
     // Write a known entry, verify it exists
     const uniqueKey = `cleanup_zero_${Date.now()}`;
     memory.set(TEST_AGENT, uniqueKey, "ephemeral");
     expect(memory.get(TEST_AGENT, uniqueKey)).toBe("ephemeral");
 
-    // Wait 1.1 seconds so the unixepoch timestamp is strictly in the past
+    // Wait so the unixepoch() timestamp is strictly in the past (SQLite unixepoch
+    // has 1-second granularity, so we need >1s to guarantee cutoff < entry ts)
     Bun.sleepSync(1100);
 
     const removed = memory.cleanup(0);
     expect(removed).toBeGreaterThanOrEqual(1);
-    // The entry should now be gone
+    // Explicitly verify the specific entry was removed
     expect(memory.get(TEST_AGENT, uniqueKey)).toBeNull();
   });
 });

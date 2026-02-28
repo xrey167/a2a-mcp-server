@@ -8,7 +8,7 @@ import { AgentError } from "../errors.js";
 
 describe("URL validation (SSRF prevention)", () => {
   // Re-implement the validation logic for testing (same logic as in server.ts)
-  const WORKER_PORTS = [8081, 8082, 8083, 8084, 8085];
+  const WORKER_PORTS = [8081, 8082, 8083, 8084, 8085, 8086];
   function isAllowedUrl(url: string): boolean {
     try {
       const parsed = new URL(url);
