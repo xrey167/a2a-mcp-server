@@ -6,7 +6,20 @@ export interface TextPart {
   metadata?: Record<string, unknown>;
 }
 
-export type Part = TextPart;
+export interface DataPart {
+  kind: "data";
+  data: unknown;
+  mimeType?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface FilePart {
+  kind: "file";
+  file: { name?: string; mimeType?: string; uri?: string; bytes?: string };
+  metadata?: Record<string, unknown>;
+}
+
+export type Part = TextPart | DataPart | FilePart;
 
 export interface Message {
   role: "user" | "agent";

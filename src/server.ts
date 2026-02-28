@@ -149,14 +149,14 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
 
   // 1. Direct URL
   if (agentUrl) {
-    result = await sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload });
+    result = await sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId });
   }
   // 2. Route by skillId
   else if (skillId) {
     const router = buildSkillRouter(workerCards, getExternalCards());
     const url = router.get(skillId);
     if (url) {
-      result = await sendTask(url, { skillId, args: skillArgs, message: msgPayload });
+      result = await sendTask(url, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId });
     } else {
       // Also check local skills (backwards compat)
       const localSkill = SKILL_MAP.get(skillId);
@@ -186,7 +186,7 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
       try {
         const parsed = JSON.parse(response);
         if (parsed.url && parsed.skillId) {
-          result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload });
+          result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload, contextId: sessionId });
         } else {
           result = response;
         }

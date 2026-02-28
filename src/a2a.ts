@@ -1,6 +1,19 @@
 import { randomUUID } from "crypto";
 import type { AgentCard, Message } from "./types.js";
 
+/** Coerce any A2A Part shape to a plain string for MCP callers. */
+function extractPartText(part: unknown): string {
+  if (typeof part !== "object" || part === null) return String(part);
+  const p = part as Record<string, unknown>;
+  if (!p.kind || p.kind === "text") return (p.text as string) ?? "";
+  if (p.kind === "data") return JSON.stringify(p.data);
+  if (p.kind === "file") {
+    const f = p.file as Record<string, unknown> | undefined;
+    return f?.uri ? `file:${f.uri}` : f?.name ? `file:${f.name}` : "[file]";
+  }
+  return JSON.stringify(part);
+}
+
 export type { AgentCard };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -22,6 +35,7 @@ export async function fetchWithTimeout(
 export async function sendTask(agentUrl: string, params: {
   skillId?: string; args?: Record<string, unknown>;
   message: Message | { role: string; parts: Array<{ text: string }> };
+  contextId?: string;
 }): Promise<string> {
   const res = await fetchWithTimeout(agentUrl, {
     method: "POST",
@@ -44,7 +58,8 @@ export async function sendTask(agentUrl: string, params: {
     const err = obj.error as Record<string, unknown>;
     throw new Error((err.message as string) ?? JSON.stringify(err));
   }
-  return (obj.result as any)?.artifacts?.[0]?.parts?.[0]?.text ?? JSON.stringify(obj.result);
+  const firstPart = (obj.result as any)?.artifacts?.[0]?.parts?.[0];
+  return firstPart !== undefined ? extractPartText(firstPart) : JSON.stringify(obj.result);
 }
 
 export async function discoverAgent(agentUrl: string): Promise<AgentCard> {
