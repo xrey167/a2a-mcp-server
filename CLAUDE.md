@@ -28,7 +28,7 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 
 ## Architecture
 
-**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns all 5 worker processes via `Bun.spawn`, waits 1.5s, then discovers their agent cards via `GET /.well-known/agent.json`.
+**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns all 5 worker processes via `Bun.spawn`, then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker).
 
 **Worker agents** (standalone Fastify HTTP servers, each a separate process):
 | File | Port | Skills |
@@ -44,7 +44,7 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 **Shared modules:**
 - `src/a2a.ts` — `sendTask(url, params)` and `discoverAgent(url)` helpers
 - `src/memory.ts` — dual-write: SQLite (`~/.a2a-memory.db`) + Obsidian markdown (`~/Documents/Obsidian/a2a-knowledge/_memory/`)
-- `src/skills.ts` — legacy skill registry kept for backwards compatibility
+- `src/skills.ts` — built-in skill registry; also used as fallback routing when no worker owns a skill
 
 **Routing in `delegate` skill (server.ts):**
 1. `agentUrl` provided → send directly

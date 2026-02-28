@@ -21,7 +21,7 @@
  *   - Push once from primary machine, pull on every new machine
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, chmodSync, existsSync, mkdirSync } from "fs";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
 import { homedir } from "os";
 import { join, dirname } from "path";
@@ -80,7 +80,9 @@ function encrypt(passphrase: string, plaintext: string): string {
 }
 
 function decrypt(passphrase: string, payload: string): string {
-  const [ivHex, tagHex, ciphertextHex] = payload.split(":");
+  const parts = payload.split(":");
+  if (parts.length !== 3) throw new Error(`Invalid encrypted payload (expected iv:tag:ciphertext, got ${parts.length} segment(s))`);
+  const [ivHex, tagHex, ciphertextHex] = parts;
   const key = deriveKey(passphrase);
   const decipher = createDecipheriv(ALGO, key, Buffer.from(ivHex, "hex"));
   decipher.setAuthTag(Buffer.from(tagHex, "hex"));
@@ -255,7 +257,9 @@ async function configure(serverUrl?: string, passphrase?: string): Promise<strin
     ...(serverUrl ? { serverUrl } : {}),
     ...(passphrase ? { passphrase } : {}),
   };
-  writeFileSync(SYNC_CONFIG_FILE, JSON.stringify(updated, null, 2));
+  // mode 0o600: config may contain the passphrase that decrypts all credentials
+  writeFileSync(SYNC_CONFIG_FILE, JSON.stringify(updated, null, 2), { mode: 0o600 });
+  try { chmodSync(SYNC_CONFIG_FILE, 0o600); } catch {} // enforce on pre-existing files
   return `Saved config to ${SYNC_CONFIG_FILE}\n${JSON.stringify({ serverUrl: updated.serverUrl, passphrase: updated.passphrase ? "***" : "(not set)" }, null, 2)}`;
 }
 

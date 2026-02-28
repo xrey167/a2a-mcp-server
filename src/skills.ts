@@ -1,19 +1,14 @@
 import { spawnSync } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
-import { randomUUID } from "crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
+import { sendTask } from "./a2a.js";
 
 // ── Auth helper ───────────────────────────────────────────────────
-// Prefer ANTHROPIC_API_KEY if set (CI / non-macOS).
-// Otherwise use the SDK directly — the MCP subprocess inherits
-// Claude Code's env which already has auth configured.
+// The SDK reads ANTHROPIC_API_KEY automatically; Claude Code's OAuth
+// env is forwarded to subprocesses, so new Anthropic() always works.
 function getAnthropicClient(): Anthropic {
-  if (process.env.ANTHROPIC_API_KEY) {
-    return new Anthropic();
-  }
-  // When spawned by Claude Code the auth env is forwarded automatically
   return new Anthropic();
 }
 
@@ -256,22 +251,11 @@ const callA2aAgent: Skill = {
     required: ["agent_url", "message"],
   },
   run: async ({ agent_url, message, skill_id, args }) => {
-    const res = await fetch(agent_url as string, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        method: "tasks/send",
-        id: randomUUID(),
-        params: {
-          id: randomUUID(),
-          skillId: skill_id,
-          args,
-          message: { role: "user", parts: [{ text: message as string }] },
-        },
-      }),
+    return sendTask(agent_url as string, {
+      skillId: skill_id as string | undefined,
+      args: args as Record<string, unknown> | undefined,
+      message: { role: "user", parts: [{ kind: "text" as const, text: message as string }] },
     });
-    return JSON.stringify(await res.json(), null, 2);
   },
 };
 

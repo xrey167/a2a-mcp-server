@@ -7,6 +7,9 @@ const VAULT = process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/
 const MEMORY_DIR = join(VAULT, "_memory");
 
 const db = new Database(join(homedir(), ".a2a-memory.db"));
+// WAL journal mode: 6 processes share this file; without WAL, concurrent writes
+// produce SQLITE_BUSY errors that silently drop data.
+db.run("PRAGMA journal_mode=WAL");
 db.run(`CREATE TABLE IF NOT EXISTS memory (
   agent TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
   ts INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY (agent, key)
