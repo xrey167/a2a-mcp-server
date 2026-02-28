@@ -1,4 +1,5 @@
 import { describe, test, expect } from "bun:test";
+import { join, resolve, sep } from "path";
 import { AgentError } from "../errors.js";
 
 /**
@@ -72,6 +73,32 @@ describe("Persona name validation (path traversal prevention)", () => {
     expect(ALLOWED_PERSONAS.has("evil-agent")).toBe(false);
     expect(ALLOWED_PERSONAS.has("")).toBe(false);
     expect(ALLOWED_PERSONAS.has("orchestrator/../../etc/passwd")).toBe(false);
+  });
+});
+
+describe("Persona loader path bounds check (defense-in-depth)", () => {
+  // Re-implement the bounds check for testing (same logic as in persona-loader.ts)
+  const PERSONAS_DIR = "/fake/personas";
+
+  function isPathSafe(agentName: string): boolean {
+    const filePath = join(PERSONAS_DIR, `${agentName}.md`);
+    return resolve(filePath).startsWith(resolve(PERSONAS_DIR) + sep);
+  }
+
+  test("allows valid agent names", () => {
+    expect(isPathSafe("orchestrator")).toBe(true);
+    expect(isPathSafe("shell-agent")).toBe(true);
+    expect(isPathSafe("ai-agent")).toBe(true);
+  });
+
+  test("blocks path traversal via dot-dot sequences", () => {
+    expect(isPathSafe("../../etc/passwd")).toBe(false);
+    expect(isPathSafe("../../../etc/shadow")).toBe(false);
+    expect(isPathSafe("..")).toBe(false);
+  });
+
+  test("blocks traversal embedded after valid prefix", () => {
+    expect(isPathSafe("orchestrator/../../etc/passwd")).toBe(false);
   });
 });
 
