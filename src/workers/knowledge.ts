@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { join, dirname, basename } from "path";
+import { join, dirname, basename, resolve } from "path";
 import { homedir } from "os";
 import { Glob } from "bun";
 import { memory } from "../memory.js";
@@ -8,7 +8,7 @@ import { getPersona, watchPersonas } from "../persona-loader.js";
 
 const PORT = 8085;
 const NAME = "knowledge-agent";
-const VAULT = process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/a2a-knowledge");
+const VAULT = resolve(process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/a2a-knowledge"));
 
 const AGENT_CARD = {
   name: NAME,
@@ -28,7 +28,15 @@ const AGENT_CARD = {
 };
 
 function notePath(title: string): string {
-  return join(VAULT, `${title}.md`);
+  const p = resolve(VAULT, `${title}.md`);
+  if (!p.startsWith(VAULT + "/")) throw new Error(`Invalid note title: "${title}"`);
+  return p;
+}
+
+function safeScanDir(folder: string): string {
+  const p = resolve(VAULT, folder);
+  if (!p.startsWith(VAULT + "/") && p !== VAULT) throw new Error(`Invalid folder: "${folder}"`);
+  return p;
 }
 
 function buildFrontmatter(tags?: string[]): string {
@@ -76,7 +84,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
     case "list_notes": {
       const folder = (args.folder as string) ?? "";
-      const scanDir = folder ? join(VAULT, folder) : VAULT;
+      const scanDir = folder ? safeScanDir(folder) : VAULT;
       const glob = new Glob("**/*.md");
       const notes: string[] = [];
       for await (const file of glob.scan(scanDir)) {
@@ -114,12 +122,17 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const { skillId, args, message, id: taskId } = data.params ?? {};
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "search_notes";
-  const resultText = await handleSkill(sid, args ?? { query: text }, text);
+  let resultText: string;
+  try {
+    resultText = await handleSkill(sid, args ?? { query: text }, text);
+  } catch (err) {
+    resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+  }
 
   return {
     jsonrpc: "2.0", id: data.id,
     result: { id: taskId, status: { state: "completed" },
-      artifacts: [{ parts: [{ text: resultText }] }] },
+      artifacts: [{ parts: [{ kind: "text" as const, text: resultText }] }] },
   };
 });
 

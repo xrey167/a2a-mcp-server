@@ -115,7 +115,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   return {
     jsonrpc: "2.0", id: data.id,
     result: { id: taskId, status: { state: "completed" },
-      artifacts: [{ parts: [{ text: resultText }] }] },
+      artifacts: [{ parts: [{ kind: "text" as const, text: resultText }] }] },
   };
 });
 

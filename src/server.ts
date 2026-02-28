@@ -8,11 +8,14 @@ import Fastify from "fastify";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { SKILLS, SKILL_MAP } from "./skills.js";
-import { sendTask, discoverAgent, type AgentCard } from "./a2a.js";
-import { initRegistry, listMcpServers, listMcpTools, callMcpTool, refreshManifest } from "./mcp-registry.js";
+import { sendTask, discoverAgent, fetchWithTimeout, type AgentCard } from "./a2a.js";
+import { initRegistry, listMcpServers, listMcpTools, callMcpTool } from "./mcp-registry.js";
 import { getProjectContext, setProjectContext, getContextPreamble } from "./context.js";
 import { initPlugins, watchPlugins, pluginSkills } from "./skill-loader.js";
 import { getPersona, watchPersonas } from "./persona-loader.js";
+import { memory } from "./memory.js";
+import { createTask, completeTask, failTask, getTask, pruneStale } from "./task-store.js";
+import { initAgentRegistry, registerAgent, unregisterAgent, getExternalCards, getRegistryEntries } from "./agent-registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -25,19 +28,23 @@ const WORKERS = [
   { name: "knowledge", path: join(__dirname, "workers/knowledge.ts"), port: 8085 },
 ];
 
-const workerProcs: Array<ReturnType<typeof Bun.spawn>> = [];
+const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
+const respawning = new Set<string>();
 let workerCards: AgentCard[] = [];
 
 // ── Spawn workers (with auto-respawn) ───────────────────────────
 function spawnWorker(w: typeof WORKERS[number]) {
+  respawning.delete(w.name);
   const proc = Bun.spawn(["bun", w.path], {
     stderr: "inherit",
     stdout: "ignore",
   });
-  workerProcs.push(proc);
+  workerProcs.set(w.name, proc);
   process.stderr.write(`[orchestrator] spawned ${w.name} (pid ${proc.pid})\n`);
-  // Auto-respawn on exit
+  // Auto-respawn on exit — guard against double-scheduling
   proc.exited.then(() => {
+    if (respawning.has(w.name)) return;
+    respawning.add(w.name);
     process.stderr.write(`[orchestrator] ${w.name} exited — respawning in 2s\n`);
     setTimeout(() => spawnWorker(w), 2000);
   });
@@ -50,25 +57,50 @@ function spawnWorkers() {
 async function discoverWorkers(): Promise<AgentCard[]> {
   const cards: AgentCard[] = [];
   for (const w of WORKERS) {
-    try {
-      const card = await discoverAgent(`http://localhost:${w.port}`);
+    let card: AgentCard | null = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        card = await discoverAgent(`http://localhost:${w.port}`);
+        break;
+      } catch {
+        if (attempt < 4) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+    if (card) {
       cards.push(card);
-    } catch (err) {
-      process.stderr.write(`[orchestrator] failed to discover ${w.name}: ${err}\n`);
+    } else {
+      process.stderr.write(`[orchestrator] failed to discover ${w.name} after 5 attempts\n`);
     }
   }
   return cards;
 }
 
 // ── Build skill-to-worker map ───────────────────────────────────
-function buildSkillRouter(cards: AgentCard[]): Map<string, string> {
+// External cards added first; built-in overwrites on collision → built-in always wins
+function buildSkillRouter(builtinCards: AgentCard[], externalCards: AgentCard[] = []): Map<string, string> {
   const map = new Map<string, string>();
-  for (const card of cards) {
+  for (const card of [...externalCards, ...builtinCards]) {
     for (const skill of card.skills) {
       map.set(skill.id, card.url);
     }
   }
   return map;
+}
+
+// ── Session continuity ──────────────────────────────────────────
+const SESSION_AGENT = "sessions";
+const MAX_TURNS = 20;
+
+interface SessionMessage { role: "user" | "assistant"; text: string; ts: number; skillId?: string; }
+
+function loadSessionHistory(sessionId: string): SessionMessage[] {
+  const raw = memory.get(SESSION_AGENT, sessionId);
+  if (!raw) return [];
+  try { return JSON.parse(raw) as SessionMessage[]; } catch { return []; }
+}
+
+function saveSessionHistory(sessionId: string, history: SessionMessage[]): void {
+  memory.set(SESSION_AGENT, sessionId, JSON.stringify(history.slice(-(MAX_TURNS * 2))));
 }
 
 // ── Delegate skill ──────────────────────────────────────────────
@@ -77,63 +109,92 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
   const skillId = args.skillId as string | undefined;
   const message = (args.message as string) ?? "";
   const skillArgs = (args.args as Record<string, unknown>) ?? {};
+  const sessionId = args.sessionId as string | undefined;
+
+  // Build session history prefix
+  let historyPrefix = "";
+  if (sessionId) {
+    const history = loadSessionHistory(sessionId);
+    if (history.length > 0) {
+      const historyText = history
+        .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`)
+        .join("\n");
+      historyPrefix = `[Session history]\n${historyText}\n\n[Current message]\n`;
+    }
+  }
 
   // Prepend project context if set
   const preamble = getContextPreamble();
-  const enrichedMessage = preamble ? `${preamble}\n\n${message}` : message;
-  const msgPayload = { role: "user", parts: [{ text: enrichedMessage }] };
+  const enrichedMessage = preamble
+    ? `${preamble}\n\n${historyPrefix}${message}`
+    : historyPrefix ? `${historyPrefix}${message}` : message;
+  const msgPayload = { role: "user" as const, parts: [{ kind: "text" as const, text: enrichedMessage }] };
+
+  let result: string;
 
   // 1. Direct URL
   if (agentUrl) {
-    return sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload });
+    result = await sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload });
   }
-
   // 2. Route by skillId
-  if (skillId) {
-    const router = buildSkillRouter(workerCards);
+  else if (skillId) {
+    const router = buildSkillRouter(workerCards, getExternalCards());
     const url = router.get(skillId);
     if (url) {
-      return sendTask(url, { skillId, args: skillArgs, message: msgPayload });
-    }
-
-    // Also check local skills (backwards compat)
-    const localSkill = SKILL_MAP.get(skillId);
-    if (localSkill) {
-      return localSkill.run({ ...skillArgs, prompt: message, command: message, url: message });
-    }
-
-    return `No worker found with skill: ${skillId}`;
-  }
-
-  // 3. Auto-route via ask_claude (using orchestrator persona)
-  const orchestratorPersona = getPersona("orchestrator");
-  const cardsJson = JSON.stringify(workerCards.map(c => ({
-    name: c.name, url: c.url,
-    skills: c.skills.map(s => s.id),
-  })));
-  const prompt = `${orchestratorPersona.systemPrompt}\n\nWorkers: ${cardsJson}. Task: ${message}. Reply JSON only: {"url":"...","skillId":"..."}`;
-
-  // Try to find ai worker
-  const aiUrl = workerCards.find(c => c.name === "ai-agent")?.url;
-  if (aiUrl) {
-    const response = await sendTask(aiUrl, {
-      skillId: "ask_claude",
-      args: { prompt },
-      message: { role: "user", parts: [{ text: prompt }] },
-    });
-    try {
-      const parsed = JSON.parse(response);
-      if (parsed.url && parsed.skillId) {
-        return sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload });
+      result = await sendTask(url, { skillId, args: skillArgs, message: msgPayload });
+    } else {
+      // Also check local skills (backwards compat)
+      const localSkill = SKILL_MAP.get(skillId);
+      if (localSkill) {
+        result = await localSkill.run({ ...skillArgs, prompt: message, command: message, url: message });
+      } else {
+        result = `No worker found with skill: ${skillId}`;
       }
-    } catch {}
-    return response;
+    }
+  }
+  // 3. Auto-route via ask_claude (using orchestrator persona)
+  else {
+    const orchestratorPersona = getPersona("orchestrator");
+    const cardsJson = JSON.stringify(workerCards.map(c => ({
+      name: c.name, url: c.url,
+      skills: c.skills.map(s => s.id),
+    })));
+    const prompt = `${orchestratorPersona.systemPrompt}\n\nWorkers: ${cardsJson}. Task: ${message}. Reply JSON only: {"url":"...","skillId":"..."}`;
+
+    const aiUrl = workerCards.find(c => c.name === "ai-agent")?.url;
+    if (aiUrl) {
+      const response = await sendTask(aiUrl, {
+        skillId: "ask_claude",
+        args: { prompt },
+        message: { role: "user" as const, parts: [{ kind: "text" as const, text: prompt }] },
+      });
+      try {
+        const parsed = JSON.parse(response);
+        if (parsed.url && parsed.skillId) {
+          result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload });
+        } else {
+          result = response;
+        }
+      } catch {
+        result = response;
+      }
+    } else {
+      result = "No AI worker available for auto-routing";
+    }
   }
 
-  return "No AI worker available for auto-routing";
+  // Persist session history
+  if (sessionId) {
+    const history = loadSessionHistory(sessionId);
+    history.push({ role: "user", text: message, ts: Date.now(), skillId });
+    history.push({ role: "assistant", text: result, ts: Date.now(), skillId });
+    saveSessionHistory(sessionId, history);
+  }
+
+  return result;
 }
 
-// ── Orchestrator skills (delegate + list_agents) ────────────────
+// ── Orchestrator skill definitions ──────────────────────────────
 const delegateSkill = {
   id: "delegate",
   name: "Delegate",
@@ -145,15 +206,111 @@ const delegateSkill = {
       skillId: { type: "string", description: "Skill ID to route to (optional)" },
       message: { type: "string", description: "Task message" },
       args: { type: "object", description: "Arguments for the target skill" },
+      sessionId: { type: "string", description: "Session ID for conversation continuity (optional)" },
     },
     required: ["message"],
+  },
+};
+
+const delegateAsyncSkill = {
+  id: "delegate_async",
+  name: "Delegate Async",
+  description: "Fire-and-forget delegate — returns a taskId immediately. Poll with get_task_result.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      agentUrl: { type: "string", description: "Direct URL of the target agent (optional)" },
+      skillId: { type: "string", description: "Skill ID to route to (optional)" },
+      message: { type: "string", description: "Task message" },
+      args: { type: "object", description: "Arguments for the target skill" },
+      sessionId: { type: "string", description: "Session ID for conversation continuity (optional)" },
+    },
+    required: ["message"],
+  },
+};
+
+const getTaskResultSkill = {
+  id: "get_task_result",
+  name: "Get Task Result",
+  description: "Poll the result of a task started with delegate_async",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      taskId: { type: "string", description: "Task ID returned by delegate_async" },
+    },
+    required: ["taskId"],
+  },
+};
+
+const getSessionHistorySkill = {
+  id: "get_session_history",
+  name: "Get Session History",
+  description: "Return the conversation history for a session",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      sessionId: { type: "string", description: "Session ID" },
+    },
+    required: ["sessionId"],
+  },
+};
+
+const clearSessionSkill = {
+  id: "clear_session",
+  name: "Clear Session",
+  description: "Clear the conversation history for a session",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      sessionId: { type: "string", description: "Session ID to clear" },
+    },
+    required: ["sessionId"],
+  },
+};
+
+const registerAgentSkill = {
+  id: "register_agent",
+  name: "Register Agent",
+  description: "Register an external A2A agent by URL — discovers its card and persists it",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      url: { type: "string", description: "Base URL of the agent (e.g. http://host:8080)" },
+    },
+    required: ["url"],
+  },
+};
+
+const unregisterAgentSkill = {
+  id: "unregister_agent",
+  name: "Unregister Agent",
+  description: "Remove an external agent from the registry",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      url: { type: "string", description: "Base URL of the agent to remove" },
+    },
+    required: ["url"],
+  },
+};
+
+const runShellStreamSkill = {
+  id: "run_shell_stream",
+  name: "Run Shell Stream",
+  description: "Execute a shell command with real-time stdout/stderr streamed as MCP progress notifications. Returns complete output when done.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      command: { type: "string", description: "Shell command to run" },
+    },
+    required: ["command"],
   },
 };
 
 const listAgentsSkill = {
   id: "list_agents",
   name: "List Agents",
-  description: "Return JSON of all worker agent cards and their skills",
+  description: "Return JSON of all worker agent cards (builtin + external) and their skills",
   inputSchema: { type: "object" as const, properties: {} },
 };
 
@@ -206,11 +363,16 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-// Gather all skills: existing local + delegate + list_agents + worker skills
 function getAllToolDefs() {
   const tools = [
-    // orchestrator tools
     { name: delegateSkill.id, description: delegateSkill.description, inputSchema: delegateSkill.inputSchema },
+    { name: delegateAsyncSkill.id, description: delegateAsyncSkill.description, inputSchema: delegateAsyncSkill.inputSchema },
+    { name: getTaskResultSkill.id, description: getTaskResultSkill.description, inputSchema: getTaskResultSkill.inputSchema },
+    { name: getSessionHistorySkill.id, description: getSessionHistorySkill.description, inputSchema: getSessionHistorySkill.inputSchema },
+    { name: clearSessionSkill.id, description: clearSessionSkill.description, inputSchema: clearSessionSkill.inputSchema },
+    { name: registerAgentSkill.id, description: registerAgentSkill.description, inputSchema: registerAgentSkill.inputSchema },
+    { name: unregisterAgentSkill.id, description: unregisterAgentSkill.description, inputSchema: unregisterAgentSkill.inputSchema },
+    { name: runShellStreamSkill.id, description: runShellStreamSkill.description, inputSchema: runShellStreamSkill.inputSchema },
     { name: listAgentsSkill.id, description: listAgentsSkill.description, inputSchema: listAgentsSkill.inputSchema },
     { name: listMcpServersSkill.id, description: listMcpServersSkill.description, inputSchema: listMcpServersSkill.inputSchema },
     { name: useMcpToolSkill.id, description: useMcpToolSkill.description, inputSchema: useMcpToolSkill.inputSchema },
@@ -229,7 +391,6 @@ function getAllToolDefs() {
   // Also expose worker skills directly
   for (const card of workerCards) {
     for (const skill of card.skills) {
-      // Skip if already registered (local skills take priority)
       if (tools.some(t => t.name === skill.id)) continue;
       tools.push({
         name: skill.id,
@@ -249,15 +410,115 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
+  // run_shell_stream — handled first to access _meta.progressToken
+  if (name === "run_shell_stream") {
+    const command = (args as any)?.command as string;
+    if (!command) throw new Error("run_shell_stream requires command");
+    const progressToken = (request.params as any)._meta?.progressToken;
+
+    const res = await fetchWithTimeout("http://localhost:8081/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params: { args: { command } } }),
+    }, 120_000);
+
+    if (!res.ok) throw new Error(`Shell stream error: HTTP ${res.status}`);
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let accumulated = "";
+    let chunkIndex = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const raw = decoder.decode(value);
+      for (const line of raw.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const event = JSON.parse(line.slice(6));
+          if (event.type === "stdout" || event.type === "stderr") {
+            accumulated += event.text;
+            if (progressToken !== undefined) {
+              await server.notification({
+                method: "notifications/progress",
+                params: { progressToken, progress: ++chunkIndex, message: event.text },
+              });
+            }
+          }
+        } catch {}
+      }
+    }
+
+    return { content: [{ type: "text", text: accumulated || "(no output)" }] };
+  }
+
   // delegate
   if (name === "delegate") {
     const result = await delegate(args ?? {});
     return { content: [{ type: "text", text: result }] };
   }
 
+  // delegate_async
+  if (name === "delegate_async") {
+    const sessionId = (args as any)?.sessionId as string | undefined;
+    const skillId = (args as any)?.skillId as string | undefined;
+    const agentUrl = (args as any)?.agentUrl as string | undefined;
+    const taskId = createTask({ sessionId, skillId, agentUrl });
+    delegate(args ?? {})
+      .then(result => completeTask(taskId, result))
+      .catch(err => failTask(taskId, String(err)));
+    return { content: [{ type: "text", text: JSON.stringify({ taskId }) }] };
+  }
+
+  // get_task_result
+  if (name === "get_task_result") {
+    pruneStale();
+    const taskId = (args as any)?.taskId as string;
+    if (!taskId) throw new Error("get_task_result requires taskId");
+    const record = getTask(taskId);
+    if (!record) return { content: [{ type: "text", text: JSON.stringify({ status: "not_found" }) }] };
+    if (record.state === "pending") return { content: [{ type: "text", text: JSON.stringify({ status: "pending" }) }] };
+    if (record.state === "completed") return { content: [{ type: "text", text: JSON.stringify({ status: "completed", result: record.result }) }] };
+    return { content: [{ type: "text", text: JSON.stringify({ status: "failed", error: record.error }) }] };
+  }
+
+  // get_session_history
+  if (name === "get_session_history") {
+    const sessionId = (args as any)?.sessionId as string;
+    if (!sessionId) throw new Error("get_session_history requires sessionId");
+    return { content: [{ type: "text", text: JSON.stringify(loadSessionHistory(sessionId), null, 2) }] };
+  }
+
+  // clear_session
+  if (name === "clear_session") {
+    const sessionId = (args as any)?.sessionId as string;
+    if (!sessionId) throw new Error("clear_session requires sessionId");
+    memory.forget(SESSION_AGENT, sessionId);
+    return { content: [{ type: "text", text: `Session ${sessionId} cleared` }] };
+  }
+
+  // register_agent
+  if (name === "register_agent") {
+    const url = (args as any)?.url as string;
+    if (!url) throw new Error("register_agent requires url");
+    const card = await registerAgent(url);
+    return { content: [{ type: "text", text: JSON.stringify(card, null, 2) }] };
+  }
+
+  // unregister_agent
+  if (name === "unregister_agent") {
+    const url = (args as any)?.url as string;
+    if (!url) throw new Error("unregister_agent requires url");
+    const existed = unregisterAgent(url);
+    return { content: [{ type: "text", text: existed ? `Unregistered: ${url}` : `Not found: ${url}` }] };
+  }
+
   // list_agents
   if (name === "list_agents") {
-    return { content: [{ type: "text", text: JSON.stringify(workerCards, null, 2) }] };
+    const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
+    const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, lastSeenAt: e.lastSeenAt }));
+    return { content: [{ type: "text", text: JSON.stringify([...builtin, ...external], null, 2) }] };
   }
 
   // list_mcp_servers
@@ -302,14 +563,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // route to worker by skill id
-  const router = buildSkillRouter(workerCards);
+  const router = buildSkillRouter(workerCards, getExternalCards());
   const workerUrl = router.get(name);
   if (workerUrl) {
     const message = (args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "";
     const result = await sendTask(workerUrl, {
       skillId: name,
       args: (args ?? {}) as Record<string, unknown>,
-      message: { role: "user", parts: [{ text: String(message) }] },
+      message: { role: "user" as const, parts: [{ kind: "text" as const, text: String(message) }] },
     });
     return { content: [{ type: "text", text: result }] };
   }
@@ -382,7 +643,9 @@ async function startHttpServer() {
     if (skillId === "delegate") {
       resultText = await delegate({ ...args, message: text });
     } else if (skillId === "list_agents") {
-      resultText = JSON.stringify(workerCards, null, 2);
+      const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
+      const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, lastSeenAt: e.lastSeenAt }));
+      resultText = JSON.stringify([...builtin, ...external], null, 2);
     } else if (skillId === "list_mcp_servers") {
       resultText = JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
     } else if (skillId === "use_mcp_tool") {
@@ -404,11 +667,11 @@ async function startHttpServer() {
         if (localSkill) {
           resultText = await localSkill.run(args ?? { prompt: text, command: text, url: text });
         } else {
-          // Route to worker
-          const router = buildSkillRouter(workerCards);
+          // Route to worker (check external registry too)
+          const router = buildSkillRouter(workerCards, getExternalCards());
           const url = router.get(skillId);
           if (url) {
-            resultText = await sendTask(url, { skillId, args, message: { role: "user", parts: [{ text }] } });
+            resultText = await sendTask(url, { skillId, args, message: { role: "user" as const, parts: [{ kind: "text" as const, text }] } });
           } else {
             resultText = `Unknown skill: ${skillId}`;
           }
@@ -422,7 +685,7 @@ async function startHttpServer() {
     return {
       jsonrpc: "2.0", id: data.id,
       result: { id: taskId, status: { state: "completed" },
-        artifacts: [{ parts: [{ text: resultText }] }] },
+        artifacts: [{ parts: [{ kind: "text", text: resultText }] }] },
     };
   });
 
@@ -436,6 +699,9 @@ async function main() {
   // Init external MCP registry (reads ~/.claude.json, builds manifest, no connections yet)
   await initRegistry();
 
+  // Init external agent registry (synchronous, no delay needed)
+  initAgentRegistry();
+
   // Init personas + plugin skills with hot-reload
   getPersona("orchestrator"); // warm cache
   watchPersonas();
@@ -444,13 +710,8 @@ async function main() {
     process.stderr.write(`[orchestrator] plugin skills reloaded: ${pluginSkills.size} total\n`);
   });
 
-  // Spawn workers
+  // Spawn workers and discover with retry (no fixed sleep needed)
   spawnWorkers();
-
-  // Wait for workers to start
-  await new Promise(r => setTimeout(r, 1500));
-
-  // Discover worker cards
   workerCards = await discoverWorkers();
   process.stderr.write(`[orchestrator] discovered ${workerCards.length} workers\n`);
   for (const card of workerCards) {
@@ -465,16 +726,16 @@ async function main() {
 
 // Cleanup on exit
 process.on("SIGINT", () => {
-  for (const proc of workerProcs) proc.kill();
+  for (const proc of workerProcs.values()) proc.kill();
   process.exit(0);
 });
 process.on("SIGTERM", () => {
-  for (const proc of workerProcs) proc.kill();
+  for (const proc of workerProcs.values()) proc.kill();
   process.exit(0);
 });
 
 main().catch((err) => {
   process.stderr.write(`Fatal error: ${err}\n`);
-  for (const proc of workerProcs) proc.kill();
+  for (const proc of workerProcs.values()) proc.kill();
   process.exit(1);
 });

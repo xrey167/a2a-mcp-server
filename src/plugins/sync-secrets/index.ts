@@ -26,6 +26,7 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypt
 import { homedir } from "os";
 import { join, dirname } from "path";
 import type { Skill } from "../../skills.js";
+import { fetchWithTimeout } from "../../a2a.js";
 
 // ── Config ───────────────────────────────────────────────────────
 
@@ -95,7 +96,7 @@ function decrypt(passphrase: string, payload: string): string {
 const MEMORY_AGENT = "sync-secrets";
 
 async function rememberOnServer(serverUrl: string, key: string, value: string): Promise<void> {
-  const res = await fetch(serverUrl, {
+  const res = await fetchWithTimeout(serverUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -112,7 +113,7 @@ async function rememberOnServer(serverUrl: string, key: string, value: string): 
 }
 
 async function recallFromServer(serverUrl: string, key: string): Promise<string | null> {
-  const res = await fetch(serverUrl, {
+  const res = await fetchWithTimeout(serverUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
