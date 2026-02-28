@@ -694,9 +694,9 @@ Send a task directly to any A2A agent by URL, bypassing the orchestrator's routi
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_url` | string | Yes | Target A2A agent URL |
+| `agentUrl` | string | Yes | Target A2A agent URL |
 | `message` | string | Yes | Message to send |
-| `skill_id` | string | No | Skill ID to invoke |
+| `skillId` | string | No | Skill ID to invoke |
 | `args` | object | No | Arguments for the remote skill |
 
 ```bash
