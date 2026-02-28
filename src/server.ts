@@ -434,38 +434,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const timeoutMs = ((args as any)?.timeoutMs as number) ?? 120_000;
     const progressToken = (request.params as any)._meta?.progressToken;
 
-    const res = await fetchWithTimeout("http://localhost:8081/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ params: { args: { command } } }),
-    }, timeoutMs);
+    // Single AbortController covers both initial connect and the read loop —
+    // fetchWithTimeout clears its timer after headers arrive, leaving read() unguarded.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (!res.ok) throw new Error(`Shell stream error: HTTP ${res.status}`);
+    let res: Response;
+    try {
+      res = await fetch("http://localhost:8081/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ params: { args: { command } } }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
 
-    const reader = res.body!.getReader();
+    if (!res.ok) {
+      clearTimeout(timer);
+      throw new Error(`Shell stream error: HTTP ${res.status}`);
+    }
+    if (!res.body) {
+      clearTimeout(timer);
+      throw new Error("Shell stream returned no body");
+    }
+
+    const reader = res.body.getReader();
     const decoder = new TextDecoder();
+    let buffer = "";
     let accumulated = "";
     let chunkIndex = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const raw = decoder.decode(value);
-      for (const line of raw.split("\n")) {
-        if (!line.startsWith("data: ")) continue;
-        try {
-          const event = JSON.parse(line.slice(6));
-          if (event.type === "stdout" || event.type === "stderr") {
-            accumulated += event.text;
-            if (progressToken !== undefined) {
-              await server.notification({
-                method: "notifications/progress",
-                params: { progressToken, progress: ++chunkIndex, message: event.text },
-              });
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        // Accumulate across chunk boundaries so SSE lines are never split mid-parse
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop()!; // keep incomplete trailing line for next chunk
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (event.type === "stdout" || event.type === "stderr") {
+              accumulated += event.text;
+              if (progressToken !== undefined) {
+                await server.notification({
+                  method: "notifications/progress",
+                  params: { progressToken, progress: ++chunkIndex, message: event.text },
+                });
+              }
             }
-          }
-        } catch {}
+          } catch {}
+        }
       }
+    } finally {
+      clearTimeout(timer);
     }
 
     return { content: [{ type: "text", text: accumulated || "(no output)" }] };
@@ -485,7 +512,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const taskId = createTask({ sessionId, skillId, agentUrl });
     delegate(args ?? {})
       .then(result => completeTask(taskId, result))
-      .catch(err => failTask(taskId, String(err)));
+      .catch(err => {
+        try { failTask(taskId, String(err)); }
+        catch (e) { process.stderr.write(`[orchestrator] failTask error: ${e}\n`); }
+      });
     return { content: [{ type: "text", text: JSON.stringify({ taskId }) }] };
   }
 
@@ -537,7 +567,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // list_agents
   if (name === "list_agents") {
     const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
-    const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, lastSeenAt: e.lastSeenAt, hasApiKey: !!e.apiKey }));
+    const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, hasApiKey: !!e.apiKey }));
     return { content: [{ type: "text", text: JSON.stringify([...builtin, ...external], null, 2) }] };
   }
 
@@ -683,7 +713,7 @@ async function startHttpServer() {
       resultText = await delegate({ ...args, message: text });
     } else if (skillId === "list_agents") {
       const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
-      const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, lastSeenAt: e.lastSeenAt, hasApiKey: !!e.apiKey }));
+      const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, hasApiKey: !!e.apiKey }));
       resultText = JSON.stringify([...builtin, ...external], null, 2);
     } else if (skillId === "list_mcp_servers") {
       resultText = JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);

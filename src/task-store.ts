@@ -1,11 +1,11 @@
 import { memory } from "./memory.js";
 import { randomUUID } from "crypto";
 
-export type TaskState = "pending" | "completed" | "failed";
+export type TaskRecordState = "pending" | "completed" | "failed";
 
 export interface TaskRecord {
   taskId: string;
-  state: TaskState;
+  state: TaskRecordState;
   result?: string;
   error?: string;
   createdAt: number;

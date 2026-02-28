@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync, writeFileSync, chmodSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { discoverAgent } from "./a2a.js";
@@ -10,7 +10,6 @@ export interface RegistryEntry {
   url: string;
   card: AgentCard;
   registeredAt: number;
-  lastSeenAt?: number;
   apiKey?: string;
 }
 
@@ -21,7 +20,13 @@ function loadFromFile(): RegistryEntry[] {
 }
 
 function saveToFile(): void {
-  try { writeFileSync(REGISTRY_FILE, JSON.stringify(Array.from(registry.values()), null, 2)); } catch {}
+  try {
+    // mode 0o600: owner read/write only — API keys must not be world-readable
+    writeFileSync(REGISTRY_FILE, JSON.stringify(Array.from(registry.values()), null, 2), { mode: 0o600 });
+    chmodSync(REGISTRY_FILE, 0o600); // enforce on pre-existing files
+  } catch (err) {
+    process.stderr.write(`[agent-registry] failed to save registry: ${err}\n`);
+  }
 }
 
 export function initAgentRegistry(): void {
@@ -30,7 +35,7 @@ export function initAgentRegistry(): void {
 
 export async function registerAgent(url: string, apiKey?: string): Promise<AgentCard> {
   const card = await discoverAgent(url);
-  const entry: RegistryEntry = { url, card, registeredAt: Date.now(), lastSeenAt: Date.now(), apiKey };
+  const entry: RegistryEntry = { url, card, registeredAt: Date.now(), apiKey };
   registry.set(url, entry);
   saveToFile();
   return card;
@@ -53,9 +58,4 @@ export function getExternalCards(): AgentCard[] {
 
 export function getRegistryEntries(): RegistryEntry[] {
   return Array.from(registry.values());
-}
-
-export function touchAgent(url: string): void {
-  const entry = registry.get(url);
-  if (entry) entry.lastSeenAt = Date.now();
 }
