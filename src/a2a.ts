@@ -36,10 +36,12 @@ export async function sendTask(agentUrl: string, params: {
   skillId?: string; args?: Record<string, unknown>;
   message: Message | { role: string; parts: Array<{ text: string }> };
   contextId?: string;
-}): Promise<string> {
+}, options: { apiKey?: string } = {}): Promise<string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (options.apiKey) headers["Authorization"] = `Bearer ${options.apiKey}`;
   const res = await fetchWithTimeout(agentUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ jsonrpc: "2.0", method: "tasks/send", id: randomUUID(),
       params: { id: randomUUID(), ...params } }),
   });

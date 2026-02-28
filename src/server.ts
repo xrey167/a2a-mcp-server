@@ -15,7 +15,7 @@ import { initPlugins, watchPlugins, pluginSkills } from "./skill-loader.js";
 import { getPersona, watchPersonas } from "./persona-loader.js";
 import { memory } from "./memory.js";
 import { createTask, completeTask, failTask, getTask, pruneStale } from "./task-store.js";
-import { initAgentRegistry, registerAgent, unregisterAgent, getExternalCards, getRegistryEntries } from "./agent-registry.js";
+import { initAgentRegistry, registerAgent, unregisterAgent, getExternalCards, getRegistryEntries, getAgentApiKey } from "./agent-registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -149,14 +149,14 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
 
   // 1. Direct URL
   if (agentUrl) {
-    result = await sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId });
+    result = await sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(agentUrl) });
   }
   // 2. Route by skillId
   else if (skillId) {
     const router = buildSkillRouter(workerCards, getExternalCards());
     const url = router.get(skillId);
     if (url) {
-      result = await sendTask(url, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId });
+      result = await sendTask(url, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(url) });
     } else {
       // Also check local skills (backwards compat)
       const localSkill = SKILL_MAP.get(skillId);
@@ -186,7 +186,7 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
       try {
         const parsed = JSON.parse(response);
         if (parsed.url && parsed.skillId) {
-          result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload, contextId: sessionId });
+          result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(parsed.url) });
         } else {
           result = response;
         }
@@ -286,11 +286,12 @@ const clearSessionSkill = {
 const registerAgentSkill = {
   id: "register_agent",
   name: "Register Agent",
-  description: "Register an external A2A agent by URL — discovers its card and persists it",
+  description: "Register an external A2A agent by URL — discovers its card and persists it. Optionally store an API key for authenticated routing.",
   inputSchema: {
     type: "object" as const,
     properties: {
       url: { type: "string", description: "Base URL of the agent (e.g. http://host:8080)" },
+      apiKey: { type: "string", description: "Bearer token to include when routing tasks to this agent (optional)" },
     },
     required: ["url"],
   },
@@ -519,8 +520,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // register_agent
   if (name === "register_agent") {
     const url = (args as any)?.url as string;
+    const apiKey = (args as any)?.apiKey as string | undefined;
     if (!url) throw new Error("register_agent requires url");
-    const card = await registerAgent(url);
+    const card = await registerAgent(url, apiKey);
     return { content: [{ type: "text", text: JSON.stringify(card, null, 2) }] };
   }
 
@@ -535,7 +537,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // list_agents
   if (name === "list_agents") {
     const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
-    const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, lastSeenAt: e.lastSeenAt }));
+    const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, lastSeenAt: e.lastSeenAt, hasApiKey: !!e.apiKey }));
     return { content: [{ type: "text", text: JSON.stringify([...builtin, ...external], null, 2) }] };
   }
 
@@ -589,7 +591,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       skillId: name,
       args: (args ?? {}) as Record<string, unknown>,
       message: { role: "user" as const, parts: [{ kind: "text" as const, text: String(message) }] },
-    });
+    }, { apiKey: getAgentApiKey(workerUrl) });
     return { content: [{ type: "text", text: result }] };
   }
 
@@ -648,6 +650,25 @@ async function startHttpServer() {
     }
 
     const data = request.body;
+
+    // tasks/get — A2A spec endpoint for polling async task state
+    if (data?.method === "tasks/get") {
+      const taskId = data.params?.id as string | undefined;
+      if (!taskId) return { jsonrpc: "2.0", id: data.id, error: { code: -32602, message: "Invalid params: id required" } };
+      pruneStale();
+      const record = getTask(taskId);
+      if (!record) return { jsonrpc: "2.0", id: data.id, result: { id: taskId, status: { state: "unknown" } } };
+      const stateMap: Record<string, string> = { pending: "working", completed: "completed", failed: "failed" };
+      const taskResult: Record<string, unknown> = { id: taskId, status: { state: stateMap[record.state] ?? "unknown" }, contextId: record.sessionId };
+      if (record.state === "completed" && record.result) {
+        taskResult.artifacts = [{ parts: [{ kind: "text", text: record.result }] }];
+      }
+      if (record.state === "failed" && record.error) {
+        (taskResult.status as Record<string, unknown>).message = { role: "agent", parts: [{ kind: "text", text: record.error }] };
+      }
+      return { jsonrpc: "2.0", id: data.id, result: taskResult };
+    }
+
     if (data?.method !== "tasks/send") {
       reply.code(404);
       return { jsonrpc: "2.0", error: { code: -32601, message: "Method not found" } };
@@ -662,7 +683,7 @@ async function startHttpServer() {
       resultText = await delegate({ ...args, message: text });
     } else if (skillId === "list_agents") {
       const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
-      const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, lastSeenAt: e.lastSeenAt }));
+      const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, lastSeenAt: e.lastSeenAt, hasApiKey: !!e.apiKey }));
       resultText = JSON.stringify([...builtin, ...external], null, 2);
     } else if (skillId === "list_mcp_servers") {
       resultText = JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
@@ -689,7 +710,7 @@ async function startHttpServer() {
           const router = buildSkillRouter(workerCards, getExternalCards());
           const url = router.get(skillId);
           if (url) {
-            resultText = await sendTask(url, { skillId, args, message: { role: "user" as const, parts: [{ kind: "text" as const, text }] } });
+            resultText = await sendTask(url, { skillId, args, message: { role: "user" as const, parts: [{ kind: "text" as const, text }] } }, { apiKey: getAgentApiKey(url) });
           } else {
             resultText = `Unknown skill: ${skillId}`;
           }

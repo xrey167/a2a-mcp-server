@@ -11,6 +11,7 @@ export interface RegistryEntry {
   card: AgentCard;
   registeredAt: number;
   lastSeenAt?: number;
+  apiKey?: string;
 }
 
 let registry: Map<string, RegistryEntry> = new Map();
@@ -27,12 +28,16 @@ export function initAgentRegistry(): void {
   registry = new Map(loadFromFile().map(e => [e.url, e]));
 }
 
-export async function registerAgent(url: string): Promise<AgentCard> {
+export async function registerAgent(url: string, apiKey?: string): Promise<AgentCard> {
   const card = await discoverAgent(url);
-  const entry: RegistryEntry = { url, card, registeredAt: Date.now(), lastSeenAt: Date.now() };
+  const entry: RegistryEntry = { url, card, registeredAt: Date.now(), lastSeenAt: Date.now(), apiKey };
   registry.set(url, entry);
   saveToFile();
   return card;
+}
+
+export function getAgentApiKey(url: string): string | undefined {
+  return registry.get(url)?.apiKey;
 }
 
 export function unregisterAgent(url: string): boolean {
