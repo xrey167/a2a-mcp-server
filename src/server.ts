@@ -839,12 +839,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 skillId: "enhance_ui_prompt",
                 args: { description: appConcept, deviceType: deviceType.toLowerCase() },
                 message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
-              })
+              }, { timeoutMs: 60_000 })
             : sendTask(designWorkerUrl, {
                 skillId: "suggest_screens",
                 args: { appConcept, deviceType: deviceType.toLowerCase() },
                 message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
-              }),
+              }, { timeoutMs: 60_000 }),
         ]);
 
         const proj = JSON.parse(projectRaw);

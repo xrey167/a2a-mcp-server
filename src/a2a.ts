@@ -36,7 +36,7 @@ export async function sendTask(agentUrl: string, params: {
   skillId?: string; args?: Record<string, unknown>;
   message: Message | { role: string; parts: Array<{ text: string }> };
   contextId?: string;
-}, options: { apiKey?: string } = {}): Promise<string> {
+}, options: { apiKey?: string; timeoutMs?: number } = {}): Promise<string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (options.apiKey) headers["Authorization"] = `Bearer ${options.apiKey}`;
   const res = await fetchWithTimeout(agentUrl, {
@@ -44,7 +44,7 @@ export async function sendTask(agentUrl: string, params: {
     headers,
     body: JSON.stringify({ jsonrpc: "2.0", method: "tasks/send", id: randomUUID(),
       params: { id: randomUUID(), ...params } }),
-  });
+  }, options.timeoutMs);
   if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} from ${agentUrl}`);
   let json: unknown;
   try {
