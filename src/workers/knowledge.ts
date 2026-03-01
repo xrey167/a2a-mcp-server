@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { Glob } from "bun";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { callPeer } from "../peer.js";
 
 const PORT = 8085;
 const NAME = "knowledge-agent";
@@ -22,6 +23,7 @@ const AGENT_CARD = {
     { id: "update_note", name: "Update Note", description: "Update an existing Obsidian note" },
     { id: "search_notes", name: "Search Notes", description: "Search notes by content (case-insensitive)" },
     { id: "list_notes", name: "List Notes", description: "List all notes in the vault or a subfolder" },
+    { id: "summarize_notes", name: "Summarize Notes", description: "Search notes by query then summarize findings via the ai worker (peer A2A call)" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -94,6 +96,29 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }
       return notes.length > 0 ? notes.join("\n") : "No notes found";
     }
+    case "summarize_notes": {
+      // Step 1: full-text search for matching notes (local)
+      const query = (args.query as string) ?? text;
+      const searchResult = await handleSkill("search_notes", { query }, query);
+      if (searchResult === "No matching notes found") return searchResult;
+
+      // Step 2: read up to 5 matching notes (local filesystem)
+      const noteFiles = searchResult.split("\n").slice(0, 5);
+      const noteContents = noteFiles.map(file => {
+        try {
+          const content = readFileSync(join(VAULT, file), "utf-8");
+          return `## ${file.replace(/\.md$/, "")}\n${content}`;
+        } catch {
+          return `## ${file.replace(/\.md$/, "")}\n(unreadable)`;
+        }
+      });
+
+      // Step 3: call ai-agent's ask_claude directly (peer A2A — no orchestrator hop)
+      const focus = args.focus as string | undefined;
+      const prompt = `Summarize the following notes${focus ? ` focusing on "${focus}"` : ""}:\n\n${noteContents.join("\n\n---\n\n")}`;
+      return callPeer("ask_claude", { prompt }, prompt, 60_000);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
