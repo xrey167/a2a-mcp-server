@@ -200,7 +200,14 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
       try {
         const parsed = JSON.parse(response);
         if (parsed.url && parsed.skillId) {
-          result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(parsed.url) });
+          // Validate LLM-generated URL against known workers (SSRF guard for prompt injection)
+          const knownUrls = new Set([...workerCards.map(c => c.url), ...getExternalCards().map(c => c.url)]);
+          if (!knownUrls.has(parsed.url)) {
+            process.stderr.write(`[orchestrator] AI auto-route returned unknown URL: ${parsed.url}\n`);
+            result = `Error: AI suggested an unknown worker URL: ${parsed.url}`;
+          } else {
+            result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(parsed.url) });
+          }
         } else {
           result = response;
         }
@@ -221,6 +228,213 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
   }
 
   return result;
+}
+
+// ── Design workflow ──────────────────────────────────────────────
+/** Start the design pipeline asynchronously. Returns the taskId JSON immediately. */
+function startDesignWorkflow(args: Record<string, unknown>): string {
+  const appConcept = args.appConcept as string;
+  if (!appConcept) throw new Error("design_workflow requires appConcept");
+  const title = (args.title as string) ?? appConcept;
+  const deviceType = (args.deviceType as string) ?? "MOBILE";
+  const screensOnly = !!(args.screensOnly);
+  const modelId = (args.modelId as string) ?? "GEMINI_3_FLASH";
+  const designWorkerUrl = workerCards.find(c => c.name === "design-agent")?.url ?? "http://localhost:8086";
+
+  const task = createTask({ skillId: "design_workflow" });
+  markWorking(task.id);
+
+  (async () => {
+    const lines: string[] = [];
+    try {
+      emitProgress(task.id, screensOnly
+        ? "Creating project and enhancing prompt…"
+        : "Creating project and planning screens…");
+
+      const [projectRaw, promptResult] = await Promise.all([
+        callMcpTool("create_project", { title }),
+        screensOnly
+          ? sendTask(designWorkerUrl, {
+              skillId: "enhance_ui_prompt",
+              args: { description: appConcept, deviceType: deviceType.toLowerCase() },
+              message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
+            }, { timeoutMs: 60_000 })
+          : sendTask(designWorkerUrl, {
+              skillId: "suggest_screens",
+              args: { appConcept, deviceType: deviceType.toLowerCase() },
+              message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
+            }, { timeoutMs: 60_000 }),
+      ]);
+
+      const proj = JSON.parse(projectRaw);
+      const projectId = (proj.name as string).replace("projects/", "");
+      lines.push(`Project created: ${projectId}\n`);
+
+      if (screensOnly) {
+        emitProgress(task.id, `Project ready (${projectId}) — generating screen…`);
+        const result = await callMcpTool("generate_screen_from_text", {
+          projectId, prompt: promptResult, deviceType, modelId,
+        });
+        lines.push(`**${title}**\n${result}`);
+      } else {
+        let screens: Array<{ name: string; prompt: string }>;
+        try {
+          screens = JSON.parse(promptResult);
+        } catch {
+          markFailed(task.id, { code: "PARSE_ERROR", message: `Failed to parse screen suggestions:\n${promptResult}` });
+          return;
+        }
+        emitProgress(task.id, `Project ready (${projectId}) — generating ${screens.length} screens in parallel…`);
+        let done = 0;
+        const screenResults = await Promise.all(
+          screens.map(async (screen) => {
+            try {
+              const result = await callMcpTool("generate_screen_from_text", {
+                projectId, prompt: screen.prompt, deviceType, modelId,
+              });
+              emitProgress(task.id, `✓ "${screen.name}" done (${++done}/${screens.length})`);
+              return `**${screen.name}**\n${result}`;
+            } catch (err) {
+              emitProgress(task.id, `✗ "${screen.name}" failed (${++done}/${screens.length})`);
+              return `**${screen.name}** — error: ${err}`;
+            }
+          })
+        );
+        lines.push(...screenResults);
+      }
+
+      markCompleted(task.id, lines.join("\n\n"));
+    } catch (err) {
+      try { markFailed(task.id, { code: "WORKFLOW_ERROR", message: String(err) }); }
+      catch (e) { process.stderr.write(`[orchestrator] design_workflow markFailed error: ${e}\n`); }
+    }
+  })();
+
+  return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
+}
+
+// ── Shared skill dispatcher ──────────────────────────────────────
+/**
+ * Execute any orchestrator skill by name. Returns a plain string result.
+ * Used by both the MCP CallToolRequestSchema handler and the A2A tasks/send handler.
+ * Throws on missing required parameters; callers decide how to format errors.
+ */
+async function dispatchSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
+  switch (skillId) {
+    case "delegate":
+      return delegate({ ...args });
+
+    case "delegate_async": {
+      const task = createTask({ skillId: args.skillId as string | undefined, workerUrl: args.agentUrl as string | undefined });
+      markWorking(task.id);
+      delegate({ ...args, message: text })
+        .then(result => markCompleted(task.id, result))
+        .catch(err => {
+          try { markFailed(task.id, { code: "TASK_FAILED", message: String(err) }); }
+          catch (e) { process.stderr.write(`[orchestrator] markFailed error: ${e}\n`); }
+        });
+      return JSON.stringify({ taskId: task.id });
+    }
+
+    case "get_task_result": {
+      pruneTasks(7 * 24 * 60 * 60 * 1000);
+      const taskId = args.taskId as string;
+      if (!taskId) throw new Error("get_task_result requires taskId");
+      const task = getTask(taskId);
+      if (!task) return JSON.stringify({ status: "not_found" });
+      if (task.state === "submitted" || task.state === "working") return JSON.stringify({ status: "pending", state: task.state, progress: task.progress ?? null });
+      if (task.state === "completed") return JSON.stringify({ status: "completed", result: task.artifacts[0]?.parts[0]?.text });
+      if (task.state === "canceled") return JSON.stringify({ status: "canceled" });
+      return JSON.stringify({ status: "failed", error: task.error });
+    }
+
+    case "get_session_history": {
+      pruneStaleSessionsImpl();
+      const sessionId = args.sessionId as string;
+      if (!sessionId) throw new Error("get_session_history requires sessionId");
+      return JSON.stringify(loadSessionHistory(sessionId), null, 2);
+    }
+
+    case "clear_session": {
+      const sessionId = args.sessionId as string;
+      if (!sessionId) throw new Error("clear_session requires sessionId");
+      memory.forget(SESSION_AGENT, sessionId);
+      return `Session ${sessionId} cleared`;
+    }
+
+    case "register_agent": {
+      const url = args.url as string;
+      if (!url) throw new Error("register_agent requires url");
+      const card = await registerAgent(url, args.apiKey as string | undefined);
+      return JSON.stringify(card, null, 2);
+    }
+
+    case "unregister_agent": {
+      const url = args.url as string;
+      if (!url) throw new Error("unregister_agent requires url");
+      const existed = unregisterAgent(url);
+      return existed ? `Unregistered: ${url}` : `Not found: ${url}`;
+    }
+
+    case "list_agents": {
+      const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
+      const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, hasApiKey: !!e.apiKey }));
+      return JSON.stringify([...builtin, ...external], null, 2);
+    }
+
+    case "memory_search": {
+      const query = args.query as string;
+      if (!query) throw new Error("memory_search requires query");
+      return JSON.stringify(memory.search(query, args.agent as string | undefined), null, 2);
+    }
+
+    case "memory_list": {
+      const agent = args.agent as string;
+      if (!agent) throw new Error("memory_list requires agent");
+      return JSON.stringify(memory.listKeys(agent, args.prefix as string | undefined), null, 2);
+    }
+
+    case "memory_cleanup": {
+      const maxAgeDays = args.maxAgeDays as number;
+      if (!maxAgeDays || maxAgeDays <= 0) throw new Error("memory_cleanup requires maxAgeDays > 0");
+      return `Deleted ${memory.cleanup(maxAgeDays)} memories older than ${maxAgeDays} days`;
+    }
+
+    case "list_mcp_servers":
+      return JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
+
+    case "use_mcp_tool": {
+      const toolName = args.toolName as string;
+      if (!toolName) throw new Error("use_mcp_tool requires toolName");
+      return callMcpTool(toolName, (args.args ?? {}) as Record<string, unknown>);
+    }
+
+    case "get_project_context":
+      return JSON.stringify(getProjectContext(), null, 2);
+
+    case "set_project_context":
+      return `Project context updated:\n${JSON.stringify(setProjectContext(args), null, 2)}`;
+
+    case "design_workflow":
+      return startDesignWorkflow(args);
+
+    default: {
+      // Plugin skills (hot-loaded from src/plugins/)
+      const pluginSkill = pluginSkills.get(skillId);
+      if (pluginSkill) return pluginSkill.run(args);
+
+      // Local skill (backwards compat / built-in SKILL_MAP)
+      const localSkill = SKILL_MAP.get(skillId);
+      if (localSkill) return localSkill.run({ ...args, prompt: text, command: text, url: text });
+
+      // Route to a registered worker by skill ID
+      const router = buildSkillRouter(workerCards, getExternalCards());
+      const url = router.get(skillId);
+      if (url) return sendTask(url, { skillId, args, message: { role: "user" as const, parts: [{ kind: "text" as const, text }] } }, { apiKey: getAgentApiKey(url) });
+
+      throw new Error(`Unknown skill: ${skillId}`);
+    }
+  }
 }
 
 // ── Orchestrator skill definitions ──────────────────────────────
@@ -686,247 +900,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: "text", text: accumulated || "(no output)" }] };
   }
 
-  // delegate
-  if (name === "delegate") {
-    const result = await delegate(args ?? {});
-    return { content: [{ type: "text", text: result }] };
-  }
-
-  // delegate_async
-  if (name === "delegate_async") {
-    const skillId = (args as any)?.skillId as string | undefined;
-    const agentUrl = (args as any)?.agentUrl as string | undefined;
-    const task = createTask({ skillId, workerUrl: agentUrl });
-    markWorking(task.id);
-    delegate(args ?? {})
-      .then(result => markCompleted(task.id, result))
-      .catch(err => {
-        try { markFailed(task.id, { code: "TASK_FAILED", message: String(err) }); }
-        catch (e) { process.stderr.write(`[orchestrator] markFailed error: ${e}\n`); }
-      });
-    return { content: [{ type: "text", text: JSON.stringify({ taskId: task.id }) }] };
-  }
-
-  // get_task_result
-  if (name === "get_task_result") {
-    pruneTasks(7 * 24 * 60 * 60 * 1000);
-    const taskId = (args as any)?.taskId as string;
-    if (!taskId) throw new Error("get_task_result requires taskId");
-    const task = getTask(taskId);
-    if (!task) return { content: [{ type: "text", text: JSON.stringify({ status: "not_found" }) }] };
-    if (task.state === "submitted" || task.state === "working") return { content: [{ type: "text", text: JSON.stringify({ status: "pending", state: task.state, progress: task.progress ?? null }) }] };
-    if (task.state === "completed") return { content: [{ type: "text", text: JSON.stringify({ status: "completed", result: task.artifacts[0]?.parts[0]?.text }) }] };
-    if (task.state === "canceled") return { content: [{ type: "text", text: JSON.stringify({ status: "canceled" }) }] };
-    return { content: [{ type: "text", text: JSON.stringify({ status: "failed", error: task.error }) }] };
-  }
-
-  // get_session_history
-  if (name === "get_session_history") {
-    pruneStaleSessionsImpl(); // lazy GC
-    const sessionId = (args as any)?.sessionId as string;
-    if (!sessionId) throw new Error("get_session_history requires sessionId");
-    return { content: [{ type: "text", text: JSON.stringify(loadSessionHistory(sessionId), null, 2) }] };
-  }
-
-  // clear_session
-  if (name === "clear_session") {
-    const sessionId = (args as any)?.sessionId as string;
-    if (!sessionId) throw new Error("clear_session requires sessionId");
-    memory.forget(SESSION_AGENT, sessionId);
-    return { content: [{ type: "text", text: `Session ${sessionId} cleared` }] };
-  }
-
-  // register_agent
-  if (name === "register_agent") {
-    const url = (args as any)?.url as string;
-    const apiKey = (args as any)?.apiKey as string | undefined;
-    if (!url) throw new Error("register_agent requires url");
-    const card = await registerAgent(url, apiKey);
-    return { content: [{ type: "text", text: JSON.stringify(card, null, 2) }] };
-  }
-
-  // unregister_agent
-  if (name === "unregister_agent") {
-    const url = (args as any)?.url as string;
-    if (!url) throw new Error("unregister_agent requires url");
-    const existed = unregisterAgent(url);
-    return { content: [{ type: "text", text: existed ? `Unregistered: ${url}` : `Not found: ${url}` }] };
-  }
-
-  // list_agents
-  if (name === "list_agents") {
-    const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
-    const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, hasApiKey: !!e.apiKey }));
-    return { content: [{ type: "text", text: JSON.stringify([...builtin, ...external], null, 2) }] };
-  }
-
-  // memory_search
-  if (name === "memory_search") {
-    const query = (args as any)?.query as string;
-    if (!query) throw new Error("memory_search requires query");
-    const agent = (args as any)?.agent as string | undefined;
-    const results = memory.search(query, agent);
-    return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
-  }
-
-  // memory_list
-  if (name === "memory_list") {
-    const agent = (args as any)?.agent as string;
-    if (!agent) throw new Error("memory_list requires agent");
-    const prefix = (args as any)?.prefix as string | undefined;
-    const keys = memory.listKeys(agent, prefix);
-    return { content: [{ type: "text", text: JSON.stringify(keys, null, 2) }] };
-  }
-
-  // memory_cleanup
-  if (name === "memory_cleanup") {
-    const maxAgeDays = (args as any)?.maxAgeDays as number;
-    if (!maxAgeDays || maxAgeDays <= 0) throw new Error("memory_cleanup requires maxAgeDays > 0");
-    const count = memory.cleanup(maxAgeDays);
-    return { content: [{ type: "text", text: `Deleted ${count} memories older than ${maxAgeDays} days` }] };
-  }
-
-  // list_mcp_servers
-  if (name === "list_mcp_servers") {
-    const servers = listMcpServers();
-    const tools = listMcpTools();
-    return { content: [{ type: "text", text: JSON.stringify({ servers, tools }, null, 2) }] };
-  }
-
-  // use_mcp_tool
-  if (name === "use_mcp_tool") {
-    const toolName = (args as any)?.toolName as string;
-    const toolArgs = ((args as any)?.args ?? {}) as Record<string, unknown>;
-    if (!toolName) throw new Error("use_mcp_tool requires toolName");
-    const result = await callMcpTool(toolName, toolArgs);
-    return { content: [{ type: "text", text: result }] };
-  }
-
-  // get_project_context
-  if (name === "get_project_context") {
-    return { content: [{ type: "text", text: JSON.stringify(getProjectContext(), null, 2) }] };
-  }
-
-  // set_project_context
-  if (name === "set_project_context") {
-    const updated = setProjectContext(args as any ?? {});
-    return { content: [{ type: "text", text: `Project context updated:\n${JSON.stringify(updated, null, 2)}` }] };
-  }
-
-  // design_workflow — async: returns taskId immediately, poll with get_task_result
-  if (name === "design_workflow") {
-    const appConcept = (args as any)?.appConcept as string;
-    if (!appConcept) throw new Error("design_workflow requires appConcept");
-
-    const title = ((args as any)?.title as string) ?? appConcept;
-    const deviceType = ((args as any)?.deviceType as string) ?? "MOBILE";
-    const screensOnly = !!((args as any)?.screensOnly);
-    const modelId = ((args as any)?.modelId as string) ?? "GEMINI_3_FLASH";
-    const designWorkerUrl = workerCards.find(c => c.name === "design-agent")?.url ?? "http://localhost:8086";
-
-    const task = createTask({ skillId: "design_workflow" });
-    markWorking(task.id);
-
-    // Run pipeline in background — returns taskId immediately
-    (async () => {
-      const lines: string[] = [];
-      try {
-        // Step 1: Create Stitch project + get screen prompts in parallel
-        emitProgress(task.id, screensOnly
-          ? "Creating project and enhancing prompt…"
-          : "Creating project and planning screens…");
-
-        const [projectRaw, promptResult] = await Promise.all([
-          callMcpTool("create_project", { title }),
-          screensOnly
-            ? sendTask(designWorkerUrl, {
-                skillId: "enhance_ui_prompt",
-                args: { description: appConcept, deviceType: deviceType.toLowerCase() },
-                message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
-              }, { timeoutMs: 60_000 })
-            : sendTask(designWorkerUrl, {
-                skillId: "suggest_screens",
-                args: { appConcept, deviceType: deviceType.toLowerCase() },
-                message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
-              }, { timeoutMs: 60_000 }),
-        ]);
-
-        const proj = JSON.parse(projectRaw);
-        const projectId = (proj.name as string).replace("projects/", "");
-        lines.push(`Project created: ${projectId}\n`);
-
-        // Step 2: Generate screens
-        if (screensOnly) {
-          emitProgress(task.id, `Project ready (${projectId}) — generating screen…`);
-          const result = await callMcpTool("generate_screen_from_text", {
-            projectId, prompt: promptResult, deviceType, modelId,
-          });
-          lines.push(`**${title}**\n${result}`);
-        } else {
-          let screens: Array<{ name: string; prompt: string }>;
-          try {
-            screens = JSON.parse(promptResult);
-          } catch {
-            markFailed(task.id, { code: "PARSE_ERROR", message: `Failed to parse screen suggestions:\n${promptResult}` });
-            return;
-          }
-          emitProgress(task.id, `Project ready (${projectId}) — generating ${screens.length} screens in parallel…`);
-          let done = 0;
-          const screenResults = await Promise.all(
-            screens.map(async (screen) => {
-              try {
-                const result = await callMcpTool("generate_screen_from_text", {
-                  projectId, prompt: screen.prompt, deviceType, modelId,
-                });
-                emitProgress(task.id, `✓ "${screen.name}" done (${++done}/${screens.length})`);
-                return `**${screen.name}**\n${result}`;
-              } catch (err) {
-                emitProgress(task.id, `✗ "${screen.name}" failed (${++done}/${screens.length})`);
-                return `**${screen.name}** — error: ${err}`;
-              }
-            })
-          );
-          lines.push(...screenResults);
-        }
-
-        markCompleted(task.id, lines.join("\n\n"));
-      } catch (err) {
-        try { markFailed(task.id, { code: "WORKFLOW_ERROR", message: String(err) }); }
-        catch (e) { process.stderr.write(`[orchestrator] design_workflow markFailed error: ${e}\n`); }
-      }
-    })();
-
-    return { content: [{ type: "text", text: JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" }) }] };
-  }
-
-  // plugin skill
-  const pluginSkill = pluginSkills.get(name);
-  if (pluginSkill) {
-    const result = await pluginSkill.run(args ?? {});
-    return { content: [{ type: "text", text: result }] };
-  }
-
-  // local skill (backwards compat)
-  const localSkill = SKILL_MAP.get(name);
-  if (localSkill) {
-    const result = await localSkill.run(args ?? {});
-    return { content: [{ type: "text", text: result }] };
-  }
-
-  // route to worker by skill id
-  const router = buildSkillRouter(workerCards, getExternalCards());
-  const workerUrl = router.get(name);
-  if (workerUrl) {
-    const message = (args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "";
-    const result = await sendTask(workerUrl, {
-      skillId: name,
-      args: (args ?? {}) as Record<string, unknown>,
-      message: { role: "user" as const, parts: [{ kind: "text" as const, text: String(message) }] },
-    }, { apiKey: getAgentApiKey(workerUrl) });
-    return { content: [{ type: "text", text: result }] };
-  }
-
-  throw new Error(`Unknown tool: ${name}`);
+  const text = String((args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "");
+  return { content: [{ type: "text", text: await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, text) }] };
 });
 
 // ── A2A HTTP auth ────────────────────────────────────────────────
@@ -1033,104 +1008,12 @@ async function startHttpServer() {
     const text: string = message?.parts?.[0]?.text ?? "";
 
     let resultText: string;
-
-    if (skillId === "delegate") {
-      resultText = await delegate({ ...args, message: text });
-    } else if (skillId === "list_agents") {
-      const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
-      const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, hasApiKey: !!e.apiKey }));
-      resultText = JSON.stringify([...builtin, ...external], null, 2);
-    } else if (skillId === "list_mcp_servers") {
-      resultText = JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
-    } else if (skillId === "use_mcp_tool") {
-      const toolName = (args?.toolName as string);
-      if (!toolName) { resultText = "use_mcp_tool requires toolName"; }
-      else { resultText = await callMcpTool(toolName, (args?.args ?? {}) as Record<string, unknown>); }
-    } else if (skillId === "get_project_context") {
-      resultText = JSON.stringify(getProjectContext(), null, 2);
-    } else if (skillId === "set_project_context") {
-      resultText = JSON.stringify(setProjectContext(args ?? {}), null, 2);
-    } else if (skillId === "delegate_async") {
-      const skillIdArg = args?.skillId as string | undefined;
-      const agentUrl = args?.agentUrl as string | undefined;
-      const task = createTask({ skillId: skillIdArg, workerUrl: agentUrl });
-      markWorking(task.id);
-      delegate({ ...args, message: text })
-        .then(result => markCompleted(task.id, result))
-        .catch(err => {
-          try { markFailed(task.id, { code: "TASK_FAILED", message: String(err) }); }
-          catch (e) { process.stderr.write(`[orchestrator] markFailed error: ${e}\n`); }
-        });
-      resultText = JSON.stringify({ taskId: task.id });
-    } else if (skillId === "get_task_result") {
-      pruneTasks(7 * 24 * 60 * 60 * 1000);
-      const taskId = args?.taskId as string | undefined;
-      if (!taskId) { resultText = "get_task_result requires taskId"; }
-      else {
-        const task = getTask(taskId);
-        if (!task) resultText = JSON.stringify({ status: "not_found" });
-        else if (task.state === "submitted" || task.state === "working") resultText = JSON.stringify({ status: "pending", state: task.state });
-        else if (task.state === "completed") resultText = JSON.stringify({ status: "completed", result: task.artifacts[0]?.parts[0]?.text });
-        else if (task.state === "canceled") resultText = JSON.stringify({ status: "canceled" });
-        else resultText = JSON.stringify({ status: "failed", error: task.error });
-      }
-    } else if (skillId === "get_session_history") {
-      pruneStaleSessionsImpl();
-      const sessionId = args?.sessionId as string | undefined;
-      if (!sessionId) { resultText = "get_session_history requires sessionId"; }
-      else { resultText = JSON.stringify(loadSessionHistory(sessionId), null, 2); }
-    } else if (skillId === "clear_session") {
-      const sessionId = args?.sessionId as string | undefined;
-      if (!sessionId) { resultText = "clear_session requires sessionId"; }
-      else { memory.forget(SESSION_AGENT, sessionId); resultText = `Session ${sessionId} cleared`; }
-    } else if (skillId === "register_agent") {
-      const url = args?.url as string | undefined;
-      if (!url) { resultText = "register_agent requires url"; }
-      else {
-        const apiKey = args?.apiKey as string | undefined;
-        const card = await registerAgent(url, apiKey);
-        resultText = JSON.stringify(card, null, 2);
-      }
-    } else if (skillId === "unregister_agent") {
-      const url = args?.url as string | undefined;
-      if (!url) { resultText = "unregister_agent requires url"; }
-      else { const existed = unregisterAgent(url); resultText = existed ? `Unregistered: ${url}` : `Not found: ${url}`; }
-    } else if (skillId === "memory_search") {
-      const query = args?.query as string | undefined;
-      if (!query) { resultText = "memory_search requires query"; }
-      else { const agent = args?.agent as string | undefined; resultText = JSON.stringify(memory.search(query, agent), null, 2); }
-    } else if (skillId === "memory_list") {
-      const agent = args?.agent as string | undefined;
-      if (!agent) { resultText = "memory_list requires agent"; }
-      else { const prefix = args?.prefix as string | undefined; resultText = JSON.stringify(memory.listKeys(agent, prefix), null, 2); }
-    } else if (skillId === "memory_cleanup") {
-      const maxAgeDays = args?.maxAgeDays as number | undefined;
-      if (!maxAgeDays || maxAgeDays <= 0) { resultText = "memory_cleanup requires maxAgeDays > 0"; }
-      else { const count = memory.cleanup(maxAgeDays); resultText = `Deleted ${count} memories older than ${maxAgeDays} days`; }
-    } else if (skillId) {
-      // Check plugin skills first (hot-loaded)
-      const pluginSkill = pluginSkills.get(skillId);
-      if (pluginSkill) {
-        resultText = await pluginSkill.run(args ?? {});
-      } else {
-        // Try local skill
-        const localSkill = SKILL_MAP.get(skillId);
-        if (localSkill) {
-          resultText = await localSkill.run(args ?? { prompt: text, command: text, url: text });
-        } else {
-          // Route to worker (check external registry too)
-          const router = buildSkillRouter(workerCards, getExternalCards());
-          const url = router.get(skillId);
-          if (url) {
-            resultText = await sendTask(url, { skillId, args, message: { role: "user" as const, parts: [{ kind: "text" as const, text }] } }, { apiKey: getAgentApiKey(url) });
-          } else {
-            resultText = `Unknown skill: ${skillId}`;
-          }
-        }
-      }
-    } else {
-      // Auto-delegate
-      resultText = await delegate({ message: text });
+    try {
+      resultText = skillId
+        ? await dispatchSkill(skillId, args ?? {}, text)
+        : await delegate({ message: text }); // auto-delegate when no skillId
+    } catch (err) {
+      resultText = String(err);
     }
 
     return {
