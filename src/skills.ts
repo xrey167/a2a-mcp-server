@@ -166,7 +166,7 @@ const askClaude: Skill = {
       return block.type === "text" ? block.text : JSON.stringify(block);
     } catch {
       // Fallback: claude CLI (uses OAuth via Claude Code, handles refresh)
-      return runClaudeCLI(prompt as string, model as string);
+      return await runClaudeCLI(prompt as string, model as string);
     }
   },
 };
