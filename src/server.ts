@@ -18,7 +18,7 @@ import { getProjectContext, setProjectContext, getContextPreamble } from "./cont
 import { initPlugins, watchPlugins, pluginSkills } from "./skill-loader.js";
 import { getPersona, watchPersonas } from "./persona-loader.js";
 import { memory } from "./memory.js";
-import { createTask, markWorking, markCompleted, markFailed, markCanceled, getTask, listTasks, pruneTasks, toA2AResult } from "./task-store.js";
+import { createTask, markWorking, markCompleted, markFailed, markCanceled, emitProgress, getTask, listTasks, pruneTasks, toA2AResult, taskEvents } from "./task-store.js";
 import { initAgentRegistry, registerAgent, unregisterAgent, getExternalCards, getRegistryEntries, getAgentApiKey } from "./agent-registry.js";
 import { AgentError } from "./errors.js";
 
@@ -714,7 +714,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!taskId) throw new Error("get_task_result requires taskId");
     const task = getTask(taskId);
     if (!task) return { content: [{ type: "text", text: JSON.stringify({ status: "not_found" }) }] };
-    if (task.state === "submitted" || task.state === "working") return { content: [{ type: "text", text: JSON.stringify({ status: "pending", state: task.state }) }] };
+    if (task.state === "submitted" || task.state === "working") return { content: [{ type: "text", text: JSON.stringify({ status: "pending", state: task.state, progress: task.progress ?? null }) }] };
     if (task.state === "completed") return { content: [{ type: "text", text: JSON.stringify({ status: "completed", result: task.artifacts[0]?.parts[0]?.text }) }] };
     if (task.state === "canceled") return { content: [{ type: "text", text: JSON.stringify({ status: "canceled" }) }] };
     return { content: [{ type: "text", text: JSON.stringify({ status: "failed", error: task.error }) }] };
@@ -832,6 +832,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const lines: string[] = [];
       try {
         // Step 1: Create Stitch project + get screen prompts in parallel
+        emitProgress(task.id, screensOnly
+          ? "Creating project and enhancing prompt…"
+          : "Creating project and planning screens…");
+
         const [projectRaw, promptResult] = await Promise.all([
           callMcpTool("create_project", { title }),
           screensOnly
@@ -853,6 +857,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Step 2: Generate screens
         if (screensOnly) {
+          emitProgress(task.id, `Project ready (${projectId}) — generating screen…`);
           const result = await callMcpTool("generate_screen_from_text", {
             projectId, prompt: promptResult, deviceType, modelId,
           });
@@ -865,14 +870,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             markFailed(task.id, { code: "PARSE_ERROR", message: `Failed to parse screen suggestions:\n${promptResult}` });
             return;
           }
+          emitProgress(task.id, `Project ready (${projectId}) — generating ${screens.length} screens in parallel…`);
+          let done = 0;
           const screenResults = await Promise.all(
             screens.map(async (screen) => {
               try {
                 const result = await callMcpTool("generate_screen_from_text", {
                   projectId, prompt: screen.prompt, deviceType, modelId,
                 });
+                emitProgress(task.id, `✓ "${screen.name}" done (${++done}/${screens.length})`);
                 return `**${screen.name}**\n${result}`;
               } catch (err) {
+                emitProgress(task.id, `✗ "${screen.name}" failed (${++done}/${screens.length})`);
                 return `**${screen.name}** — error: ${err}`;
               }
             })
@@ -1129,6 +1138,62 @@ async function startHttpServer() {
       result: { id: taskId, status: { state: "completed" },
         artifacts: [{ parts: [{ kind: "text", text: resultText }] }] },
     };
+  });
+
+  // SSE endpoint — stream task events in real-time
+  // Usage: curl -N http://localhost:8080/tasks/{id}/events
+  app.get<{ Params: { id: string } }>("/tasks/:id/events", (request, reply) => {
+    const taskId = request.params.id;
+    const task = getTask(taskId);
+    if (!task) {
+      reply.code(404).send({ error: "Task not found" });
+      return;
+    }
+
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+    });
+
+    const send = (event: string, data: unknown) => {
+      reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Send current state immediately
+    send("state", { taskId, state: task.state, progress: task.progress ?? null });
+
+    // If already terminal, close immediately
+    if (task.state === "completed" || task.state === "failed" || task.state === "canceled") {
+      if (task.state === "completed") send("result", { taskId, result: task.artifacts[0]?.parts[0]?.text });
+      if (task.state === "failed") send("error", { taskId, error: task.error });
+      reply.raw.end();
+      return;
+    }
+
+    const onEvent = (ev: { taskId: string; type: string; state: string; data?: string; error?: unknown }) => {
+      if (ev.type === "progress") send("progress", { taskId, message: ev.data });
+      if (ev.type === "state_change") {
+        send("state", { taskId, state: ev.state });
+        if (ev.state === "completed") {
+          const t = getTask(taskId);
+          send("result", { taskId, result: t?.artifacts[0]?.parts[0]?.text });
+          cleanup();
+        } else if (ev.state === "failed" || ev.state === "canceled") {
+          send("error", { taskId, error: ev.error });
+          cleanup();
+        }
+      }
+    };
+
+    const cleanup = () => {
+      taskEvents.off(`task:${taskId}`, onEvent);
+      reply.raw.end();
+    };
+
+    taskEvents.on(`task:${taskId}`, onEvent);
+    request.raw.on("close", () => taskEvents.off(`task:${taskId}`, onEvent));
   });
 
   app.get("/healthz", async () => {
