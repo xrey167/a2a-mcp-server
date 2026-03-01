@@ -246,12 +246,12 @@ export async function callMcpTool(
     if (!serverName) return `Tool not found in MCP registry: ${toolName}`;
 
     const client = await connectServer(serverName);
-    const result = await client.callTool({ name: toolName, arguments: args });
+    const result = await client.callTool({ name: toolName, arguments: args }, undefined, { timeout: 120_000 });
     return extractText(result);
   }
 
   const client = await connectServer(toolDef.server);
-  const result = await client.callTool({ name: toolName, arguments: args });
+  const result = await client.callTool({ name: toolName, arguments: args }, undefined, { timeout: 120_000 });
   return extractText(result);
 }
 

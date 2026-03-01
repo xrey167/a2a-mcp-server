@@ -432,7 +432,7 @@ const setProjectContextSkill = {
 const designWorkflowSkill = {
   id: "design_workflow",
   name: "Design Workflow",
-  description: "Full design pipeline: Gemini suggests screens → creates a Stitch project → generates each screen. Returns project ID and per-screen results.",
+  description: "Full design pipeline: Gemini suggests screens → creates a Stitch project → generates each screen. Returns {taskId} immediately — poll with get_task_result until status is 'completed'.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -813,7 +813,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: "text", text: `Project context updated:\n${JSON.stringify(updated, null, 2)}` }] };
   }
 
-  // design_workflow — Gemini prompt engineering + Stitch project creation
+  // design_workflow — async: returns taskId immediately, poll with get_task_result
   if (name === "design_workflow") {
     const appConcept = (args as any)?.appConcept as string;
     if (!appConcept) throw new Error("design_workflow requires appConcept");
@@ -822,58 +822,72 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const deviceType = ((args as any)?.deviceType as string) ?? "MOBILE";
     const screensOnly = !!((args as any)?.screensOnly);
     const modelId = ((args as any)?.modelId as string) ?? "GEMINI_3_FLASH";
-
     const designWorkerUrl = workerCards.find(c => c.name === "design-agent")?.url ?? "http://localhost:8086";
 
-    // Step 1: Create Stitch project
-    const projectRaw = await callMcpTool("create_project", { title });
-    let projectId: string;
-    try {
-      const proj = JSON.parse(projectRaw);
-      projectId = (proj.name as string).replace("projects/", "");
-    } catch {
-      return { content: [{ type: "text", text: `Failed to parse Stitch project response:\n${projectRaw}` }] };
-    }
+    const task = createTask({ skillId: "design_workflow" });
+    markWorking(task.id);
 
-    const lines: string[] = [`Project created: ${projectId}\n`];
-
-    if (screensOnly) {
-      // Single screen: enhance concept → generate one screen
-      const enhanced = await sendTask(designWorkerUrl, {
-        skillId: "enhance_ui_prompt",
-        args: { description: appConcept, deviceType: deviceType.toLowerCase() },
-        message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
-      });
-      const screenResult = await callMcpTool("generate_screen_from_text", {
-        projectId, prompt: enhanced, deviceType, modelId,
-      });
-      lines.push(`**${title}**\n${screenResult}`);
-    } else {
-      // Multi-screen: suggest screens → generate each
-      const screensJson = await sendTask(designWorkerUrl, {
-        skillId: "suggest_screens",
-        args: { appConcept, deviceType: deviceType.toLowerCase() },
-        message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
-      });
-      let screens: Array<{ name: string; prompt: string }>;
+    // Run pipeline in background — returns taskId immediately
+    (async () => {
+      const lines: string[] = [];
       try {
-        screens = JSON.parse(screensJson);
-      } catch {
-        return { content: [{ type: "text", text: `Failed to parse screen suggestions:\n${screensJson}` }] };
-      }
-      for (const screen of screens) {
-        try {
-          const result = await callMcpTool("generate_screen_from_text", {
-            projectId, prompt: screen.prompt, deviceType, modelId,
-          });
-          lines.push(`**${screen.name}**\n${result}`);
-        } catch (err) {
-          lines.push(`**${screen.name}** — error: ${err}`);
-        }
-      }
-    }
+        // Step 1: Create Stitch project + get screen prompts in parallel
+        const [projectRaw, promptResult] = await Promise.all([
+          callMcpTool("create_project", { title }),
+          screensOnly
+            ? sendTask(designWorkerUrl, {
+                skillId: "enhance_ui_prompt",
+                args: { description: appConcept, deviceType: deviceType.toLowerCase() },
+                message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
+              })
+            : sendTask(designWorkerUrl, {
+                skillId: "suggest_screens",
+                args: { appConcept, deviceType: deviceType.toLowerCase() },
+                message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
+              }),
+        ]);
 
-    return { content: [{ type: "text", text: lines.join("\n\n") }] };
+        const proj = JSON.parse(projectRaw);
+        const projectId = (proj.name as string).replace("projects/", "");
+        lines.push(`Project created: ${projectId}\n`);
+
+        // Step 2: Generate screens
+        if (screensOnly) {
+          const result = await callMcpTool("generate_screen_from_text", {
+            projectId, prompt: promptResult, deviceType, modelId,
+          });
+          lines.push(`**${title}**\n${result}`);
+        } else {
+          let screens: Array<{ name: string; prompt: string }>;
+          try {
+            screens = JSON.parse(promptResult);
+          } catch {
+            markFailed(task.id, { code: "PARSE_ERROR", message: `Failed to parse screen suggestions:\n${promptResult}` });
+            return;
+          }
+          const screenResults = await Promise.all(
+            screens.map(async (screen) => {
+              try {
+                const result = await callMcpTool("generate_screen_from_text", {
+                  projectId, prompt: screen.prompt, deviceType, modelId,
+                });
+                return `**${screen.name}**\n${result}`;
+              } catch (err) {
+                return `**${screen.name}** — error: ${err}`;
+              }
+            })
+          );
+          lines.push(...screenResults);
+        }
+
+        markCompleted(task.id, lines.join("\n\n"));
+      } catch (err) {
+        try { markFailed(task.id, { code: "WORKFLOW_ERROR", message: String(err) }); }
+        catch (e) { process.stderr.write(`[orchestrator] design_workflow markFailed error: ${e}\n`); }
+      }
+    })();
+
+    return { content: [{ type: "text", text: JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" }) }] };
   }
 
   // plugin skill
@@ -948,7 +962,7 @@ async function pollWorkerHealth() {
 
 // ── A2A HTTP Server ─────────────────────────────────────────────
 async function startHttpServer() {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, connectionTimeout: 300_000 });
 
   // Agent card: merge all worker skills
   app.get("/.well-known/agent.json", async () => {
