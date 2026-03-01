@@ -1,16 +1,20 @@
 /**
- * Run `claude -p` as a subprocess for AI responses when the Anthropic SDK
- * is unavailable (no API key, network error, etc.).
- * CLAUDECODE is unset so Claude Code's OAuth refresh is used automatically.
- *
- * Uses Bun.spawn (async) to avoid blocking the event loop, and Promise.race
- * against a hard kill-timer so the caller never hangs if the CLI gets stuck
- * (e.g. when spawned from inside a running Claude Code session where the MCP
- * server ports are already occupied and the subprocess stalls).
+ * Run `claude -p` as a subprocess for AI responses.
+ * CLAUDECODE is unset so Claude Code's OAuth is used automatically.
+ * --strict-mcp-config with an empty config prevents the subprocess from
+ * trying to spawn MCP servers (which would conflict with the already-running
+ * orchestrator ports 8080-8086 and cause an indefinite hang).
  */
-export async function runClaudeCLI(prompt: string, model: string, timeoutMs = 60_000): Promise<string> {
+export async function runClaudeCLI(prompt: string, model: string, timeoutMs = 90_000): Promise<string> {
   const proc = Bun.spawn(
-    ["claude", "-p", prompt, "--model", model, "--output-format", "text", "--dangerously-skip-permissions"],
+    [
+      "claude", "-p", prompt,
+      "--model", model,
+      "--output-format", "text",
+      "--dangerously-skip-permissions",
+      "--mcp-config", '{"mcpServers":{}}',
+      "--strict-mcp-config",
+    ],
     {
       env: { ...process.env, CLAUDECODE: undefined } as Record<string, string>,
       stdout: "pipe",
@@ -34,7 +38,7 @@ export async function runClaudeCLI(prompt: string, model: string, timeoutMs = 60
   const deadline = new Promise<never>((_, reject) =>
     setTimeout(() => {
       proc.kill(9);
-      reject(new Error(`claude CLI timed out after ${timeoutMs}ms — set ANTHROPIC_API_KEY for reliable inference`));
+      reject(new Error(`claude CLI timed out after ${timeoutMs}ms`));
     }, timeoutMs)
   );
 

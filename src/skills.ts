@@ -6,13 +6,6 @@ import { Glob } from "bun";
 import { sendTask } from "./a2a.js";
 import { runClaudeCLI } from "./claude-cli.js";
 
-// ── Auth helper ───────────────────────────────────────────────────
-// The SDK reads ANTHROPIC_API_KEY automatically; Claude Code's OAuth
-// env is forwarded to subprocesses, so new Anthropic() always works.
-function getAnthropicClient(): Anthropic {
-  return new Anthropic();
-}
-
 export interface SkillArgs {
   [key: string]: unknown;
 }
@@ -155,8 +148,7 @@ const askClaude: Skill = {
   },
   run: async ({ prompt, model = "claude-sonnet-4-6" }) => {
     try {
-      // Try SDK first (works when ANTHROPIC_API_KEY is set)
-      const client = getAnthropicClient();
+      const client = new Anthropic();
       const message = await client.messages.create({
         model: model as string,
         max_tokens: 1024,
@@ -165,7 +157,6 @@ const askClaude: Skill = {
       const block = message.content[0];
       return block.type === "text" ? block.text : JSON.stringify(block);
     } catch {
-      // Fallback: claude CLI (uses OAuth via Claude Code, handles refresh)
       return await runClaudeCLI(prompt as string, model as string);
     }
   },

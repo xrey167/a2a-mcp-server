@@ -43,9 +43,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         const block = message.content[0];
         return block.type === "text" ? block.text : JSON.stringify(block);
       } catch {
-        // 15s hard limit — the CLI can stall when called from inside a running
-        // Claude Code session (port conflicts on MCP server re-spawn).
-        return await runClaudeCLI(prompt, model, 15_000);
+        // Fallback to claude CLI (Claude Code OAuth). --strict-mcp-config
+        // prevents re-spawning the MCP server on already-occupied ports.
+        return await runClaudeCLI(prompt, model);
       }
     }
     case "search_files": {
