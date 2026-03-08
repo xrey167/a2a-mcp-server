@@ -705,7 +705,9 @@ async function runSubprocess(
             }
           }
         }
-      } catch {}
+} catch (err) {
+  process.stderr.write(`[sandbox] error reading stdout: ${err}\n`);
+}
     }
 
     async function handleMessage(msg: any) {
