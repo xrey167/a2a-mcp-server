@@ -28,7 +28,7 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 
 ## Architecture
 
-**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns all 7 worker processes via `Bun.spawn`, then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker).
+**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns all 8 worker processes via `Bun.spawn`, then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker).
 
 **Worker agents** (standalone Fastify HTTP servers, each a separate process):
 | File | Port | Skills |
@@ -40,12 +40,24 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 | `src/workers/knowledge.ts` | 8085 | create_note, read_note, update_note, search_notes, list_notes |
 | `src/workers/design.ts` | 8086 | enhance_ui_prompt, suggest_screens, design_critique (Gemini-powered) |
 | `src/workers/factory.ts` | 8087 | normalize_intent, create_project, quality_gate, list_pipelines (AppFactory-style project gen) |
+| `src/workers/data.ts` | 8088 | parse_csv, parse_json, transform_data, analyze_data, pivot_table |
 
 All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 
-**Project Factory (AppFactory-style):** `factory_workflow` is an async orchestrator skill that generates complete projects from a vague idea. Pipeline types defined in `src/pipelines/`: app (Expo), website (Next.js), mcp-server (MCP + Bun), agent (AI agent), api (REST). Each pipeline has: intent normalization prompts, scaffolding templates, code generation steps, and quality gate criteria ("Ralph Mode" — multi-dimension scoring with fix loops). The factory worker coordinates ai-agent (spec + code gen), shell-agent (file I/O), and code-agent (review).
+**Project Factory (AppFactory-style):** `factory_workflow` is an async orchestrator skill that generates complete projects from a vague idea. Pipeline types defined in `src/pipelines/`: app (Expo), website (Next.js), mcp-server (MCP + Bun), agent (AI agent), api (REST), cli (CLI tool). Each pipeline has: intent normalization prompts, scaffolding templates, code generation steps, and quality gate criteria ("Ralph Mode" — multi-dimension scoring with fix loops). The factory worker coordinates ai-agent (spec + code gen), shell-agent (file I/O), and code-agent (review).
 
 **Sandbox execution:** `sandbox_execute` runs TypeScript in isolated Bun subprocesses with access to all worker skills via `skill(id, args)`. Variables persist per session in SQLite. Results >4KB auto-indexed for FTS5 search via `search(varName, query)`. `sandbox_vars` manages persisted variables.
+
+**Workflow Engine:** `workflow_execute` runs multi-step DAG-based workflows across agents. Steps declare dependencies and the engine executes them in topological order with max parallelism. Supports template references `{{stepId.result}}` for piping outputs, conditional execution, and per-step error handling (fail/skip/retry).
+
+**Resilience:**
+- `src/circuit-breaker.ts` — Per-worker circuit breakers (closed→open→half_open) that fail fast when workers are unhealthy, auto-recover after cooldown
+- `src/metrics.ts` — Skill execution metrics (call counts, latencies p50/p95/p99, error rates) exposed via `get_metrics` tool and `a2a://metrics` resource
+
+**Webhooks:**
+- `src/webhooks.ts` — Register webhook endpoints that trigger A2A tasks from external services (GitHub, Stripe, etc.)
+- HMAC-SHA256 signature verification, payload field mapping, async task creation
+- Endpoints: `POST /webhooks/:id` on the A2A HTTP server
 
 **Shared modules:**
 - `src/a2a.ts` — `sendTask(url, params)` and `discoverAgent(url)` helpers
@@ -54,10 +66,14 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 - `src/sandbox.ts` — sandbox executor: spawns isolated Bun subprocesses, handles stdin/stdout IPC for skill calls, manages timeout/cleanup
 - `src/sandbox-store.ts` — `~/.a2a-sandbox.db`: variable persistence (SQLite) + FTS5 auto-indexing for large results (>4KB)
 - `src/sandbox-prelude.ts` — TypeScript prelude template injected into sandbox code (skill(), search(), helpers, $vars)
+- `src/circuit-breaker.ts` — circuit breaker pattern for worker calls
+- `src/metrics.ts` — execution metrics collection
+- `src/workflow-engine.ts` — DAG-based multi-agent workflow orchestration
+- `src/webhooks.ts` — webhook registration, verification, and payload transformation
 
 **Routing in `delegate` skill (server.ts):**
-1. `agentUrl` provided → send directly
-2. `skillId` provided → look up which worker owns it → forward
+1. `agentUrl` provided → send directly (through circuit breaker)
+2. `skillId` provided → look up which worker owns it → forward (through circuit breaker)
 3. Neither → ask ai-agent's `ask_claude` to pick `{url, skillId}` from worker cards
 
 ## Key Constraints
@@ -75,4 +91,6 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 
 1. Create `src/workers/<name>.ts` — Fastify on a new port, export an `AGENT_CARD` and implement skills
 2. Add an entry to `WORKERS` array in `src/server.ts`
-3. All worker output must go to stderr only
+3. Add the port to `ALLOWED_PORTS` in `src/server.ts`
+4. Optionally create a persona file at `src/personas/<name>.md`
+5. All worker output must go to stderr only
