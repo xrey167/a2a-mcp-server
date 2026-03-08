@@ -20,6 +20,7 @@ import {
   sendNotification,
   sendRequest,
   handlePossibleResponse,
+  closeTransport,
 } from "./acp-transport.js";
 import type {
   JsonRpcRequest,
@@ -38,6 +39,25 @@ import type {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const log = (msg: string) => process.stderr.write(`[acp] ${msg}\n`);
+
+/** Sanitize a URL for safe logging (strips credentials, query, and fragment). */
+function sanitizeUrlForLog(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return "<invalid-url>";
+  }
+}
+
+/** Sanitize an arbitrary string value for safe log output (truncate and strip control chars). */
+function sanitizeValueForLog(value: string): string {
+  return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 100);
+}
 
 // ── Worker definitions (same as server.ts) ───────────────────────
 const WORKERS = [
@@ -214,6 +234,22 @@ ${sanitizedMessage}`;
 
   if (!targetUrl || !targetSkillId) {
     return routingResult;
+  }
+
+  // SSRF prevention: validate targetUrl against discovered workerCards allowlist.
+  // This prevents a malicious or hallucinated AI routing response from causing
+  // outbound requests to arbitrary URLs.
+  const matchedCard = workerCards.find(c => c.url === targetUrl);
+  if (!matchedCard) {
+    log(`SSRF blocked: AI routing returned unknown URL "${sanitizeUrlForLog(targetUrl)}"`);
+    return `Routing error: the selected worker URL is not recognized.`;
+  }
+
+  // Verify the skill exists on the matched card.
+  const skillExists = matchedCard.skills.some(s => s.id === targetSkillId);
+  if (!skillExists) {
+    log(`Routing error: skill "${sanitizeValueForLog(targetSkillId)}" not found on worker "${sanitizeValueForLog(matchedCard.name)}"`);
+    return `Routing error: skill "${targetSkillId}" is not available on the selected worker.`;
   }
 
   // Execute the actual skill
@@ -488,6 +524,7 @@ async function main() {
   // Graceful shutdown
   const cleanup = () => {
     log("shutting down...");
+    closeTransport();
     shutdownWorkers();
     process.exit(0);
   };

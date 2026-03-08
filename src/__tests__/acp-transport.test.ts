@@ -4,8 +4,8 @@
  * Run with: bun test src/__tests__/acp-transport.test.ts
  */
 
-import { describe, test, expect } from "bun:test";
-import { handlePossibleResponse } from "../acp-transport.js";
+import { describe, test, expect, afterEach } from "bun:test";
+import { handlePossibleResponse, sendRequest, closeTransport, DEFAULT_REQUEST_TIMEOUT_MS } from "../acp-transport.js";
 
 describe("handlePossibleResponse", () => {
   test("ignores non-objects", () => {
@@ -128,5 +128,67 @@ describe("JSON-RPC message format", () => {
       expect(line).not.toContain("\n");
       expect(JSON.parse(line)).toEqual(msg);
     }
+  });
+});
+
+describe("sendRequest — timeout and close", () => {
+  afterEach(() => {
+    // Clean up any pending requests that tests may have left open
+    closeTransport();
+  });
+
+  test("DEFAULT_REQUEST_TIMEOUT_MS is 30000", () => {
+    expect(DEFAULT_REQUEST_TIMEOUT_MS).toBe(30_000);
+  });
+
+  test("rejects with a timeout error when no response arrives", async () => {
+    const promise = sendRequest("test/method", {}, 50 /* ms */);
+    await expect(promise).rejects.toThrow(/timed out/);
+  });
+
+  test("resolves when a matching response arrives before the timeout", async () => {
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    let capturedId: number | undefined;
+    process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+      if (typeof chunk === "string") {
+        try {
+          const msg = JSON.parse(chunk.trim());
+          if (msg.method === "test/resolve") capturedId = msg.id;
+        } catch {}
+      }
+      return originalWrite(chunk, ...(rest as Parameters<typeof process.stdout.write>));
+    }) as typeof process.stdout.write;
+
+    let promise: Promise<unknown>;
+    try {
+      promise = sendRequest("test/resolve", {}, 2_000);
+      await new Promise(r => setTimeout(r, 10));
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    expect(capturedId).toBeDefined();
+    handlePossibleResponse({ jsonrpc: "2.0", id: capturedId, result: "ok" });
+
+    await expect(promise).resolves.toBe("ok");
+  });
+
+  test("closeTransport rejects all in-flight requests immediately", async () => {
+    const p1 = sendRequest("a/method", {}, 60_000);
+    const p2 = sendRequest("b/method", {}, 60_000);
+
+    closeTransport();
+
+    await expect(p1).rejects.toThrow(/Transport closed/);
+    await expect(p2).rejects.toThrow(/Transport closed/);
+  });
+
+  test("closeTransport is idempotent (safe to call twice)", async () => {
+    const p = sendRequest("c/method", {}, 60_000);
+    closeTransport();
+    // Verify the first close actually rejected the promise
+    await expect(p).rejects.toThrow(/Transport closed/);
+    // Second call should be a no-op without throwing
+    expect(() => closeTransport()).not.toThrow();
   });
 });
