@@ -6,7 +6,7 @@ import type { JsonRpcRequest, JsonRpcNotification, JsonRpcResponse } from "./acp
 
 export type IncomingMessage = JsonRpcRequest | JsonRpcNotification;
 
-type MessageHandler = (msg: IncomingMessage) => void;
+type MessageHandler = (msg: IncomingMessage) => void | Promise<void>;
 
 /**
  * NDJSON reader: reads stdin line-by-line, parses JSON, and calls the handler.
@@ -31,11 +31,17 @@ export function startReading(handler: MessageHandler): () => void {
           const line = buffer.slice(0, newlineIdx).trim();
           buffer = buffer.slice(newlineIdx + 1);
           if (!line) continue;
+          let msg: unknown;
           try {
-            const msg = JSON.parse(line);
-            handler(msg);
-          } catch (err) {
+            msg = JSON.parse(line);
+          } catch {
             process.stderr.write(`[acp-transport] invalid JSON: ${line.slice(0, 200)}\n`);
+            continue;
+          }
+          try {
+            await handler(msg as IncomingMessage);
+          } catch (err) {
+            process.stderr.write(`[acp-transport] handler error: ${err}\n`);
           }
         }
       }
