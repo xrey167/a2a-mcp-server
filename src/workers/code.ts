@@ -5,7 +5,9 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { sendTask } from "../a2a.js";
+import { isAbsolute } from "node:path";
 import { sanitizeUserInput } from "../prompt-sanitizer.js";
+import { sanitizePath } from "../path-utils.js";
 
 const CodeSchemas = {
   codex_exec: z.object({ prompt: z.string().min(1) }).passthrough(),
@@ -92,8 +94,29 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
 
       // If codex is available and we have file paths, use codex exec for file-based review
       if (codexAvailable && files && files.length > 0) {
-        // Sanitize file paths: only allow alphanumeric, dots, dashes, underscores, slashes
-        const safeFiles = files.map(f => f.replace(/[^a-zA-Z0-9._\-\/]/g, "_"));
+        // Validate file paths: reject absolute paths and path traversal attempts,
+        // then sanitize remaining characters. Skip unsafe paths rather than mangling them.
+        const safeFiles: string[] = [];
+        for (const f of files) {
+          // Decode URL-encoded sequences before validation to prevent bypass via %2e%2e etc.
+          let decoded: string;
+          try {
+            decoded = decodeURIComponent(f);
+          } catch {
+            return `Error: unsafe file path rejected: "${f}" — invalid URL encoding`;
+          }
+          if (isAbsolute(decoded)) {
+            return `Error: absolute paths are not allowed in file reviews: "${f}"`;
+          }
+          if (/(^|[/\\])\.\.([/\\]|$)/.test(decoded)) {
+            return `Error: path traversal is not allowed in file reviews: "${f}"`;
+          }
+          try {
+            safeFiles.push(sanitizePath(decoded));
+          } catch (err) {
+            return `Error: unsafe file path rejected: "${f}" — ${(err as Error).message}`;
+          }
+        }
         const fileList = safeFiles.join(", ");
         // Sanitize scope to prevent shell injection via codex exec
         const safeScope = scope.replace(/[^a-zA-Z0-9 _\-,.:]/g, "");
