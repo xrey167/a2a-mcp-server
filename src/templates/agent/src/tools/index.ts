@@ -42,6 +42,72 @@ const getTime: Tool = {
 
 // ── Tool: calculate ─────────────────────────────────────────────
 
+/**
+ * Safe math evaluator — parses and evaluates arithmetic without eval/Function.
+ * Supports: +, -, *, /, %, parentheses, decimals, negative numbers.
+ */
+function safeEvaluate(expr: string): number {
+  const tokens = expr.match(/(\d+\.?\d*|[+\-*/%()])/g);
+  if (!tokens) throw new Error("Empty or invalid expression");
+
+  let pos = 0;
+
+  function peek(): string | undefined { return tokens[pos]; }
+  function consume(): string {
+    if (pos >= tokens.length) throw new Error("Unexpected end of expression");
+    return tokens[pos++];
+  }
+
+  // Grammar: expr → term ((+|-) term)*
+  function parseExpr(): number {
+    let result = parseTerm();
+    while (peek() === "+" || peek() === "-") {
+      const op = consume();
+      const right = parseTerm();
+      result = op === "+" ? result + right : result - right;
+    }
+    return result;
+  }
+
+  // term → factor ((*|/|%) factor)*
+  function parseTerm(): number {
+    let result = parseFactor();
+    while (peek() === "*" || peek() === "/" || peek() === "%") {
+      const op = consume();
+      const right = parseFactor();
+      if (op === "*") result *= right;
+      else if (op === "/") {
+        if (right === 0) throw new Error("Division by zero");
+        result /= right;
+      } else result %= right;
+    }
+    return result;
+  }
+
+  // factor → number | '(' expr ')' | '-' factor
+  function parseFactor(): number {
+    const token = peek();
+    if (token === "(") {
+      consume(); // (
+      const result = parseExpr();
+      if (consume() !== ")") throw new Error("Missing closing parenthesis");
+      return result;
+    }
+    if (token === "-") {
+      consume();
+      return -parseFactor();
+    }
+    const num = consume();
+    const value = Number(num);
+    if (isNaN(value)) throw new Error(`Invalid number: ${num}`);
+    return value;
+  }
+
+  const result = parseExpr();
+  if (pos < tokens.length) throw new Error(`Unexpected token: ${tokens[pos]}`);
+  return result;
+}
+
 const calculate: Tool = {
   spec: {
     name: "calculate",
@@ -51,7 +117,7 @@ const calculate: Tool = {
       properties: {
         expression: {
           type: "string",
-          description: "Math expression to evaluate (e.g. '2 + 2', 'Math.sqrt(16)')",
+          description: "Math expression to evaluate (e.g. '2 + 2', '(10 - 3) * 4', '100 / 3')",
         },
       },
       required: ["expression"],
@@ -60,13 +126,8 @@ const calculate: Tool = {
   async execute(input) {
     const expr = String(input.expression ?? "");
     if (!expr) return "Error: expression is required";
-    // Only allow safe math operations
-    if (!/^[\d\s+\-*/().,%Math\w]+$/.test(expr)) {
-      return "Error: expression contains disallowed characters";
-    }
     try {
-      const fn = new Function(`"use strict"; return (${expr});`);
-      const result = fn();
+      const result = safeEvaluate(expr);
       return String(result);
     } catch (err) {
       return `Error: ${err instanceof Error ? err.message : String(err)}`;

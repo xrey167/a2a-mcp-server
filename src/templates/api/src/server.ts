@@ -15,7 +15,12 @@ const PORT = Number(process.env.PORT ?? 3000);
 
 // ── Plugins ─────────────────────────────────────────────────────
 
-await app.register(cors, { origin: true });
+const ALLOWED_ORIGINS = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(",")
+      .map((origin) => origin.trim())
+      .filter((origin) => origin.length > 0)
+  : ["http://localhost:3000"];
+await app.register(cors, { origin: ALLOWED_ORIGINS });
 
 // ── Routes ──────────────────────────────────────────────────────
 

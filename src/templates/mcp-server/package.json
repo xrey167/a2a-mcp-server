@@ -6,7 +6,7 @@
     "start": "bun src/index.ts",
     "dev": "bun --watch src/index.ts",
     "build": "bun build src/index.ts --target bun --outdir dist",
-    "inspect": "npx @anthropic-ai/model-context-protocol inspect bun src/index.ts"
+    "inspect": "npx @modelcontextprotocol/inspector bun src/index.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0"
