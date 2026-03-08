@@ -1,5 +1,8 @@
 /**
  * Pipeline registry — all available project generation pipelines.
+ *
+ * Templates are now file-based under src/templates/<pipelineId>/.
+ * The inline `template` property has been removed from Pipeline.
  */
 
 import type { Pipeline } from "./types.js";
@@ -15,8 +18,8 @@ const appPipeline: Pipeline = {
 Given this idea: "{{idea}}"
 
 Produce a JSON object with these fields:
-- name: short app name (2-3 words)
-- tagline: one-sentence pitch
+- name: short app name (2-3 words, kebab-case)
+- description: one-sentence pitch
 - features: array of 5-8 core features, each with { name, description, priority: "must"|"should"|"nice" }
 - screens: array of 4-6 screens, each with { name, purpose, keyComponents: string[] }
 - monetization: how the app makes money
@@ -26,7 +29,7 @@ Produce a JSON object with these fields:
 Respond with ONLY valid JSON — no markdown fences, no explanation.`,
   steps: [
     { id: "normalize", label: "Expanding intent into spec", skillId: "ask_claude", replacesSpec: true },
-    { id: "scaffold", label: "Scaffolding project structure", skillId: "run_shell" },
+    { id: "scaffold", label: "Scaffolding project from template", skillId: "run_shell" },
     { id: "generate_screens", label: "Generating screen components", skillId: "ask_claude" },
     { id: "generate_navigation", label: "Generating navigation structure", skillId: "ask_claude" },
     { id: "generate_state", label: "Generating state management", skillId: "ask_claude" },
@@ -39,45 +42,6 @@ Respond with ONLY valid JSON — no markdown fences, no explanation.`,
     dimensions: ["code_quality", "type_safety", "ux_completeness", "error_handling", "accessibility"],
     passThreshold: 85,
     maxIterations: 3,
-  },
-  template: {
-    files: {
-      "app/": "",
-      "app/(tabs)/": "",
-      "app/(tabs)/index.tsx": "",
-      "app/(tabs)/_layout.tsx": "",
-      "app/_layout.tsx": "",
-      "components/": "",
-      "hooks/": "",
-      "constants/": "",
-      "assets/": "",
-      "package.json": JSON.stringify({
-        name: "{{name}}",
-        version: "1.0.0",
-        main: "expo-router/entry",
-        scripts: {
-          start: "expo start",
-          android: "expo start --android",
-          ios: "expo start --ios",
-          web: "expo start --web",
-          lint: "expo lint",
-        },
-        dependencies: {
-          expo: "~52.0.0",
-          "expo-router": "~4.0.0",
-          react: "18.3.1",
-          "react-native": "0.76.3",
-        },
-        devDependencies: {
-          "@types/react": "~18.3.0",
-          typescript: "~5.3.0",
-        },
-      }, null, 2),
-      "tsconfig.json": JSON.stringify({
-        extends: "expo/tsconfig.base",
-        compilerOptions: { strict: true },
-      }, null, 2),
-    },
   },
 };
 
@@ -92,8 +56,8 @@ const websitePipeline: Pipeline = {
 Given this idea: "{{idea}}"
 
 Produce a JSON object with these fields:
-- name: site name
-- tagline: one-sentence pitch
+- name: site name (kebab-case)
+- description: one-sentence pitch
 - pages: array of 3-6 pages, each with { name, route, purpose, sections: string[] }
 - style: { colorScheme: string, typography: string, visualStyle: string }
 - features: array of interactive features (forms, animations, API integrations)
@@ -103,7 +67,7 @@ Produce a JSON object with these fields:
 Respond with ONLY valid JSON — no markdown fences, no explanation.`,
   steps: [
     { id: "normalize", label: "Expanding intent into spec", skillId: "ask_claude", replacesSpec: true },
-    { id: "scaffold", label: "Scaffolding project structure", skillId: "run_shell" },
+    { id: "scaffold", label: "Scaffolding project from template", skillId: "run_shell" },
     { id: "generate_pages", label: "Generating page components", skillId: "ask_claude" },
     { id: "generate_layout", label: "Generating layout and navigation", skillId: "ask_claude" },
     { id: "generate_styles", label: "Generating styles and theme", skillId: "ask_claude" },
@@ -115,47 +79,6 @@ Respond with ONLY valid JSON — no markdown fences, no explanation.`,
     dimensions: ["code_quality", "responsive_design", "seo", "accessibility", "performance"],
     passThreshold: 85,
     maxIterations: 3,
-  },
-  template: {
-    files: {
-      "src/app/": "",
-      "src/app/page.tsx": "",
-      "src/app/layout.tsx": "",
-      "src/components/": "",
-      "public/": "",
-      "package.json": JSON.stringify({
-        name: "{{name}}",
-        version: "1.0.0",
-        scripts: {
-          dev: "next dev",
-          build: "next build",
-          start: "next start",
-          lint: "next lint",
-        },
-        dependencies: {
-          next: "15.1.0",
-          react: "^19.0.0",
-          "react-dom": "^19.0.0",
-        },
-        devDependencies: {
-          "@types/react": "^19.0.0",
-          typescript: "^5.0.0",
-          tailwindcss: "^4.0.0",
-        },
-      }, null, 2),
-      "tsconfig.json": JSON.stringify({
-        compilerOptions: {
-          target: "ES2017",
-          lib: ["dom", "dom.iterable", "esnext"],
-          strict: true,
-          jsx: "preserve",
-          moduleResolution: "bundler",
-          plugins: [{ name: "next" }],
-          paths: { "@/*": ["./src/*"] },
-        },
-        include: ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
-      }, null, 2),
-    },
   },
 };
 
@@ -181,7 +104,7 @@ Produce a JSON object with these fields:
 Respond with ONLY valid JSON — no markdown fences, no explanation.`,
   steps: [
     { id: "normalize", label: "Expanding intent into spec", skillId: "ask_claude", replacesSpec: true },
-    { id: "scaffold", label: "Scaffolding project structure", skillId: "run_shell" },
+    { id: "scaffold", label: "Scaffolding project from template", skillId: "run_shell" },
     { id: "generate_tools", label: "Generating tool implementations", skillId: "ask_claude" },
     { id: "generate_resources", label: "Generating resource handlers", skillId: "ask_claude" },
     { id: "generate_server", label: "Generating server entry point", skillId: "ask_claude" },
@@ -193,42 +116,6 @@ Respond with ONLY valid JSON — no markdown fences, no explanation.`,
     dimensions: ["code_quality", "type_safety", "error_handling", "mcp_compliance", "security"],
     passThreshold: 90,
     maxIterations: 3,
-  },
-  template: {
-    files: {
-      "src/": "",
-      "src/index.ts": "",
-      "src/tools/": "",
-      "src/resources/": "",
-      "package.json": JSON.stringify({
-        name: "{{name}}",
-        version: "1.0.0",
-        type: "module",
-        scripts: {
-          start: "bun src/index.ts",
-          dev: "bun --watch src/index.ts",
-          build: "bun build src/index.ts --target bun --outdir dist",
-        },
-        dependencies: {
-          "@modelcontextprotocol/sdk": "^1.12.0",
-        },
-        devDependencies: {
-          "@types/bun": "latest",
-          typescript: "^5.0.0",
-        },
-      }, null, 2),
-      "tsconfig.json": JSON.stringify({
-        compilerOptions: {
-          target: "ESNext",
-          module: "ESNext",
-          moduleResolution: "bundler",
-          strict: true,
-          esModuleInterop: true,
-          types: ["bun-types"],
-        },
-        include: ["src/**/*.ts"],
-      }, null, 2),
-    },
   },
 };
 
@@ -255,7 +142,7 @@ Produce a JSON object with these fields:
 Respond with ONLY valid JSON — no markdown fences, no explanation.`,
   steps: [
     { id: "normalize", label: "Expanding intent into spec", skillId: "ask_claude", replacesSpec: true },
-    { id: "scaffold", label: "Scaffolding project structure", skillId: "run_shell" },
+    { id: "scaffold", label: "Scaffolding project from template", skillId: "run_shell" },
     { id: "generate_tools", label: "Generating agent tools", skillId: "ask_claude" },
     { id: "generate_agent", label: "Generating agent core logic", skillId: "ask_claude" },
     { id: "generate_server", label: "Generating API server", skillId: "ask_claude" },
@@ -267,43 +154,6 @@ Respond with ONLY valid JSON — no markdown fences, no explanation.`,
     dimensions: ["code_quality", "type_safety", "tool_design", "error_handling", "security"],
     passThreshold: 85,
     maxIterations: 3,
-  },
-  template: {
-    files: {
-      "src/": "",
-      "src/agent.ts": "",
-      "src/tools/": "",
-      "src/server.ts": "",
-      "package.json": JSON.stringify({
-        name: "{{name}}",
-        version: "1.0.0",
-        type: "module",
-        scripts: {
-          start: "bun src/server.ts",
-          dev: "bun --watch src/server.ts",
-          agent: "bun src/agent.ts",
-        },
-        dependencies: {
-          "@anthropic-ai/sdk": "^0.39.0",
-          fastify: "^5.0.0",
-        },
-        devDependencies: {
-          "@types/bun": "latest",
-          typescript: "^5.0.0",
-        },
-      }, null, 2),
-      "tsconfig.json": JSON.stringify({
-        compilerOptions: {
-          target: "ESNext",
-          module: "ESNext",
-          moduleResolution: "bundler",
-          strict: true,
-          esModuleInterop: true,
-          types: ["bun-types"],
-        },
-        include: ["src/**/*.ts"],
-      }, null, 2),
-    },
   },
 };
 
@@ -329,7 +179,7 @@ Produce a JSON object with these fields:
 Respond with ONLY valid JSON — no markdown fences, no explanation.`,
   steps: [
     { id: "normalize", label: "Expanding intent into spec", skillId: "ask_claude", replacesSpec: true },
-    { id: "scaffold", label: "Scaffolding project structure", skillId: "run_shell" },
+    { id: "scaffold", label: "Scaffolding project from template", skillId: "run_shell" },
     { id: "generate_schema", label: "Generating database schema", skillId: "ask_claude" },
     { id: "generate_routes", label: "Generating API routes", skillId: "ask_claude" },
     { id: "generate_middleware", label: "Generating middleware (auth, validation)", skillId: "ask_claude" },
@@ -342,45 +192,6 @@ Respond with ONLY valid JSON — no markdown fences, no explanation.`,
     dimensions: ["code_quality", "type_safety", "api_design", "error_handling", "security"],
     passThreshold: 85,
     maxIterations: 3,
-  },
-  template: {
-    files: {
-      "src/": "",
-      "src/server.ts": "",
-      "src/routes/": "",
-      "src/middleware/": "",
-      "src/db/": "",
-      "src/db/schema.ts": "",
-      "package.json": JSON.stringify({
-        name: "{{name}}",
-        version: "1.0.0",
-        type: "module",
-        scripts: {
-          start: "bun src/server.ts",
-          dev: "bun --watch src/server.ts",
-          "db:migrate": "bun src/db/migrate.ts",
-        },
-        dependencies: {
-          fastify: "^5.0.0",
-          "@fastify/cors": "^10.0.0",
-        },
-        devDependencies: {
-          "@types/bun": "latest",
-          typescript: "^5.0.0",
-        },
-      }, null, 2),
-      "tsconfig.json": JSON.stringify({
-        compilerOptions: {
-          target: "ESNext",
-          module: "ESNext",
-          moduleResolution: "bundler",
-          strict: true,
-          esModuleInterop: true,
-          types: ["bun-types"],
-        },
-        include: ["src/**/*.ts"],
-      }, null, 2),
-    },
   },
 };
 
@@ -407,4 +218,4 @@ export function listPipelines(): Array<{ id: string; name: string; description: 
   }));
 }
 
-export type { Pipeline, PipelineStep, QualityGate, PipelineTemplate };
+export type { Pipeline, PipelineStep, QualityGate };
