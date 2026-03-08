@@ -15,7 +15,8 @@ Orchestrator — port 8080
     ├── AI Agent        8083  ask_claude · search_files · query_sqlite
     ├── Code Agent      8084  codex_exec · codex_review  (OpenAI Codex CLI)
     ├── Knowledge Agent 8085  create_note · read_note · update_note · search_notes · list_notes
-    └── Design Agent    8086  enhance_ui_prompt · suggest_screens · design_critique
+    ├── Design Agent    8086  enhance_ui_prompt · suggest_screens · design_critique
+    └── Factory Agent   8087  create_project · list_templates · list_pipelines · quality_gate
 ```
 
 Every agent shares `remember` / `recall` skills backed by dual-write memory:
@@ -702,6 +703,100 @@ delegate { skillId: "design_critique", args: { description: "A login screen with
 
 ---
 
+### Factory Agent (Port 8087) — Project Generator
+
+The factory agent generates complete, runnable projects from a vague idea. Inspired by [AppFactory](https://github.com/0xAxiom/AppFactory), it uses a 5-phase pipeline that coordinates AI, shell, and code agents.
+
+#### Pipeline Phases
+
+```
+1. Template Matching   — Claude analyzes the idea and picks the best pipeline + variant
+2. Intent Normalization — Expand vague idea into structured spec (name, features, stack)
+3. Scaffold            — Copy file-based template, substitute variables ({{name}}, {{bundleId}})
+4. Code Generation     — AI generates feature code guided by TEMPLATE.md spec
+5. Ralph Mode QA       — Multi-dimension quality gate with fix loops (97% threshold)
+```
+
+#### Pipelines & Variants
+
+| Pipeline | Stack | Variants |
+|----------|-------|----------|
+| `app` | Expo SDK 52 + React Native + Router v4 | `saas-starter`, `e-commerce`, `social-app` |
+| `website` | Next.js 15 + Tailwind v4 | `portfolio`, `saas-landing` |
+| `mcp-server` | MCP SDK 1.12 + Bun | `data-connector`, `dev-tools` |
+| `agent` | Anthropic SDK 0.78 + Fastify | `api-integration`, `content-generator` |
+| `api` | Fastify 5 + SQLite | `crud-service`, `marketplace` |
+
+Each pipeline has real, runnable starter code in `src/templates/<pipeline>/` and a `TEMPLATE.md` spec with quality checklists, file structure blueprints, and domain features. Variants in `src/templates/variants/<pipeline>/<variant>/TEMPLATE.md` add domain-specific prompt enhancements.
+
+#### `create_project`
+
+Generate a complete project from a description.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `idea` | string | Yes | Project description (can be vague) |
+| `outputDir` | string | Yes | Where to write the project |
+| `variant` | string | No | Force a specific variant (e.g. `saas-starter`) |
+
+```bash
+delegate { skillId: "create_project", args: {
+  idea: "a habit tracking app with streaks and social features",
+  outputDir: "~/projects/habit-tracker"
+} }
+
+# Force a specific variant
+delegate { skillId: "create_project", args: {
+  idea: "online marketplace for handmade goods",
+  outputDir: "~/projects/craft-market",
+  variant: "marketplace"
+} }
+```
+
+**Returns:** Project generation summary with quality score and file list.
+
+---
+
+#### `list_templates`
+
+List all available pipelines and their template variants.
+
+```bash
+delegate { skillId: "list_templates" }
+```
+
+**Returns:** JSON with pipelines, their variants, and descriptions.
+
+---
+
+#### `list_pipelines`
+
+List pipeline types with intent prompts and quality gate config.
+
+```bash
+delegate { skillId: "list_pipelines" }
+```
+
+**Returns:** JSON array of pipeline definitions.
+
+---
+
+#### Template System
+
+Templates live in `src/templates/` and consist of two parts:
+
+1. **Starter code** — Real, runnable files with `{{variable}}` placeholders. Copied during scaffolding and variable-substituted (`{{name}}`, `{{bundleId}}`).
+
+2. **TEMPLATE.md specs** — Prompt enhancement documents (not code) that guide AI code generation:
+   - Quality checklist items (checked during Ralph Mode QA)
+   - File structure blueprints
+   - Domain-specific features and patterns
+   - Tech stack requirements
+
+The template loader (`src/templates/loader.ts`) handles file discovery, TEMPLATE.md parsing, variant resolution, and variable sanitization (strips `` ` ``, `$`, `\` to prevent template injection).
+
+---
+
 ### Direct A2A Bridge
 
 #### `call_a2a_agent`
@@ -976,7 +1071,7 @@ temperature: 0.3
 You are the orchestrator of a local multi-agent system...
 ```
 
-Persona files: `orchestrator`, `shell-agent`, `web-agent`, `ai-agent`, `code-agent`, `knowledge-agent`.
+Persona files: `orchestrator`, `shell-agent`, `web-agent`, `ai-agent`, `code-agent`, `knowledge-agent`, `design-agent`, `factory-agent`.
 
 ---
 
