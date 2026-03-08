@@ -42,7 +42,8 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { prompt, model: argModel, max_tokens: argMaxTokens } = AiSchemas.ask_claude.parse({ prompt: args.prompt ?? text, ...args });
       const persona = getPersona(NAME);
       const model = argModel ?? persona.model;
-      const maxTokens = argMaxTokens ?? parseInt(process.env.A2A_ASK_CLAUDE_MAX_TOKENS ?? "4096", 10);
+      const envMaxTokens = parseInt(process.env.A2A_ASK_CLAUDE_MAX_TOKENS ?? "4096", 10);
+      const maxTokens = argMaxTokens ?? (Number.isNaN(envMaxTokens) ? 4096 : envMaxTokens);
       try {
         const client = new Anthropic();
         const message = await client.messages.create({

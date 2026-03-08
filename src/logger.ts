@@ -4,7 +4,6 @@
 type LogLevel = "debug" | "info" | "warn" | "error";
 
 const LEVEL_PRIORITY: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
-const MIN_LEVEL = (process.env.A2A_LOG_LEVEL ?? "info") as LogLevel;
 
 interface LogEntry {
   ts: string;
@@ -15,7 +14,8 @@ interface LogEntry {
 }
 
 function shouldLog(level: LogLevel): boolean {
-  return LEVEL_PRIORITY[level] >= (LEVEL_PRIORITY[MIN_LEVEL] ?? 1);
+  const minLevel = (process.env.A2A_LOG_LEVEL ?? "info") as LogLevel;
+  return LEVEL_PRIORITY[level] >= (LEVEL_PRIORITY[minLevel] ?? 1);
 }
 
 function emit(entry: LogEntry) {
@@ -34,11 +34,11 @@ export function createLogger(worker: string) {
   function log(level: LogLevel, msg: string, meta?: Record<string, unknown>) {
     if (!shouldLog(level)) return;
     const entry: LogEntry = {
+      ...meta,
       ts: new Date().toISOString(),
       level,
       worker,
       msg,
-      ...meta,
     };
     emit(entry);
   }

@@ -70,7 +70,7 @@ export function sanitizeForPrompt(userInput: string, tagName = "user_input"): st
  * );
  * ```
  */
-export function buildSafePrompt(
+export function buildSimpleSafePrompt(
   systemPrompt: string,
   userInput: string,
   taskDescription: string,
@@ -136,17 +136,7 @@ export function detectInjectionAttempt(input: string): { valid: boolean; reason?
   }
 
   return { valid: true };
- * Prompt Sanitization Utilities
- *
- * Protects against prompt injection attacks by properly framing and escaping
- * user-supplied content in LLM prompts.
- *
- * Security Principles:
- * 1. Clear structural boundaries between instructions and user content
- * 2. Explicit framing of user input zones
- * 3. Escape special characters that could break prompt structure
- * 4. Length limits to prevent context stuffing
- */
+}
 
 /** Maximum length for user-supplied content to prevent context stuffing attacks */
 const MAX_USER_INPUT_LENGTH = 10_000;

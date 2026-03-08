@@ -1,14 +1,26 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { loadConfig, resetConfig } from "../config.js";
 
 describe("Config timeouts and web sections", () => {
+  const origHome = process.env.HOME;
+
   beforeEach(() => {
     resetConfig();
+    // Point HOME to a temp dir so no host config.json is found
+    process.env.HOME = "/tmp/.a2a-config-test-nonexistent";
     // Clear env vars that might interfere
     delete process.env.A2A_PORT;
     delete process.env.A2A_API_KEY;
     delete process.env.A2A_SANDBOX_TIMEOUT;
     delete process.env.A2A_MAX_RESPONSE_SIZE;
+  });
+
+  afterEach(() => {
+    if (origHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = origHome;
+    }
   });
 
   test("loads default timeout values", () => {
