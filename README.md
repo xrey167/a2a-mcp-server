@@ -1,367 +1,509 @@
+<p align="center">
+  <img src="https://img.shields.io/badge/runtime-Bun_v1-f472b6?logo=bun&logoColor=white" alt="Bun" />
+  <img src="https://img.shields.io/badge/lang-TypeScript-3178c6?logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/protocol-MCP_(Anthropic)-6366f1" alt="MCP" />
+  <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
+  <img src="https://img.shields.io/badge/agents-6_workers-f59e0b" alt="Agents" />
+  <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
+</p>
+
 # a2a-mcp-server
 
-**A multi-agent orchestration platform that bridges MCP and A2A protocols — designed to dramatically reduce token consumption when working with Claude Code.**
+A **full multi-agent system** — not just a bridge — that connects Anthropic’s [MCP](https://modelcontextprotocol.io) and Google’s [A2A](https://a2a-protocol.org) protocols. One orchestrator manages six specialized worker agents, routes tasks intelligently, and maintains shared memory across all agents.
 
----
+Claude Code connects via MCP (stdio). Agents talk to each other via A2A (HTTP + JSON-RPC 2.0). Both protocols, each doing what it’s best at.
 
-## Why This Exists
+-----
 
-Every message you send through Claude costs tokens — and the default workflow is wasteful. Query an API, get 50KB of JSON back, Claude reads all of it, you ask it to filter three fields, it reads it again. Run a shell command, pipe the output through Claude just to count lines. Repeat context about your project in every conversation because there's no memory between sessions.
+## How it differs from other A2A-MCP projects
 
-**This project exists to keep data out of Claude's context window unless it actually needs to be there.**
+Most [A2A-MCP integrations](https://github.com/modelcontextprotocol/servers) are thin clients — they forward MCP tool calls to remote A2A agents. This project is different:
 
-## How It Reduces Token Spending
+|                 |Thin bridge             |**a2a-mcp-server**                           |
+|:----------------|:-----------------------|:--------------------------------------------|
+|**Agents**       |Proxy to external agents|6 built-in workers with real logic           |
+|**Memory**       |None                    |Dual-write: SQLite (FTS5) + Obsidian markdown|
+|**Routing**      |Manual                  |Smart auto-routing via AI agent              |
+|**Extensibility**|Code changes            |Hot-reload plugins + personas, no restart    |
+|**Auth**         |Basic tokens            |OAuth2 flows + AES-256-GCM credential sync   |
+|**Runtime**      |Python (most)           |TypeScript / Bun                             |
 
-The core idea: offload computation, filtering, and state management to **local processes** so Claude only sees the small, relevant results — not the raw data.
-
-| Mechanism | Without | With | Token Reduction |
-|-----------|---------|------|-----------------|
-| **Sandbox execution** | 100KB API response → Claude reads + filters → returns result | Code runs locally, returns 500 bytes | **~99%** per data operation |
-| **FTS5 auto-indexing** | 500KB log file dumped into context | Search index, max 50 matching lines returned | **~90-98%** on large datasets |
-| **Persistent memory** | Re-explain project context every session (~2,000 tokens) | Auto-injected preamble (~100 tokens, set once) | **~95%** on repeated context |
-| **Bounded sessions** | 100+ turns accumulate in history | Capped at 20 turns (40 messages), older dropped | **~60-80%** on long conversations |
-| **Lightweight routing** | Full JSON schemas per agent (~2KB each × 7 agents = ~14KB) | Skill IDs only (~100 bytes per agent = ~700 bytes) | **~95%** on routing metadata |
-| **Input truncation** | Unbounded user input / template content | Hard caps: 10K chars (user), 50K chars (templates), 1,024 output tokens | Prevents **100%** context blowout |
-| **Isolated agent contexts** | All 7 agents share one context window | Each worker has its own process + context | **~85%** less cross-contamination |
-
-### 1. Sandbox Execution — ~99% reduction per data operation
-
-The biggest saver. Instead of sending a 100KB API response through Claude and asking it to "extract the names", you run TypeScript locally in an isolated Bun subprocess:
-
-```typescript
-// This runs LOCALLY — Claude never sees the raw 100KB
-sandbox_execute {
-  code: `
-    const data = await skill('call_api', { url: 'https://api.example.com/users', method: 'GET' });
-    const parsed = JSON.parse(data);
-    return parsed.map(u => u.name).join('\\n');  // Only ~500 bytes returned to Claude
-  `
-}
-```
-
-**Before:** 100KB response → ~25,000 tokens into Claude's context → Claude filters → outputs result.
-**After:** 100KB processed locally → ~125 tokens returned. That's **99.5% fewer tokens.**
-
-Data helpers like `pick()`, `first()`, `last()`, `sum()`, `count()` reduce datasets before they ever touch Claude's context. A 1000-row result becomes 10 rows via `first(data, 10)` or a single number via `sum(data, 'revenue')`.
-
-### 2. FTS5 Auto-Indexing — ~90-98% reduction on large datasets
-
-When a sandbox variable exceeds **4KB**, it's automatically indexed into SQLite FTS5. Instead of dumping the full dataset back into Claude's context, you search it:
-
-```typescript
-// First call: fetch and store (Claude sees "stored", not the data)
-$vars.logs = await skill('run_shell', { command: 'cat /var/log/app.log' });
-
-// Later: search locally, only matching lines go to Claude
-return search('logs', 'ERROR timeout');  // Returns max 50 matches
-```
-
-**Before:** 500KB log → ~125,000 tokens in context.
-**After:** FTS5 index + 50 matching lines → ~2,500 tokens. That's **98% fewer tokens.**
-
-### 3. Persistent Memory — ~95% reduction on repeated context
-
-Every agent shares dual-write memory (SQLite + Obsidian markdown). Project context survives across sessions:
-
-- **`remember` / `recall`** — key-value store on every agent
-- **Project context preamble** — summary, goals, stack auto-injected into every `delegate` call
-- **Knowledge agent** — Obsidian vault as persistent knowledge base with search
-
-**Before:** Every new session, you spend ~2,000 tokens re-explaining your project.
-**After:** `set_project_context` stores it once, auto-injected as ~100-token preamble. That's **95% fewer tokens** per session start, compounding across every session.
-
-### 4. Bounded Session History — ~60-80% reduction on long conversations
-
-Session history is capped at **20 turns (40 messages)**. Older turns are permanently dropped.
-
-**Before:** A 50-turn conversation accumulates ~50,000 tokens of history in context.
-**After:** Only last 20 turns kept (~20,000 tokens). That's **60% fewer tokens** — and the savings grow as conversations get longer.
-
-### 5. Lightweight Routing — ~95% reduction on routing metadata
-
-When the orchestrator decides which worker handles a task, it sends only **skill IDs** — not full JSON schemas with descriptions, types, and examples.
-
-**Before:** 7 agent cards with full schemas → ~14KB → ~3,500 tokens per routing decision.
-**After:** Names + skill IDs → ~700 bytes → ~175 tokens. That's **95% fewer tokens** on every auto-routed `delegate` call.
-
-### 6. Input Truncation — prevents 100% context blowout
-
-Hard caps prevent any single input from consuming the entire context budget:
-- User inputs: **10,000 chars** max
-- Template content: **50,000 chars** max
-- Claude API calls: **1,024 output tokens** per skill invocation
-
-Without these, a single malformed or oversized input could burn your entire context window in one call.
-
-### 7. Multi-Agent Architecture — ~85% less context cross-contamination
-
-Each of the 7 workers runs as its own process with its own context. The shell agent doesn't carry the knowledge agent's conversation history. The design agent's Gemini prompts don't pollute the code agent's context.
-
-**Before:** One monolithic server — every skill's prompt history, system instructions, and state live in one context window.
-**After:** 7 isolated contexts. Each worker only carries its own ~15% of the total system state. The orchestrator's routing context is minimal (skill IDs + preamble).
-
----
-
-## The Agents
-
-7 specialist workers, each a separate process, coordinated by a single MCP orchestrator:
-
-| Agent | Port | Skills |
-|-------|------|--------|
-| **Shell** | 8081 | `run_shell`, `read_file`, `write_file`, SSE streaming |
-| **Web** | 8082 | `fetch_url`, `call_api` |
-| **AI** | 8083 | `ask_claude`, `search_files`, `query_sqlite` |
-| **Code** | 8084 | `codex_exec`, `codex_review` (OpenAI Codex CLI) |
-| **Knowledge** | 8085 | `create_note`, `read_note`, `update_note`, `search_notes`, `list_notes` |
-| **Design** | 8086 | `enhance_ui_prompt`, `suggest_screens`, `design_critique` (Gemini) |
-| **Factory** | 8087 | `create_project`, `list_templates`, `list_pipelines`, `quality_gate` |
-
-All agents share `remember` / `recall` skills backed by SQLite (`~/.a2a-memory.db`) + Obsidian (`~/Documents/Obsidian/a2a-knowledge/_memory/`).
-
-Agents communicate via Google's [A2A protocol](https://github.com/google/A2A) — JSON-RPC 2.0 over HTTP. You can register external A2A agents too.
-
----
+-----
 
 ## Architecture
 
 ```
 Claude Code
-    │ MCP (stdio)
+    │
+    │  MCP (stdio)
     ▼
-Orchestrator — port 8080
-    │ A2A (HTTP + JSON-RPC 2.0)
-    ├── Shell Agent     8081  run_shell · read_file · write_file · SSE streaming
-    ├── Web Agent       8082  fetch_url · call_api
-    ├── AI Agent        8083  ask_claude · search_files · query_sqlite
-    ├── Code Agent      8084  codex_exec · codex_review  (OpenAI Codex CLI)
-    ├── Knowledge Agent 8085  create_note · read_note · update_note · search_notes · list_notes
-    ├── Design Agent    8086  enhance_ui_prompt · suggest_screens · design_critique
-    └── Factory Agent   8087  create_project · list_templates · list_pipelines · quality_gate
+┌──────────────────────────────────────────────────────────────┐
+│                    ORCHESTRATOR · :8080                       │
+│         smart routing · project context · sessions           │
+│            async tasks · memory · agent registry             │
+└──┬──────────┬──────────┬──────────┬──────────┬──────────┬────┘
+   │          │          │          │          │          │
+   │          │    A2A (HTTP + JSON-RPC 2.0)  │          │
+   ▼          ▼          ▼          ▼          ▼          ▼
+ :8081      :8082      :8083      :8084      :8085      :8086
+ Shell       Web        AI        Code     Knowledge   Design
+ Agent      Agent      Agent      Agent      Agent      Agent
 ```
 
-All agents share `remember` / `recall` backed by dual-write memory:
-- **SQLite** `~/.a2a-memory.db` — FTS5 full-text search
-- **Obsidian** `~/Documents/Obsidian/a2a-knowledge/_memory/` — persistent markdown
+|Agent        |Port|What it does                                                   |
+|:------------|:--:|:--------------------------------------------------------------|
+|**Shell**    |8081|Run commands, read/write files, stream output via SSE          |
+|**Web**      |8082|Fetch URLs, call external REST APIs                            |
+|**AI**       |8083|Prompt Claude (SDK or CLI fallback), search files, query SQLite|
+|**Code**     |8084|Autonomous coding via OpenAI Codex CLI                         |
+|**Knowledge**|8085|Full CRUD on an Obsidian vault — notes, search, tags           |
+|**Design**   |8086|End-to-end UI design pipeline (Gemini + Stitch MCP)            |
 
-## Quick Start
+Every agent shares `remember` / `recall` / `memory_search` — backed by **SQLite** for fast FTS5 queries and **Obsidian** for human-readable persistence.
+
+-----
+
+## Quick start
+
+### Prerequisites
+
+- [Bun](https://bun.sh) v1.x
+- [Claude Code](https://claude.ai/code) — MCP host + OAuth
+- [Codex CLI](https://github.com/openai/codex) — `codex login` (for Code Agent)
+- [Obsidian](https://obsidian.md) — vault at `~/Documents/Obsidian/a2a-knowledge` (or set `OBSIDIAN_VAULT`)
+
+### Install
 
 ```bash
 git clone https://github.com/xrey167/a2a-mcp-server
-cd a2a-mcp-server && bun install
+cd a2a-mcp-server
+bun install
+```
 
-# Register with Claude Code
+### Register with Claude Code
+
+```bash
 claude mcp add --scope user a2a-mcp-bridge -- bun /path/to/a2a-mcp-server/src/server.ts
 ```
 
-**Requirements:** [Bun](https://bun.sh) v1.x, [Claude Code](https://claude.ai/code), [Codex CLI](https://github.com/openai/codex) (`codex login`), [Obsidian](https://obsidian.md) vault at `~/Documents/Obsidian/a2a-knowledge`
-
----
-
-## Skills Reference
-
-All skills are exposed as MCP tools and callable via A2A (JSON-RPC 2.0 over HTTP).
-
-### Orchestrator
-
-| Skill | Description |
-|-------|-------------|
-| `delegate` | Route a task to the best worker. Params: `message` (required), `skillId`, `agentUrl`, `args`, `sessionId`. Routing: agentUrl → skillId lookup → AI auto-route. |
-| `delegate_async` | Fire-and-forget `delegate`. Returns `{ taskId }`. Poll with `get_task_result`. |
-| `get_task_result` | Poll async task status: `pending`, `completed`, `failed`, `canceled`, `not_found`. |
-| `get_session_history` | Get conversation history for a `sessionId` (last 20 turns, 30-day expiry). |
-| `clear_session` | Clear session history. |
-| `list_agents` | List all worker agent cards and their skills. |
-| `register_agent` | Register external A2A agent by URL. Discovers via `/.well-known/agent.json`. |
-| `unregister_agent` | Remove an external agent by URL. |
-
-### Memory (available on all agents)
-
-| Skill | Description |
-|-------|-------------|
-| `remember` | Store `key`/`value` pair in persistent memory. |
-| `recall` | Retrieve by `key`, or omit for all memories. |
-| `memory_search` | FTS5 search across all agent memories. Params: `query`, `agent` (optional). |
-| `memory_list` | List keys for an `agent`, optionally filtered by `prefix`. |
-| `memory_cleanup` | Delete memories older than `maxAgeDays`. |
-
-### Shell Agent (8081)
-
-| Skill | Description |
-|-------|-------------|
-| `run_shell` | Execute a shell `command` (15s timeout). Returns stdout or `"Exit N: stderr"`. |
-| `run_shell_stream` | Execute with real-time SSE streaming. Params: `command`, `timeoutMs` (default 120s). |
-| `read_file` | Read file at `path`. |
-| `write_file` | Write `content` to `path`. |
-
-### Web Agent (8082)
-
-| Skill | Description |
-|-------|-------------|
-| `fetch_url` | Fetch `url` content. `format`: `"text"` (default) or `"json"`. |
-| `call_api` | HTTP request with `url`, `method`, `headers`, `body`. |
-
-### AI Agent (8083)
-
-| Skill | Description |
-|-------|-------------|
-| `ask_claude` | Send `prompt` to Claude. Optional `model` (default: `claude-sonnet-4-6`). |
-| `search_files` | Glob `pattern` search. Optional `directory`. |
-| `query_sqlite` | Read-only SQL against a `database` file. SELECT only. |
-
-### Code Agent (8084)
-
-| Skill | Description |
-|-------|-------------|
-| `codex_exec` | Execute coding task via Codex CLI (full-auto, 120s timeout). |
-| `codex_review` | Review working directory via Codex CLI. |
-
-### Knowledge Agent (8085)
-
-Notes stored in Obsidian vault (override with `OBSIDIAN_VAULT` env).
-
-| Skill | Description |
-|-------|-------------|
-| `create_note` | Create note with `title`, `content`, optional `tags` (YAML frontmatter). |
-| `read_note` | Read note by `title`. |
-| `update_note` | Replace `content` of existing note by `title`. |
-| `search_notes` | Case-insensitive search by `query` across all notes. |
-| `list_notes` | List all notes, optionally in a `folder`. |
-
-### Design Agent (8086)
-
-| Skill | Description |
-|-------|-------------|
-| `design_workflow` | End-to-end UI pipeline: `appConcept`, `deviceType`, `screensOnly`, `modelId`. Returns async task. |
-| `design_critique` | Critique a UI `description`, return actionable improvements. |
-
-### Factory Agent (8087)
-
-Generates complete projects from a vague idea via a 5-phase pipeline: template matching → intent normalization → scaffold → code generation → quality gate ("Ralph Mode", 97% threshold).
-
-| Pipeline | Stack | Variants |
-|----------|-------|----------|
-| `app` | Expo SDK 52 + React Native | `saas-starter`, `e-commerce`, `social-app` |
-| `website` | Next.js 15 + Tailwind v4 | `portfolio`, `saas-landing` |
-| `mcp-server` | MCP SDK 1.12 + Bun | `data-connector`, `dev-tools` |
-| `agent` | Anthropic SDK 0.78 + Fastify | `api-integration`, `content-generator` |
-| `api` | Fastify 5 + SQLite | `crud-service`, `marketplace` |
-
-| Skill | Description |
-|-------|-------------|
-| `create_project` | Generate project from `idea` + `outputDir`. Optional `variant`. |
-| `list_templates` | List pipelines and their template variants. |
-| `list_pipelines` | List pipeline types with intent prompts and quality config. |
-
-Templates in `src/templates/<pipeline>/` with `TEMPLATE.md` specs and `{{variable}}` placeholders. Variants in `src/templates/variants/`.
-
-### External MCP Integration
-
-| Skill | Description |
-|-------|-------------|
-| `list_mcp_servers` | List external MCP servers from `~/.claude.json`. |
-| `use_mcp_tool` | Call `toolName` on any external MCP server (lazy-connect, auto-refresh OAuth). |
-
-### Project Context
-
-| Skill | Description |
-|-------|-------------|
-| `get_project_context` | Return current context (summary, goals, stack, notes). |
-| `set_project_context` | Update `summary`, `goals`, `stack`, `notes`. Auto-injected into every `delegate`. |
-
-### Sandbox
-
-| Skill | Description |
-|-------|-------------|
-| `sandbox_execute` | Run TypeScript `code` in isolated Bun subprocess. Access `skill()`, `$vars`, `search()`, `batch()`. Variables persist per `sessionId` in SQLite. Large results auto-indexed for FTS5. |
-| `sandbox_vars` | List/get/delete persisted sandbox variables for a `sessionId`. |
-
-### Direct A2A Bridge
-
-| Skill | Description |
-|-------|-------------|
-| `call_a2a_agent` | Send task directly to any A2A agent by `agent_url`, bypassing routing. |
-
-### Plugins (Hot-Reloaded)
-
-Drop skills into `src/plugins/<name>/index.ts` — auto-loaded within seconds, no restart.
-
-| Skill | Description |
-|-------|-------------|
-| `get_timestamp` | Current time as ISO 8601 + Unix epoch. |
-| `sync_secrets` | Encrypted credential sync (`push`/`pull`/`status`/`configure`) via AES-256-GCM. |
-| `oauth_setup` | Browser-based OAuth2 flow (`start`/`refresh`/`list`/`revoke`). Presets: google, github, linear. |
-
----
-
-## MCP Resources & Prompts
-
-**Resources** (read-only):
-
-| URI | Description |
-|-----|-------------|
-| `a2a://context` | Project context |
-| `a2a://health` | Worker agent health status |
-| `a2a://tasks` | Active and recent tasks |
-| `a2a://workers/{name}/card` | Agent card for a specific worker |
-
-**Prompts:** `persona-{name}` (system prompt for any agent), `delegate-task` (with auto-injected context).
-
----
-
-## A2A Protocol
-
-Each agent exposes: `GET /.well-known/agent.json` (agent card), `GET /healthz` (health), `POST /` (tasks/send JSON-RPC 2.0).
+The server starts automatically when Claude Code launches. For standalone:
 
 ```bash
-# Discover
-curl http://localhost:8080/.well-known/agent.json
-
-# Call skill directly
-curl -X POST http://localhost:8081 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tasks/send","id":"1","params":{"id":"t1","skillId":"run_shell","args":{"command":"uname -m"},"message":{"role":"user","parts":[{"text":""}]}}}'
+bun src/server.ts
 ```
 
-SSE streaming: `POST http://localhost:8081/stream` → events `stdout`/`stderr`/`done`.
+-----
 
+## Key features
+
+### 🔀 Smart task routing
+
+The orchestrator decides where your task goes — three levels of control:
+
+1. **Direct** — set `agentUrl` to send to a specific agent
+1. **By skill** — set `skillId` and the orchestrator finds the owner
+1. **Auto** — omit both and the AI agent picks the best worker
+
+```
+# Auto-route — AI picks the best agent
+delegate { message: "find all TODO comments in the codebase" }
+
+# Route by skill
+delegate { message: "list all TypeScript files", skillId: "search_files" }
+
+# Direct to an agent
+delegate { message: "run uname", agentUrl: "http://localhost:8081", skillId: "run_shell" }
+
+# Session continuity across calls
+delegate { message: "now refactor that function", sessionId: "my-session-123" }
+```
+
+### 🧠 Dual-write memory
+
+Every `remember` call writes to **both** backends simultaneously:
+
+- **SQLite** (`~/.a2a-memory.db`) — FTS5 full-text search, fast key-value access
+- **Obsidian** (`_memory/` folder) — human-readable markdown, inspectable in your vault
+
+```
+# Store
+delegate { skillId: "remember", args: { key: "api-key-rotation", value: "Every 90 days" } }
+
+# Search across all agents
+memory_search { query: "api key" }
+
+# Cleanup old entries
+memory_cleanup { maxAgeDays: 90 }
+```
+
+### 🔌 Hot-reload plugins & personas
+
+No server restart needed — drop a file and it loads in seconds:
+
+**Personas** control agent behavior via markdown + YAML frontmatter:
+
+```markdown
+<!-- src/personas/ai-agent.md -->
 ---
+model: claude-sonnet-4-6
+temperature: 0.3
+---
+You are the AI specialist in a local multi-agent system...
+```
+
+**Plugins** add new skills via TypeScript modules:
+
+```typescript
+// src/plugins/my-plugin/index.ts
+import type { Skill } from "../../skills.js";
+
+export const skills: Skill[] = [{
+  id: "my_skill",
+  name: "My Skill",
+  description: "Does something useful",
+  inputSchema: {
+    type: "object",
+    properties: { input: { type: "string" } },
+    required: ["input"],
+  },
+  run: async (args) => "result",
+}];
+```
+
+**Declarative skills** can also be defined as `_plugins/<n>/plugin.md` in your Obsidian vault.
+
+### 🔐 Security & credential sync
+
+- **Local** — loopback (`127.0.0.1`) always trusted, no auth header needed
+- **Remote** — all external callers require `Authorization: Bearer <A2A_API_KEY>`
+- **OAuth2** — browser-based flow for Google, GitHub, Linear (or custom providers)
+- **Cross-machine sync** — push/pull credentials encrypted with AES-256-GCM
+
+```bash
+# Set up on primary machine
+export A2A_API_KEY="your-secret"
+sync_secrets { action: "configure", passphrase: "encryption-secret" }
+sync_secrets { action: "push" }
+
+# Pull on any new machine
+sync_secrets { action: "pull" }
+```
+
+### ⚡ Async task execution
+
+Fire-and-forget for long-running operations:
+
+```
+delegate_async { message: "run the full test suite", skillId: "run_shell" }
+# → { "taskId": "abc-123" }
+
+get_task_result { taskId: "abc-123" }
+# → { "status": "completed", "result": "..." }
+```
+
+-----
+
+## Function reference
+
+All functions are exposed as MCP tools to Claude Code and are also callable via the A2A protocol directly.
+
+### Orchestration & routing
+
+|Function          |Description                                                                            |
+|:-----------------|:--------------------------------------------------------------------------------------|
+|`delegate`        |Route a task to the best worker (sync). Auto-injects project context + session history.|
+|`delegate_async`  |Fire-and-forget — returns `taskId`, poll with `get_task_result`                        |
+|`get_task_result` |Poll: `pending` / `completed` / `failed` / `canceled` / `not_found`                    |
+|`list_agents`     |All agent cards + skills (built-in + external)                                         |
+|`register_agent`  |Register external A2A agent by URL (discovers `/.well-known/agent.json`)               |
+|`unregister_agent`|Remove external agent from registry                                                    |
+
+### Sessions
+
+|Function             |Parameters |Description                                     |
+|:--------------------|:----------|:-----------------------------------------------|
+|`get_session_history`|`sessionId`|Last 20 turns (40 messages), auto-expire 30 days|
+|`clear_session`      |`sessionId`|Clear conversation history                      |
+
+### Memory (shared across all agents)
+
+|Function        |Parameters        |Description                                   |
+|:---------------|:-----------------|:---------------------------------------------|
+|`remember`      |`key`, `value`    |Store key-value (dual-write SQLite + Obsidian)|
+|`recall`        |`key?`            |Get one value or all memories for agent       |
+|`memory_search` |`query`, `agent?` |Full-text search (FTS5) across all agents     |
+|`memory_list`   |`agent`, `prefix?`|List keys by agent, optionally filtered       |
+|`memory_cleanup`|`maxAgeDays`      |Delete old entries from both stores           |
+
+<details>
+<summary><strong>Shell Agent · :8081</strong></summary>
+
+|Function          |Parameters             |Description                         |
+|:-----------------|:----------------------|:-----------------------------------|
+|`run_shell`       |`command`              |Execute command (15s timeout)       |
+|`run_shell_stream`|`command`, `timeoutMs?`|Stream output via SSE (default 120s)|
+|`read_file`       |`path`                 |Read file contents (UTF-8)          |
+|`write_file`      |`path`, `content`      |Write/overwrite file                |
+
+</details>
+
+<details>
+<summary><strong>Web Agent · :8082</strong></summary>
+
+|Function   |Parameters                          |Description                     |
+|:----------|:-----------------------------------|:-------------------------------|
+|`fetch_url`|`url`, `format?`                    |Fetch URL as `text` or `json`   |
+|`call_api` |`url`, `method`, `headers?`, `body?`|Full HTTP request with JSON body|
+
+</details>
+
+<details>
+<summary><strong>AI Agent · :8083</strong></summary>
+
+|Function      |Parameters             |Description                                      |
+|:-------------|:----------------------|:------------------------------------------------|
+|`ask_claude`  |`prompt`, `model?`     |Prompt Claude (SDK → CLI OAuth fallback)         |
+|`search_files`|`pattern`, `directory?`|Glob file search (Bun native)                    |
+|`query_sqlite`|`database`, `sql`      |Read-only `SELECT` queries against any `.db` file|
+
+</details>
+
+<details>
+<summary><strong>Code Agent · :8084</strong></summary>
+
+|Function      |Parameters|Description                                        |
+|:-------------|:---------|:--------------------------------------------------|
+|`codex_exec`  |`prompt`  |Execute coding task via Codex CLI (full-auto, 120s)|
+|`codex_review`|—         |Review codebase via Codex CLI                      |
+
+</details>
+
+<details>
+<summary><strong>Knowledge Agent · :8085</strong></summary>
+
+|Function      |Parameters                 |Description                               |
+|:-------------|:--------------------------|:-----------------------------------------|
+|`create_note` |`title`, `content`, `tags?`|Create Obsidian note with YAML frontmatter|
+|`read_note`   |`title`                    |Read note by title                        |
+|`update_note` |`title`, `content`         |Replace note content                      |
+|`search_notes`|`query`                    |Case-insensitive substring search         |
+|`list_notes`  |`folder?`                  |List all `.md` files in vault/subfolder   |
+
+</details>
+
+<details>
+<summary><strong>Design Agent · :8086</strong></summary>
+
+|Function           |Parameters                                                       |Description                                      |
+|:------------------|:----------------------------------------------------------------|:------------------------------------------------|
+|`design_workflow`  |`appConcept`, `title?`, `deviceType?`, `screensOnly?`, `modelId?`|End-to-end UI: Gemini screens → Stitch generation|
+|`enhance_ui_prompt`|—                                                                |Enhance a UI prompt for better generation        |
+|`suggest_screens`  |—                                                                |Suggest screen flow for app concept              |
+
+</details>
+
+<details>
+<summary><strong>Project context</strong></summary>
+
+|Function             |Parameters                              |Description                                 |
+|:--------------------|:---------------------------------------|:-------------------------------------------|
+|`get_project_context`|—                                       |Return summary, goals, stack, notes         |
+|`set_project_context`|`summary?`, `goals?`, `stack?`, `notes?`|Update — auto-injected into `delegate` calls|
+
+</details>
+
+<details>
+<summary><strong>External MCP integration</strong></summary>
+
+|Function          |Parameters         |Description                                            |
+|:-----------------|:------------------|:------------------------------------------------------|
+|`list_mcp_servers`|—                  |List from `~/.claude.json` + tool counts               |
+|`use_mcp_tool`    |`toolName`, `args?`|Call any external MCP tool (lazy-connect, auto-refresh)|
+
+</details>
+
+<details>
+<summary><strong>Plugins (hot-reloaded)</strong></summary>
+
+|Function       |Parameters                                          |Description                                 |
+|:--------------|:---------------------------------------------------|:-------------------------------------------|
+|`get_timestamp`|—                                                   |Current time (ISO 8601 + Unix epoch)        |
+|`sync_secrets` |`action`, `passphrase?`, `serverUrl?`               |Cross-platform credential sync (AES-256-GCM)|
+|`oauth_setup`  |`action`, `provider?`, `serverName?`, `clientId?`, …|Browser-based OAuth2 for any provider       |
+
+</details>
+
+-----
+
+## MCP resources & prompts
+
+### Resources (read-only)
+
+|URI                        |Description                              |
+|:--------------------------|:----------------------------------------|
+|`a2a://context`            |Current project context                  |
+|`a2a://health`             |Worker health: status, fail count, uptime|
+|`a2a://tasks`              |Active and recent task list              |
+|`a2a://workers/{name}/card`|Agent card for a specific worker         |
+
+### Prompt templates
+
+|Prompt          |Description                                |
+|:---------------|:------------------------------------------|
+|`persona-{name}`|System prompt for any agent                |
+|`delegate-task` |Delegate with auto-injected project context|
+
+Available personas: `orchestrator`, `shell-agent`, `web-agent`, `ai-agent`, `code-agent`, `knowledge-agent`.
+
+-----
+
+## A2A protocol details
+
+Every worker exposes three HTTP endpoints:
+
+|Method|Endpoint                 |Purpose                                   |
+|:-----|:------------------------|:-----------------------------------------|
+|`GET` |`/.well-known/agent.json`|Agent card with capabilities + skills     |
+|`GET` |`/healthz`               |Health check (status, uptime, skill IDs)  |
+|`POST`|`/`                      |`tasks/send` — JSON-RPC 2.0 task execution|
+
+<details>
+<summary><strong>Example request / response</strong></summary>
+
+```jsonc
+// POST http://localhost:8081
+{
+  "jsonrpc": "2.0",
+  "method": "tasks/send",
+  "id": "req-001",
+  "params": {
+    "id": "task-001",
+    "skillId": "run_shell",
+    "args": { "command": "uname -m" },
+    "message": { "role": "user", "parts": [{ "text": "" }] }
+  }
+}
+```
+
+```jsonc
+// Response
+{
+  "jsonrpc": "2.0",
+  "id": "req-001",
+  "result": {
+    "id": "task-001",
+    "status": { "state": "completed" },
+    "artifacts": [{ "parts": [{ "kind": "text", "text": "x86_64" }] }]
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>SSE streaming (Shell Agent)</strong></summary>
+
+```bash
+curl -X POST http://localhost:8081/stream \
+  -H "Content-Type: application/json" \
+  -d '{"params":{"skillId":"run_shell","args":{"command":"ping -c 3 1.1.1.1"}}}'
+```
+
+Events: `data: {"type":"stdout","text":"..."}` → `data: {"type":"done","exitCode":0}`
+
+</details>
+
+-----
 
 ## Configuration
 
-### Personas
+### Environment variables
 
-Loaded from `src/personas/<agent-name>.md`, hot-reloaded on change. YAML frontmatter sets `model` and `temperature`.
+|Variable           |Purpose                          |Default                             |
+|:------------------|:--------------------------------|:-----------------------------------|
+|`ANTHROPIC_API_KEY`|Claude SDK auth                  |Falls back to Claude Code OAuth     |
+|`A2A_API_KEY`      |Bearer token for remote access   |Open mode (no auth)                 |
+|`OBSIDIAN_VAULT`   |Override vault path              |`~/Documents/Obsidian/a2a-knowledge`|
+|`SYNC_SERVER_URL`  |Remote server for credential sync|`http://localhost:8080`             |
+|`SYNC_PASSPHRASE`  |Encryption passphrase            |—                                   |
 
-### Environment Variables
+### Auth methods
 
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `ANTHROPIC_API_KEY` | Claude SDK auth | Claude Code OAuth fallback |
-| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Gemini SDK auth | `gemini` CLI OAuth fallback |
-| `A2A_API_KEY` | Bearer token for remote access | Open mode |
-| `OBSIDIAN_VAULT` | Obsidian vault path | `~/Documents/Obsidian/a2a-knowledge` |
-| `SYNC_SERVER_URL` | Credential sync server | `http://localhost:8080` |
-| `SYNC_PASSPHRASE` | Sync encryption passphrase | (none) |
+|Service       |How                                                         |
+|:-------------|:-----------------------------------------------------------|
+|Claude API    |`ANTHROPIC_API_KEY` env var, or auto OAuth via Claude Code  |
+|OpenAI / Codex|ChatGPT OAuth via `codex login` → `~/.codex/auth.json`      |
+|External MCPs |API keys, bearer tokens, or OAuth2 in `~/.a2a-mcp-auth.json`|
 
-### Auth
+<details>
+<summary><strong>External MCP auth file format</strong></summary>
 
-| Service | Method |
-|---------|--------|
-| Claude | `ANTHROPIC_API_KEY` or Claude Code OAuth |
-| Gemini | `GOOGLE_API_KEY` or `gemini` CLI OAuth |
-| Codex | ChatGPT OAuth via `codex login` (`~/.codex/auth.json`) |
-| External MCPs | Bearer, header, or OAuth2 in `~/.a2a-mcp-auth.json` |
+```json
+{
+  "my-server": { "type": "bearer", "token": "tok_..." },
+  "other-server": { "type": "header", "headers": { "X-API-Key": "..." } },
+  "oauth-server": {
+    "type": "oauth2",
+    "accessToken": "...",
+    "refreshToken": "...",
+    "clientId": "...",
+    "clientSecret": "...",
+    "tokenUrl": "https://...",
+    "expiresAt": 1234567890
+  }
+}
+```
 
-### Security
+</details>
 
-Set `A2A_API_KEY` env before starting for remote access. Loopback (127.0.0.1/::1) is always trusted. Use `sync_secrets` to distribute credentials across machines.
-
----
+-----
 
 ## Extending
 
-**Add a worker:** Create `src/workers/<name>.ts` (Fastify + `AGENT_CARD`), add to `WORKERS` in `src/server.ts`. All output to stderr.
+### Add a new worker agent
 
-**Add a plugin:** Export `skills: Skill[]` from `src/plugins/<name>/index.ts`. Hot-reloaded automatically.
+1. Create `src/workers/<n>.ts` — Fastify server with `AGENT_CARD` and skill handlers
+1. Add to `WORKERS` array in `src/server.ts`
+1. All output → `process.stderr` (stdout reserved for MCP JSON-RPC)
 
-**Register external agent:** `register_agent { url: "http://host:port" }`. Discovered via `/.well-known/agent.json`.
+### Add a plugin (hot-reloaded)
+
+Drop a module into `src/plugins/<n>/index.ts` — loads in seconds, no restart.
+
+### Register external A2A agents
+
+```
+register_agent { url: "http://my-server:9090", apiKey: "secret-token" }
+```
+
+Discovers the agent card via `GET /.well-known/agent.json` and persists to `~/.a2a-agent-registry.json`.
+
+-----
+
+## Project structure
+
+```
+a2a-mcp-server/
+├── src/
+│   ├── server.ts              # MCP entry + orchestrator (port 8080)
+│   ├── workers/               # Worker agent implementations
+│   ├── personas/              # Agent persona .md files (hot-reload)
+│   ├── plugins/               # Skill plugins (hot-reload)
+│   └── ...
+├── scripts/                   # Utility scripts
+├── CLAUDE.md                  # Claude Code project context
+├── workspace_manager_app.md   # Workspace manager spec
+└── package.json
+```
+
+-----
+
+## License
+
+MIT
+
+-----
+
+<p align="center">
+  Built with <a href="https://bun.sh">Bun</a> · <a href="https://modelcontextprotocol.io">MCP</a> · <a href="https://a2a-protocol.org">A2A</a>
+</p>
