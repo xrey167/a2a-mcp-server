@@ -18,6 +18,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
 import type { Skill } from "./skills.js";
+import { sanitizeForPrompt } from "./prompt-sanitizer.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGINS_DIR = join(__dirname, "plugins");
@@ -121,7 +122,9 @@ async function loadVaultPlugins(): Promise<Skill[]> {
           required: ["input"],
         },
         run: async ({ input }) => {
-          const prompt = promptTemplate.replace("{{input}}", String(input ?? ""));
+          // Sanitize user input before embedding in prompt template
+          const sanitizedInput = sanitizeForPrompt(String(input ?? ""), "user_input");
+          const prompt = promptTemplate.replace("{{input}}", sanitizedInput);
           // Delegate to ask_claude skill via dynamic import to avoid circular deps
           const { SKILL_MAP } = await import("./skills.js");
           const askClaude = SKILL_MAP.get("ask_claude");

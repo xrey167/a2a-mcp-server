@@ -6,6 +6,7 @@ import { Glob } from "bun";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { callPeer } from "../peer.js";
+import { sanitizeForPrompt } from "../prompt-sanitizer.js";
 
 const PORT = 8085;
 const NAME = "knowledge-agent";
@@ -115,7 +116,8 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
       // Step 3: call ai-agent's ask_claude directly (peer A2A — no orchestrator hop)
       const focus = args.focus as string | undefined;
-      const prompt = `Summarize the following notes${focus ? ` focusing on "${focus}"` : ""}:\n\n${noteContents.join("\n\n---\n\n")}`;
+      const focusSection = focus ? `\n\nFocus area:\n${sanitizeForPrompt(focus, "focus_area")}` : "";
+      const prompt = `Summarize the following notes${focusSection ? " with attention to the specified focus area" : ""}:${focusSection}\n\n${noteContents.join("\n\n---\n\n")}`;
       return callPeer("ask_claude", { prompt }, prompt, 60_000);
     }
 
