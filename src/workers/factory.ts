@@ -554,7 +554,11 @@ ${allCode}`;
           const filePath = fileBlocks[j].trim();
           const fileContent = fileBlocks[j + 1]?.trim();
           if (filePath && fileContent) {
-            await writeFile(filePath, fileContent);
+            const safePath = sanitizePath(filePath);
+            if (!safePath.startsWith(targetDir + "/") && safePath !== targetDir) {
+              throw new Error(`Unsafe path rejected: "${safePath}" — path is outside project directory`);
+            }
+            await writeFile(safePath, fileContent);
           }
         }
 
@@ -640,7 +644,8 @@ For each file, use this exact format:
     const relPath = blocks[i].trim();
     const content = blocks[i + 1]?.trim();
     if (relPath && content) {
-      const fullPath = `${targetDir}/${relPath}`;
+      const safeRelPath = sanitizePath(relPath);
+      const fullPath = `${targetDir}/${safeRelPath}`;
       const dir = fullPath.substring(0, fullPath.lastIndexOf("/"));
       if (dir) {
         const safeDir = sanitizePath(dir);
