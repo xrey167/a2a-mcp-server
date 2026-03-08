@@ -316,7 +316,9 @@ __rl.on("line", (line: string) => {
     __pending.delete(msg.seq);
     if (msg.error) p.reject(new Error(msg.error));
     else p.resolve(msg.result);
-  } catch {}
+} catch (e) {
+  process.stderr.write(`[sandbox-prelude] IPC parse error: ${e}\n`);
+}
 });
 
 function __send(obj: Record<string, unknown>): void {
