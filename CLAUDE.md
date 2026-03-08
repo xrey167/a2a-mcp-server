@@ -28,7 +28,7 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 
 ## Architecture
 
-**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns all 6 worker processes via `Bun.spawn`, then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker).
+**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns all 7 worker processes via `Bun.spawn`, then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker).
 
 **Worker agents** (standalone Fastify HTTP servers, each a separate process):
 | File | Port | Skills |
@@ -39,8 +39,11 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 | `src/workers/code.ts` | 8084 | codex_exec, codex_review (via `codex exec` subprocess) |
 | `src/workers/knowledge.ts` | 8085 | create_note, read_note, update_note, search_notes, list_notes |
 | `src/workers/design.ts` | 8086 | enhance_ui_prompt, suggest_screens, design_critique (Gemini-powered) |
+| `src/workers/factory.ts` | 8087 | normalize_intent, create_project, quality_gate, list_pipelines (AppFactory-style project gen) |
 
 All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
+
+**Project Factory (AppFactory-style):** `factory_workflow` is an async orchestrator skill that generates complete projects from a vague idea. Pipeline types defined in `src/pipelines/`: app (Expo), website (Next.js), mcp-server (MCP + Bun), agent (AI agent), api (REST). Each pipeline has: intent normalization prompts, scaffolding templates, code generation steps, and quality gate criteria ("Ralph Mode" — multi-dimension scoring with fix loops). The factory worker coordinates ai-agent (spec + code gen), shell-agent (file I/O), and code-agent (review).
 
 **Sandbox execution:** `sandbox_execute` runs TypeScript in isolated Bun subprocesses with access to all worker skills via `skill(id, args)`. Variables persist per session in SQLite. Results >4KB auto-indexed for FTS5 search via `search(varName, query)`. `sandbox_vars` manages persisted variables.
 
