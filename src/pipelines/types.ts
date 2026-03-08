@@ -5,7 +5,9 @@
  *  - what kind of project it produces
  *  - the ordered steps to go from idea → production-ready code
  *  - quality gate criteria ("Ralph Mode")
- *  - the default tech stack and scaffolding template
+ *  - the default tech stack
+ *
+ * Templates are loaded from src/templates/<pipelineId>/ at scaffold time.
  */
 
 export interface PipelineStep {
@@ -32,11 +34,6 @@ export interface QualityGate {
   maxIterations: number;
 }
 
-export interface PipelineTemplate {
-  /** Directory structure entries: path → content (empty string = directory) */
-  files: Record<string, string>;
-}
-
 export interface Pipeline {
   id: string;
   name: string;
@@ -47,8 +44,6 @@ export interface Pipeline {
   steps: PipelineStep[];
   /** Quality gate config */
   qualityGate: QualityGate;
-  /** Initial project scaffold */
-  template: PipelineTemplate;
   /** Prompt template for intent normalization — {{idea}} is replaced with user input */
   intentPrompt: string;
 }

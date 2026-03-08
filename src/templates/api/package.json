@@ -1,0 +1,19 @@
+{
+  "name": "{{name}}",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun src/server.ts",
+    "dev": "bun --watch src/server.ts",
+    "db:migrate": "bun src/db/migrate.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "fastify": "^5.0.0",
+    "@fastify/cors": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}

@@ -18,7 +18,8 @@ import Fastify from "fastify";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { PIPELINES, listPipelines, getPipeline } from "../pipelines/index.js";
-import type { Pipeline, PipelineStep } from "../pipelines/types.js";
+import type { Pipeline } from "../pipelines/types.js";
+import { loadTemplate } from "../templates/loader.js";
 import { sendTask } from "../a2a.js";
 import { randomUUID } from "crypto";
 
@@ -184,32 +185,45 @@ Be strict. A score of 85+ means production-ready quality. Deduct points for:
   };
 }
 
-// ── Project Scaffolding ─────────────────────────────────────────
+// ── Project Scaffolding (file-based templates) ──────────────────
 
 async function scaffoldProject(
   outputDir: string,
   pipeline: Pipeline,
   projectName: string,
-): Promise<string> {
-  // Create directory structure
-  const dirs = Object.keys(pipeline.template.files)
-    .filter(p => p.endsWith("/"))
-    .map(p => `${outputDir}/${p}`);
+  description?: string,
+): Promise<string[]> {
+  // Load template files from src/templates/<pipelineId>/
+  const templateFiles = await loadTemplate(pipeline.id, {
+    name: projectName,
+    description: description ?? `A ${pipeline.name} project`,
+  });
 
-  if (dirs.length > 0) {
-    await runShell(`mkdir -p ${dirs.join(" ")}`);
-  }
+  // Ensure output directory exists
+  await runShell(`mkdir -p ${outputDir}`);
 
-  // Write template files (replace {{name}} placeholders)
-  const fileEntries = Object.entries(pipeline.template.files).filter(([p]) => !p.endsWith("/"));
-  for (const [path, content] of fileEntries) {
-    if (content) {
-      const resolved = content.replace(/\{\{name\}\}/g, projectName);
-      await writeFile(`${outputDir}/${path}`, resolved);
+  // Collect all unique directories we need to create
+  const dirs = new Set<string>();
+  for (const file of templateFiles) {
+    const lastSlash = file.relativePath.lastIndexOf("/");
+    if (lastSlash > 0) {
+      dirs.add(`${outputDir}/${file.relativePath.substring(0, lastSlash)}`);
     }
   }
+  if (dirs.size > 0) {
+    await runShell(`mkdir -p ${Array.from(dirs).join(" ")}`);
+  }
 
-  return `Scaffolded ${fileEntries.length} files in ${outputDir}`;
+  // Write all template files
+  const writtenFiles: string[] = [];
+  for (const file of templateFiles) {
+    const fullPath = `${outputDir}/${file.relativePath}`;
+    await writeFile(fullPath, file.content);
+    writtenFiles.push(fullPath);
+  }
+
+  log(`scaffolded ${writtenFiles.length} template files to ${outputDir}`);
+  return writtenFiles;
 }
 
 // ── Full Project Generation ─────────────────────────────────────
@@ -245,13 +259,16 @@ async function createProject(
   const projectName = (spec.name as string ?? "my-project").toLowerCase().replace(/[^a-z0-9-]/g, "-");
   const targetDir = outputDir ?? `/tmp/factory/${projectName}-${Date.now()}`;
 
-  // Step 2: Scaffold
+  // Step 2: Scaffold from templates
   log(`step 2/4: scaffolding to ${targetDir}`);
-  await scaffoldProject(targetDir, pipeline, projectName);
+  const description = (spec.description as string) ?? (spec.tagline as string) ?? undefined;
+  const templateFiles = await scaffoldProject(targetDir, pipeline, projectName, description);
 
-  // Step 3: Generate code via Claude
+  // Step 3: Generate code via Claude (supplements template with spec-specific logic)
   log("step 3/4: generating code");
   const generatedFiles = await generateCode(targetDir, spec, pipeline);
+  // Merge template files into generated list (dedup)
+  const allFiles = [...new Set([...templateFiles, ...generatedFiles])];
 
   // Step 4: Quality gate loop
   log("step 4/4: quality gate (Ralph Mode)");
@@ -260,7 +277,7 @@ async function createProject(
 
   // Collect all generated code for review
   let allCode = "";
-  for (const file of generatedFiles) {
+  for (const file of allFiles) {
     try {
       const content = await sendTask(WORKER_URLS.shell, {
         skillId: "read_file",
@@ -312,7 +329,7 @@ ${allCode}`;
     outputDir: targetDir,
     pipelineId,
     spec,
-    filesGenerated: generatedFiles,
+    filesGenerated: allFiles,
     qualityResult,
     iterations,
   };
@@ -336,7 +353,9 @@ async function generateCode(
   const prompt = `Given this project specification:
 ${specStr}
 
-Generate ALL the source code files needed for a complete, working ${pipeline.name} project.
+The project has been scaffolded with a starter template (${pipeline.stack.join(", ")}). Now generate the ADDITIONAL source code files needed to implement the spec's specific features.
+
+Do NOT regenerate boilerplate files that already exist (package.json, tsconfig.json, basic layout/config files). Focus on the business logic, custom screens/pages/tools, and feature-specific code.
 
 Rules:
 - Use TypeScript with strict mode
@@ -344,12 +363,13 @@ Rules:
 - Add input validation at system boundaries
 - Follow ${pipeline.stack[0]} best practices
 - Include necessary type definitions
+- Import from existing template files where appropriate
 
 For each file, use this exact format:
 // === <relative-path-from-project-root> ===
 <file content>
 
-Generate the complete implementation — not stubs or placeholders. The code must be runnable.`;
+Generate complete implementations — not stubs, not TODOs, not placeholders. Every file must be runnable.`;
 
   const raw = await askClaude(prompt, systemCtx);
 
