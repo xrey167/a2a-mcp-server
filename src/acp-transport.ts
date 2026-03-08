@@ -73,16 +73,42 @@ let nextRequestId = 1;
 const pendingRequests = new Map<string | number, {
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }>();
 
-export function sendRequest(method: string, params?: Record<string, unknown>): Promise<unknown> {
+/** Default per-request timeout in milliseconds (30 seconds). */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+export function sendRequest(
+  method: string,
+  params?: Record<string, unknown>,
+  timeoutMs?: number,
+): Promise<unknown> {
+  const timeout = timeoutMs != null && timeoutMs > 0 ? timeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
   const id = nextRequestId++;
   return new Promise((resolve, reject) => {
-    pendingRequests.set(id, { resolve, reject });
+    const timer = setTimeout(() => {
+      if (pendingRequests.delete(id)) {
+        reject(new Error(`Request "${method}" (id=${id}) timed out after ${timeout}ms`));
+      }
+    }, timeout);
+    pendingRequests.set(id, { resolve, reject, timer });
     const msg: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
     const line = JSON.stringify(msg) + "\n";
     process.stdout.write(line);
   });
+}
+
+/**
+ * Reject all pending requests and cancel their timers.
+ * Call this when shutting down to avoid memory leaks from unresolved promises.
+ */
+export function closeTransport(): void {
+  for (const [id, pending] of pendingRequests) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error(`Transport closed with pending request id=${id}`));
+  }
+  pendingRequests.clear();
 }
 
 /**
@@ -96,6 +122,7 @@ export function handlePossibleResponse(msg: unknown): boolean {
   const id = obj.id as string | number;
   const pending = pendingRequests.get(id);
   if (!pending) return false;
+  clearTimeout(pending.timer);
   pendingRequests.delete(id);
   if ("error" in obj && obj.error) {
     const err = obj.error as { message?: string };
