@@ -404,7 +404,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
       const slashMatch = userText.match(/^\/(\S+)\s*(.*)/s);
       if (slashMatch) {
         const [, skillId, rest] = slashMatch;
-        resultText = await routeBySkillId(skillId, {}, rest || userText, onToolCall, onToolCallUpdate);
+        resultText = await routeBySkillId(skillId, {}, rest, onToolCall, onToolCallUpdate);
       } else {
         resultText = await routePrompt(sessionId, userText, onToolCall, onToolCallUpdate);
       }
