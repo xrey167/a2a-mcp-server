@@ -4,14 +4,14 @@
   <img src="https://img.shields.io/badge/protocol-MCP_(Anthropic)-6366f1" alt="MCP" />
   <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
   <img src="https://img.shields.io/badge/protocol-ACP_(Zed)-ef4444" alt="ACP" />
-  <img src="https://img.shields.io/badge/agents-7_workers-f59e0b" alt="Agents" />
-  <img src="https://img.shields.io/badge/MCP_tools-6_consolidated-8b5cf6" alt="Tools" />
+  <img src="https://img.shields.io/badge/agents-8_workers-f59e0b" alt="Agents" />
+  <img src="https://img.shields.io/badge/MCP_tools-10_consolidated-8b5cf6" alt="Tools" />
   <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
 </p>
 
 # a2a-mcp-server
 
-A **full multi-agent system** — not just a bridge — that connects Anthropic’s [MCP](https://modelcontextprotocol.io) and Google’s [A2A](https://a2a-protocol.org) protocols. One orchestrator manages seven specialized worker agents, routes tasks intelligently, and maintains shared memory across all agents.
+A **full multi-agent system** — not just a bridge — that connects Anthropic’s [MCP](https://modelcontextprotocol.io) and Google’s [A2A](https://a2a-protocol.org) protocols. One orchestrator manages eight specialized worker agents, routes tasks intelligently, and maintains shared memory across all agents. Includes circuit breakers for resilience, a DAG workflow engine, webhook ingestion, per-skill metrics, and a data processing pipeline.
 
 Claude Code connects via MCP (stdio), Zed connects via ACP (stdin/stdout NDJSON). Agents talk to each other via A2A (HTTP + JSON-RPC 2.0). Three protocols, each doing what it’s best at.
 
@@ -22,9 +22,9 @@ Claude Code connects via MCP (stdio), Zed connects via ACP (stdin/stdout NDJSON)
 | **FTS5 auto-indexing** | 500KB log file dumped into context | Search index, max 50 matching lines returned | **~90-98%** on large datasets |
 | **Persistent memory** | Re-explain project context every session (~2,000 tokens) | Auto-injected preamble (~100 tokens, set once) | **~95%** on repeated context |
 | **Bounded sessions** | 100+ turns accumulate in history | Capped at 20 turns (40 messages), older dropped | **~60-80%** on long conversations |
-| **Lightweight routing** | Full JSON schemas per agent (~2KB each × 7 agents = ~14KB) | Skill IDs only (~100 bytes per agent = ~700 bytes) | **~95%** on routing metadata |
+| **Lightweight routing** | Full JSON schemas per agent (~2KB each × 8 agents = ~16KB) | Skill IDs only (~100 bytes per agent = ~800 bytes) | **~95%** on routing metadata |
 | **Input truncation** | Unbounded user input / template content | Hard caps: 10K chars (user), 50K chars (templates), 1,024 output tokens | Prevents **100%** context blowout |
-| **Isolated agent contexts** | All 7 agents share one context window | Each worker has its own process + context | **~85%** less cross-contamination |
+| **Isolated agent contexts** | All 8 agents share one context window | Each worker has its own process + context | **~85%** less cross-contamination |
 
 ## How it differs from other A2A-MCP projects
 
@@ -32,11 +32,15 @@ Most [A2A-MCP integrations](https://github.com/modelcontextprotocol/servers) are
 
 |                 |Thin bridge             |**a2a-mcp-server**                           |
 |:----------------|:-----------------------|:--------------------------------------------|
-|**Agents**       |Proxy to external agents|7 built-in workers with real logic           |
+|**Agents**       |Proxy to external agents|8 built-in workers with real logic           |
 |**Memory**       |None                    |Dual-write: SQLite (FTS5) + Obsidian markdown|
 |**Routing**      |Manual                  |Smart auto-routing via AI agent              |
-|**MCP surface**  |One tool per skill      |6 consolidated tools (MCX-inspired)          |
+|**MCP surface**  |One tool per skill      |10 consolidated tools (MCX-inspired)         |
 |**Extensibility**|Code changes            |Hot-reload plugins + personas, no restart    |
+|**Resilience**   |None                    |Circuit breakers, retry with backoff, cascading failure isolation|
+|**Observability**|None                    |Per-skill latency percentiles (p50/p95/p99), error rates, worker utilization|
+|**Workflows**    |None                    |DAG workflow engine with parallel steps, template refs, retry/skip/fail policies|
+|**Webhooks**     |None                    |HMAC-SHA256 verified webhook ingestion with payload mapping|
 |**Security**     |Basic tokens            |Prompt injection prevention, SSRF guards, path traversal protection, OAuth2, AES-256-GCM credential sync|
 |**Protocols**    |MCP only                |MCP + ACP (Zed) + A2A                        |
 |**Runtime**      |Python (most)           |TypeScript / Bun                             |
@@ -50,17 +54,17 @@ Claude Code                Zed Editor
     │                          │
     │  MCP (stdio)             │  ACP (stdin/stdout NDJSON)
     ▼                          ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         ORCHESTRATOR · :8080                            │
-│          smart routing · project context · sessions · sandbox           │
-│        async tasks · memory · agent registry · plugins · security       │
-└──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────┘
-   │          │          │          │          │          │          │
-   │          │       A2A (HTTP + JSON-RPC 2.0)         │          │
-   ▼          ▼          ▼          ▼          ▼          ▼          ▼
- :8081      :8082      :8083      :8084      :8085      :8086      :8087
- Shell       Web        AI        Code     Knowledge   Design    Factory
- Agent      Agent      Agent      Agent      Agent      Agent      Agent
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                              ORCHESTRATOR · :8080                                │
+│     smart routing · project context · sessions · sandbox · workflow engine        │
+│   circuit breakers · metrics · webhooks · memory · plugins · security            │
+└──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬───┘
+   │          │          │          │          │          │          │          │
+   │          │          │    A2A (HTTP + JSON-RPC 2.0)  │          │          │
+   ▼          ▼          ▼          ▼          ▼          ▼          ▼          ▼
+ :8081      :8082      :8083      :8084      :8085      :8086      :8087      :8088
+ Shell       Web        AI        Code     Knowledge   Design    Factory     Data
+ Agent      Agent      Agent      Agent      Agent      Agent      Agent     Agent
 ```
 
 |Agent        |Port|What it does                                                   |
@@ -72,8 +76,9 @@ Claude Code                Zed Editor
 |**Knowledge**|8085|Full CRUD on an Obsidian vault — notes, search, tags           |
 |**Design**   |8086|End-to-end UI design pipeline (Gemini + Stitch MCP)            |
 |**Factory**  |8087|Turn ideas into production-ready projects via multi-agent pipelines|
+|**Data**     |8088|CSV/JSON parsing, transforms, statistical analysis, pivot tables|
 
-Every agent shares `remember` / `recall` / `memory_search` — backed by **SQLite** for fast FTS5 queries and **Obsidian** for human-readable persistence. Workers auto-respawn on crash with exponential backoff.
+Every agent shares `remember` / `recall` / `memory_search` — backed by **SQLite** for fast FTS5 queries and **Obsidian** for human-readable persistence. Workers auto-respawn on crash with exponential backoff. All inter-agent calls are wrapped in **circuit breakers** for resilience.
 
 -----
 
@@ -274,6 +279,83 @@ sandbox_vars { action: "list_vars", sessionId: "my-session" }
 |`first(arr, n?)` / `last()` |Take first/last N items                                    |
 |`table(arr)`                |Format array of objects as ASCII table                     |
 
+### 🛡️ Circuit breakers
+
+All inter-agent calls are wrapped in circuit breakers that prevent cascading failures. Each worker gets its own breaker with configurable thresholds.
+
+```
+# View all breaker states
+get_metrics   # includes circuit breaker status
+
+# Or via MCP resource
+# a2a://circuit-breakers
+```
+
+States: **closed** (normal) → **open** (failing, fast-reject) → **half_open** (testing recovery). Defaults: 5 failures to open, 30s cooldown, 2 successes to close.
+
+### 📊 Metrics & observability
+
+Per-skill latency percentiles, error rates, and worker utilization — collected automatically on every skill call.
+
+```
+# Snapshot of all metrics
+get_metrics
+
+# HTTP endpoint
+curl http://localhost:8080/metrics
+```
+
+Tracks: call count, error count, error rate, latency (p50/p95/p99/max) per skill, plus per-worker totals. Available as MCP resource at `a2a://metrics`.
+
+### 🔄 Workflow engine
+
+Define multi-step DAG workflows with parallel execution, template references, and error policies.
+
+```
+workflow_execute {
+  workflow: {
+    id: "analyze-and-report",
+    steps: [
+      { id: "fetch", skillId: "fetch_url", args: { url: "https://api.example.com/data" } },
+      { id: "parse", skillId: "parse_json", args: { data: "{{fetch.result}}" }, dependsOn: ["fetch"] },
+      { id: "analyze", skillId: "analyze_data", args: { data: "{{parse.result}}" }, dependsOn: ["parse"] }
+    ]
+  }
+}
+```
+
+Features:
+- **Parallel execution** — independent steps run concurrently
+- **Template references** — `{{stepId.result}}` resolves to previous step output
+- **Error policies** — `onError: "fail"` (cascade), `"skip"` (continue), `"retry"` (with backoff)
+- **Retry with backoff** — `maxRetries: 3` with exponential delay
+- **Conditional execution** — `when: "{{stepId.result}}"` guards
+- **Cycle detection** — validates DAG structure before execution
+- **Progress callbacks** — real-time step status updates
+
+### 🪝 Webhooks
+
+Receive external events via HMAC-SHA256 verified webhooks that auto-dispatch to worker skills.
+
+```
+# Register a webhook
+register_webhook {
+  id: "github-push",
+  secret: "whsec_...",
+  skillId: "run_shell",
+  fieldMap: { command: "head_commit.message" }
+}
+
+# Incoming webhook triggers the skill
+# POST http://localhost:8080/webhooks/github-push
+# X-Hub-Signature-256: sha256=...
+
+# View webhook activity
+list_webhooks
+```
+
+Features: constant-time HMAC signature verification, dot-notation payload field mapping, enable/disable toggle, activity logging with auto-pruning (last 1000 per webhook). Available as MCP resource at `a2a://webhooks`.
+
 ### 🏭 Project Factory
 
 Generate complete, production-ready projects from a vague idea. The Factory Agent orchestrates multiple workers through a multi-phase pipeline: intent normalization, template scaffolding, AI code generation, and quality gate review ("Ralph Mode").
@@ -296,6 +378,7 @@ delegate { skillId: "list_pipelines", message: "show available pipelines" }
 |`mcp-server`  |TypeScript + Bun + MCP SDK         |`dev-tools`, `data-connector`    |
 |`agent`       |TypeScript + Claude SDK            |`api-integration`, `content-generator`|
 |`api`         |Fastify + SQLite + TypeScript      |`marketplace`, `crud-service`    |
+|`cli`         |Bun + TypeScript + Zod             |`devtool`                        |
 
 Each pipeline supports **template variants** and a **quality gate** ("Ralph Mode") that scores generated code across multiple dimensions (code quality, type safety, accessibility, etc.) with automatic fix loops.
 
@@ -303,7 +386,7 @@ Each pipeline supports **template variants** and a **quality gate** ("Ralph Mode
 
 ## Function reference
 
-The MCP surface is consolidated into **6 core tools** (MCX-inspired: minimal tool count, maximum capability). All underlying worker skills remain callable via `sandbox_execute` with `skill(id, args)` or `delegate` with `skillId`.
+The MCP surface is consolidated into **10 core tools** (MCX-inspired: minimal tool count, maximum capability). All underlying worker skills remain callable via `sandbox_execute` with `skill(id, args)` or `delegate` with `skillId`.
 
 ### MCP tools (exposed to Claude Code / ACP)
 
@@ -315,6 +398,10 @@ The MCP surface is consolidated into **6 core tools** (MCX-inspired: minimal too
 |`run_shell_stream`  |Execute shell command with real-time streaming output.                           |
 |`design_workflow`   |Full design pipeline: suggest screens, generate each. Returns `taskId`.          |
 |`factory_workflow`  |Full project generation pipeline. Returns `taskId`.                              |
+|`workflow_execute`  |Execute a DAG workflow with parallel steps, template refs, and error policies.   |
+|`get_metrics`       |Snapshot of per-skill latency percentiles, error rates, and worker utilization.  |
+|`register_webhook`  |Register HMAC-SHA256 verified webhook that dispatches to a skill.               |
+|`list_webhooks`     |List all registered webhooks with activity stats.                                |
 
 ### Skills (callable via sandbox or delegate)
 
@@ -417,6 +504,19 @@ All skills below are accessible through `sandbox_execute` using `skill(id, args)
 </details>
 
 <details>
+<summary><strong>Data Agent · :8088</strong></summary>
+
+|Function        |Parameters                                          |Description                                       |
+|:---------------|:---------------------------------------------------|:-------------------------------------------------|
+|`parse_csv`     |`data`, `delimiter?`, `headers?`                    |Parse CSV text to array of objects                |
+|`parse_json`    |`data`                                              |Parse JSON string with error handling             |
+|`transform_data`|`data`, `operations`                                |Chain transforms: filter, sort, group, aggregate, flatten, unique, take, skip, pick, omit, rename|
+|`analyze_data`  |`data`, `fields?`                                   |Statistical analysis: mean, median, stddev, percentiles, distributions|
+|`pivot_table`   |`data`, `rowField`, `valueField`, `columnField?`, `aggregation?`|Pivot with sum/count/avg/min/max aggregation|
+
+</details>
+
+<details>
 <summary><strong>Project context</strong></summary>
 
 |Function             |Parameters                              |Description                                 |
@@ -459,6 +559,9 @@ All skills below are accessible through `sandbox_execute` using `skill(id, args)
 |`a2a://health`             |Worker health: status, fail count, uptime|
 |`a2a://tasks`              |Active and recent task list              |
 |`a2a://workers/{name}/card`|Agent card for a specific worker         |
+|`a2a://metrics`            |Per-skill latency percentiles and error rates|
+|`a2a://circuit-breakers`   |Circuit breaker states for all workers   |
+|`a2a://webhooks`           |Registered webhooks and activity stats   |
 
 ### Prompt templates
 
@@ -467,7 +570,7 @@ All skills below are accessible through `sandbox_execute` using `skill(id, args)
 |`persona-{name}`|System prompt for any agent                |
 |`delegate-task` |Delegate with auto-injected project context|
 
-Available personas: `orchestrator`, `shell-agent`, `web-agent`, `ai-agent`, `code-agent`, `knowledge-agent`, `factory-agent`.
+Available personas: `orchestrator`, `shell-agent`, `web-agent`, `ai-agent`, `code-agent`, `knowledge-agent`, `factory-agent`, `data-agent`.
 
 -----
 
@@ -599,7 +702,7 @@ Fine-grained control via JSON (see `.env.example` for quick setup):
 
 ```bash
 docker build -t a2a-mcp-server .
-docker run -p 8080-8087:8080-8087 \
+docker run -p 8080-8088:8080-8088 \
   -e ANTHROPIC_API_KEY=sk-... \
   -e GOOGLE_API_KEY=... \
   a2a-mcp-server
@@ -619,6 +722,7 @@ GitHub Actions runs on every push/PR to `main`:
 
 1. Create `src/workers/<n>.ts` — Fastify server with `AGENT_CARD` and skill handlers
 1. Add to `WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
+1. Add port to `ALLOWED_PORTS` in `src/server.ts`
 1. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
 
 ### Add a plugin (hot-reloaded)
@@ -644,7 +748,7 @@ a2a-mcp-server/
 │   ├── acp-server.ts          # ACP entry for Zed editor
 │   ├── acp-transport.ts       # ACP NDJSON JSON-RPC 2.0 transport
 │   ├── acp-types.ts           # ACP protocol type definitions
-│   ├── workers/               # Worker agent implementations (7 agents)
+│   ├── workers/               # Worker agent implementations (8 agents)
 │   ├── pipelines/             # Project generation pipeline definitions
 │   ├── templates/             # Scaffolding templates + variants per pipeline
 │   ├── personas/              # Agent persona .md files (hot-reload)
@@ -655,6 +759,10 @@ a2a-mcp-server/
 │   ├── a2a.ts                 # sendTask / discoverAgent helpers
 │   ├── memory.ts              # Dual-write: SQLite + Obsidian
 │   ├── skills.ts              # Built-in skill registry
+│   ├── circuit-breaker.ts     # Circuit breaker pattern for worker resilience
+│   ├── metrics.ts             # Per-skill latency percentiles + error tracking
+│   ├── workflow-engine.ts     # DAG workflow executor with parallel steps
+│   ├── webhooks.ts            # HMAC-SHA256 webhook ingestion + dispatch
 │   ├── config.ts              # Unified config loader (~/.a2a-mcp/config.json + env)
 │   ├── prompt-sanitizer.ts    # Prompt injection prevention
 │   ├── path-utils.ts          # Path traversal prevention
