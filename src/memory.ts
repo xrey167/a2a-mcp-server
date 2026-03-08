@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { join } from "path";
 import { homedir } from "os";
 import { writeFileSync, mkdirSync, unlinkSync } from "fs";
+import { buildFtsQuery } from "./search.js";
 
 const VAULT = process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/a2a-knowledge");
 const MEMORY_DIR = join(VAULT, "_memory");
@@ -77,22 +78,42 @@ export const memory = {
     try { unlinkSync(noteFile(agent, key)); } catch {} // clean up markdown file too
   },
 
-  /** Full-text search across all memories. Optionally filter by agent. */
+  /** Full-text search across all memories with LIKE fallback. Optionally filter by agent. */
   search(query: string, agent?: string): Array<{ agent: string; key: string; value: string; rank: number }> {
-    if (agent) {
-      return db.query<{agent:string;key:string;value:string;rank:number},[string,string]>(
-        `SELECT m.agent, m.key, m.value, f.rank
-         FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
-         WHERE memory_fts MATCH ? AND m.agent = ?
-         ORDER BY f.rank`
-      ).all(query, agent);
-    }
-    return db.query<{agent:string;key:string;value:string;rank:number},[string]>(
-      `SELECT m.agent, m.key, m.value, f.rank
-       FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
-       WHERE memory_fts MATCH ?
-       ORDER BY f.rank`
-    ).all(query);
+    const ftsQuery = buildFtsQuery(query);
+
+    // Layer 1: FTS5 MATCH with proper query building
+    try {
+      const ftsResults = agent
+        ? db.query<{agent:string;key:string;value:string;rank:number},[string,string]>(
+            `SELECT m.agent, m.key, m.value, f.rank
+             FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
+             WHERE memory_fts MATCH ? AND m.agent = ?
+             ORDER BY f.rank`
+          ).all(ftsQuery, agent)
+        : db.query<{agent:string;key:string;value:string;rank:number},[string]>(
+            `SELECT m.agent, m.key, m.value, f.rank
+             FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
+             WHERE memory_fts MATCH ?
+             ORDER BY f.rank`
+          ).all(ftsQuery);
+      if (ftsResults.length > 0) return ftsResults;
+    } catch {}
+
+    // Layer 2: LIKE fallback for partial/substring matches
+    const likePattern = `%${query}%`;
+    const likeResults = agent
+      ? db.query<{agent:string;key:string;value:string;rank:number},[string,string,string]>(
+          `SELECT agent, key, value, 0 as rank FROM memory
+           WHERE (key LIKE ? OR value LIKE ?) AND agent = ?
+           ORDER BY ts DESC LIMIT 20`
+        ).all(likePattern, likePattern, agent)
+      : db.query<{agent:string;key:string;value:string;rank:number},[string,string]>(
+          `SELECT agent, key, value, 0 as rank FROM memory
+           WHERE key LIKE ? OR value LIKE ?
+           ORDER BY ts DESC LIMIT 20`
+        ).all(likePattern, likePattern);
+    return likeResults;
   },
 
   /** List all keys for an agent, optionally filtered by prefix. */

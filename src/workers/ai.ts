@@ -2,7 +2,16 @@ import Fastify from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
+import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
+import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
+import { safeStringify } from "../safe-json.js";
+
+const AiSchemas = {
+  ask_claude: z.object({ prompt: z.string().min(1), model: z.string().optional() }).passthrough(),
+  search_files: z.object({ pattern: z.string().min(1), directory: z.string().optional().default(".") }).passthrough(),
+  query_sqlite: z.object({ database: z.string().min(1), sql: z.string().min(1) }).passthrough(),
+};
 import { runClaudeCLI } from "../claude-cli.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
@@ -30,9 +39,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
   if (memResult !== null) return memResult;
   switch (skillId) {
     case "ask_claude": {
-      const prompt = (args.prompt as string) ?? text;
+      const { prompt, model: argModel } = AiSchemas.ask_claude.parse({ prompt: args.prompt ?? text, ...args });
       const persona = getPersona(NAME);
-      const model = (args.model as string) ?? persona.model;
+      const model = argModel ?? persona.model;
       try {
         const client = new Anthropic();
         const message = await client.messages.create({
@@ -41,7 +50,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           messages: [{ role: "user", content: prompt }],
         });
         const block = message.content[0];
-        return block.type === "text" ? block.text : JSON.stringify(block);
+        return block.type === "text" ? block.text : safeStringify(block);
       } catch {
         // Fallback to claude CLI (Claude Code OAuth). --strict-mcp-config
         // prevents re-spawning the MCP server on already-occupied ports.
@@ -49,8 +58,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }
     }
     case "search_files": {
-      const pattern = (args.pattern as string) ?? text;
-      const directory = (args.directory as string) ?? ".";
+      const { pattern, directory } = AiSchemas.search_files.parse({ pattern: args.pattern ?? text, ...args });
       const glob = new Glob(pattern);
       const matches: string[] = [];
       for await (const file of glob.scan(directory)) {
@@ -59,8 +67,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       return matches.length > 0 ? matches.join("\n") : "No files found";
     }
     case "query_sqlite": {
-      const database = args.database as string;
-      const sql = args.sql as string;
+      const { database, sql } = AiSchemas.query_sqlite.parse(args);
       if (!sql.trim().toUpperCase().startsWith("SELECT")) {
         return "Only SELECT queries are allowed";
       }
@@ -99,19 +106,15 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     return { jsonrpc: "2.0", error: { code: -32601, message: "Method not found" } };
   }
 
+  const sizeErr = checkRequestSize(data);
+  if (sizeErr) { reply.code(413); return { jsonrpc: "2.0", error: { code: -32000, message: sizeErr } }; }
+
   const { skillId, args, message, id: taskId } = data.params ?? {};
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "ask_claude";
   const result = await handleSkill(sid, args ?? { prompt: text }, text);
-  const part = typeof result === "string"
-    ? { kind: "text" as const, text: result }
-    : result;
-
-  return {
-    jsonrpc: "2.0", id: data.id,
-    result: { id: taskId, status: { state: "completed" },
-      artifacts: [{ parts: [part] }] },
-  };
+  const resultText = typeof result === "string" ? result : safeStringify(result, 2);
+  return buildA2AResponse(data.id, taskId, resultText);
 });
 
 // Init persona + plugin hot-reload

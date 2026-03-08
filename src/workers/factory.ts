@@ -22,7 +22,17 @@
  */
 
 import Fastify from "fastify";
+import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
+import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
+import { safeStringify } from "../safe-json.js";
+
+const FactorySchemas = {
+  normalize_intent: z.object({ idea: z.string().min(1), pipeline: z.string().optional().default("app") }).passthrough(),
+  create_project: z.object({ idea: z.string().min(1), pipeline: z.string().optional().default("app"), outputDir: z.string().optional(), variant: z.string().optional() }).passthrough(),
+  quality_gate: z.object({ code: z.string().min(1), spec: z.string().optional().default("{}"), pipeline: z.string().optional().default("app"), variant: z.string().optional() }).passthrough(),
+  list_templates: z.object({ pipeline: z.string().optional().default("") }).passthrough(),
+};
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { PIPELINES, listPipelines, getPipeline } from "../pipelines/index.js";
 import type { Pipeline } from "../pipelines/types.js";
@@ -711,9 +721,7 @@ async function handleSkill(
 
   switch (skillId) {
     case "normalize_intent": {
-      const idea = (args.idea as string) ?? text;
-      const pipelineId = (args.pipeline as string) ?? "app";
-      if (!idea) throw new Error("normalize_intent requires idea");
+      const { idea, pipeline: pipelineId } = FactorySchemas.normalize_intent.parse({ idea: args.idea ?? text, ...args });
 
       // Match template variant first
       const match = await matchTemplate(idea, pipelineId);
@@ -744,15 +752,11 @@ async function handleSkill(
         response.spec = spec;
       }
 
-      return JSON.stringify(response, null, 2);
+      return safeStringify(response, 2);
     }
 
     case "create_project": {
-      const idea = (args.idea as string) ?? text;
-      const pipelineId = (args.pipeline as string) ?? "app";
-      const outputDir = args.outputDir as string | undefined;
-      const variant = args.variant as string | undefined;
-      if (!idea) throw new Error("create_project requires idea");
+      const { idea, pipeline: pipelineId, outputDir, variant } = FactorySchemas.create_project.parse({ idea: args.idea ?? text, ...args });
 
       const result = await createProject(idea, pipelineId, outputDir, variant);
 
@@ -827,11 +831,7 @@ async function handleSkill(
     }
 
     case "quality_gate": {
-      const code = (args.code as string) ?? text;
-      const spec = (args.spec as string) ?? "{}";
-      const pipelineId = (args.pipeline as string) ?? "app";
-      const variantId = args.variant as string | undefined;
-      if (!code) throw new Error("quality_gate requires code");
+      const { code, spec, pipeline: pipelineId, variant: variantId } = FactorySchemas.quality_gate.parse({ code: args.code ?? text, ...args });
 
       const pipeline = getPipeline(pipelineId);
       if (!pipeline) throw new Error(`Unknown pipeline: ${pipelineId}`);
@@ -842,17 +842,17 @@ async function handleSkill(
       }
 
       const result = await qualityGate(code, spec, pipeline, variantSpec);
-      return JSON.stringify(result, null, 2);
+      return safeStringify(result, 2);
     }
 
     case "list_pipelines":
-      return JSON.stringify(listPipelines(), null, 2);
+      return safeStringify(listPipelines(), 2);
 
     case "list_templates": {
-      const pipelineId = (args.pipeline as string) ?? "";
+      const { pipeline: pipelineId } = FactorySchemas.list_templates.parse(args);
       if (pipelineId) {
         const variants = await listVariants(pipelineId);
-        return JSON.stringify({ pipeline: pipelineId, variants }, null, 2);
+        return safeStringify({ pipeline: pipelineId, variants }, 2);
       }
       const allVariants = await listAllVariants();
       // Group by pipeline
@@ -860,7 +860,7 @@ async function handleSkill(
       for (const v of allVariants) {
         (grouped[v.pipelineId] ??= []).push(v);
       }
-      return JSON.stringify(grouped, null, 2);
+      return safeStringify(grouped, 2);
     }
 
     default:
@@ -893,21 +893,16 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "list_pipelines";
 
+  const sizeErr = checkRequestSize(data);
+  if (sizeErr) { reply.code(413); return { jsonrpc: "2.0", error: { code: -32000, message: sizeErr } }; }
+
   try {
     const result = await handleSkill(sid, args ?? {}, text);
-    return {
-      jsonrpc: "2.0", id: data.id,
-      result: {
-        id: taskId,
-        status: { state: "completed" },
-        artifacts: [{ parts: [{ kind: "text" as const, text: result }] }],
-      },
-    };
+    return buildA2AResponse(data.id, taskId, result);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log(`skill ${sid} failed: ${msg}`);
+    log(`skill ${sid} failed: ${err instanceof Error ? err.message : String(err)}`);
     reply.code(500);
-    return { jsonrpc: "2.0", id: data.id, error: { code: -32000, message: msg } };
+    return buildA2AError(data.id, err);
   }
 });
 

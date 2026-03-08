@@ -25,8 +25,13 @@ import { randomUUID } from "crypto";
 import { executeSandbox, setAdapters } from "./sandbox.js";
 import { sandboxStore } from "./sandbox-store.js";
 import { sanitizeForPrompt } from "./prompt-sanitizer.js";
+import { smartTruncate as smartTruncateStr, capResponse, truncateArray } from "./truncate.js";
+import { safeStringify } from "./safe-json.js";
+import { z } from "zod";
+import { loadConfig } from "./config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const CONFIG = loadConfig();
 
 // ── URL validation (SSRF prevention) ─────────────────────────────
 // Only worker ports allowed — port 8080 (orchestrator) excluded to prevent infinite recursion.
@@ -409,11 +414,68 @@ function startFactoryWorkflow(args: Record<string, unknown>): string {
  * Used by both the MCP CallToolRequestSchema handler and the A2A tasks/send handler.
  * Throws on missing required parameters; callers decide how to format errors.
  */
+// ── Zod schemas for orchestrator skills ───────────────────────
+const OrchestratorSchemas = {
+  get_task_result: z.object({ taskId: z.string().min(1, "taskId is required") }).strict(),
+  get_session_history: z.object({ sessionId: z.string().min(1, "sessionId is required") }).strict(),
+  clear_session: z.object({ sessionId: z.string().min(1, "sessionId is required") }).strict(),
+  register_agent: z.object({ url: z.string().url("invalid URL"), apiKey: z.string().optional() }).strict(),
+  unregister_agent: z.object({ url: z.string().min(1, "url is required") }).strict(),
+  memory_search: z.object({ query: z.string().min(1, "query is required"), agent: z.string().optional() }).strict(),
+  memory_list: z.object({ agent: z.string().min(1, "agent is required"), prefix: z.string().optional() }).strict(),
+  memory_cleanup: z.object({ maxAgeDays: z.number().positive("maxAgeDays must be > 0") }).strict(),
+  use_mcp_tool: z.object({ toolName: z.string().min(1, "toolName is required"), args: z.record(z.unknown()).optional() }).strict(),
+  sandbox_execute: z.object({
+    code: z.string().min(1, "code is required"),
+    sessionId: z.string().optional(),
+    timeout: z.number().positive().optional(),
+  }).strict(),
+  sandbox_vars: z.object({
+    sessionId: z.string().min(1, "sessionId is required"),
+    action: z.enum(["list", "get", "delete"]).optional().default("list"),
+    varName: z.string().optional(),
+  }).strict(),
+} as const;
+
+function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
+  skill: K,
+  args: Record<string, unknown>,
+): z.infer<(typeof OrchestratorSchemas)[K]> {
+  return (OrchestratorSchemas[skill] as z.ZodType).parse(args);
+}
+
 async function dispatchSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   switch (skillId) {
-    case "delegate":
+    case "delegate": {
+      // Consolidated: sync delegate, async delegate (async:true), and task polling (taskId)
+      if (args.taskId) {
+        // Poll mode
+        pruneTasks(7 * 24 * 60 * 60 * 1000);
+        const { taskId } = validateOrchestrator("get_task_result", { taskId: args.taskId });
+        const task = getTask(taskId);
+        if (!task) return JSON.stringify({ status: "not_found" });
+        if (task.state === "submitted" || task.state === "working") return JSON.stringify({ status: "pending", state: task.state, progress: task.progress ?? null });
+        if (task.state === "completed") return JSON.stringify({ status: "completed", result: task.artifacts[0]?.parts[0]?.text });
+        if (task.state === "canceled") return JSON.stringify({ status: "canceled" });
+        return JSON.stringify({ status: "failed", error: task.error });
+      }
+      if (args.async) {
+        // Async mode
+        const task = createTask({ skillId: args.skillId as string | undefined, workerUrl: args.agentUrl as string | undefined });
+        markWorking(task.id);
+        delegate({ ...args, message: text })
+          .then(result => markCompleted(task.id, result))
+          .catch(err => {
+            try { markFailed(task.id, { code: "TASK_FAILED", message: String(err) }); }
+            catch (e) { process.stderr.write(`[orchestrator] markFailed error: ${e}\n`); }
+          });
+        return JSON.stringify({ taskId: task.id });
+      }
+      // Sync mode (default)
       return delegate({ ...args });
+    }
 
+    // Backwards compat: delegate_async and get_task_result still work as aliases
     case "delegate_async": {
       const task = createTask({ skillId: args.skillId as string | undefined, workerUrl: args.agentUrl as string | undefined });
       markWorking(task.id);
@@ -428,8 +490,7 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
 
     case "get_task_result": {
       pruneTasks(7 * 24 * 60 * 60 * 1000);
-      const taskId = String(args?.taskId ?? "");
-      if (!taskId) throw new Error("get_task_result requires taskId");
+      const { taskId } = validateOrchestrator("get_task_result", args);
       const task = getTask(taskId);
       if (!task) return JSON.stringify({ status: "not_found" });
       if (task.state === "submitted" || task.state === "working") return JSON.stringify({ status: "pending", state: task.state, progress: task.progress ?? null });
@@ -440,31 +501,27 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
 
     case "get_session_history": {
       pruneStaleSessionsImpl();
-      const sessionId = String(args?.sessionId ?? "");
-      if (!sessionId) throw new Error("get_session_history requires sessionId");
+      const { sessionId } = validateOrchestrator("get_session_history", args);
       return JSON.stringify(loadSessionHistory(sessionId), null, 2);
     }
 
     case "clear_session": {
-      const sessionId = String(args?.sessionId ?? "");
-      if (!sessionId) throw new Error("clear_session requires sessionId");
+      const { sessionId } = validateOrchestrator("clear_session", args);
       memory.forget(SESSION_AGENT, sessionId);
       return `Session ${sessionId} cleared`;
     }
 
     case "register_agent": {
-      const url = String(args?.url ?? "");
-      if (!url) throw new Error("register_agent requires url");
+      const { url, apiKey } = validateOrchestrator("register_agent", args);
       if (!isAllowedUrl(url)) {
         throw new AgentError("INVALID_ARGS", `Blocked URL: only localhost worker ports are allowed, got: ${sanitizeUrlForLog(url)}`);
       }
-      const card = await registerAgent(url, args?.apiKey ? String(args.apiKey) : undefined);
+      const card = await registerAgent(url, apiKey);
       return JSON.stringify(card, null, 2);
     }
 
     case "unregister_agent": {
-      const url = String(args?.url ?? "");
-      if (!url) throw new Error("unregister_agent requires url");
+      const { url } = validateOrchestrator("unregister_agent", args);
       const existed = unregisterAgent(url);
       return existed ? `Unregistered: ${url}` : `Not found: ${url}`;
     }
@@ -477,20 +534,19 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     }
 
     case "memory_search": {
-      const query = String(args?.query ?? "");
-      if (!query) throw new Error("memory_search requires query");
-      return JSON.stringify(memory.search(query, args?.agent ? String(args.agent) : undefined), null, 2);
+      const { query, agent } = validateOrchestrator("memory_search", args);
+      const throttle = isSearchThrottled("global");
+      if (!throttle.allowed) throw new Error("Search rate limit exceeded. Try again in a minute.");
+      return JSON.stringify(memory.search(query, agent), null, 2);
     }
 
     case "memory_list": {
-      const agent = String(args?.agent ?? "");
-      if (!agent) throw new Error("memory_list requires agent");
-      return JSON.stringify(memory.listKeys(agent, args?.prefix ? String(args.prefix) : undefined), null, 2);
+      const { agent, prefix } = validateOrchestrator("memory_list", args);
+      return JSON.stringify(memory.listKeys(agent, prefix), null, 2);
     }
 
     case "memory_cleanup": {
-      const maxAgeDays = args.maxAgeDays as number;
-      if (!maxAgeDays || maxAgeDays <= 0) throw new Error("memory_cleanup requires maxAgeDays > 0");
+      const { maxAgeDays } = validateOrchestrator("memory_cleanup", args);
       return `Deleted ${memory.cleanup(maxAgeDays)} memories older than ${maxAgeDays} days`;
     }
 
@@ -498,9 +554,8 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
       return JSON.stringify({ servers: listMcpServers(), tools: listMcpTools() }, null, 2);
 
     case "use_mcp_tool": {
-      const toolName = String(args?.toolName ?? "");
-      if (!toolName) throw new Error("use_mcp_tool requires toolName");
-      return callMcpTool(toolName, (args.args ?? {}) as Record<string, unknown>);
+      const { toolName, args: toolArgs } = validateOrchestrator("use_mcp_tool", args);
+      return callMcpTool(toolName, (toolArgs ?? {}) as Record<string, unknown>);
     }
 
     case "get_project_context":
@@ -516,10 +571,36 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
       return startFactoryWorkflow(args);
 
     case "sandbox_execute": {
-      const code = args.code as string;
-      if (!code) throw new Error("sandbox_execute requires code");
-      const sessionId = (args.sessionId as string) ?? `sandbox-${randomUUID()}`;
-      const timeout = (args.timeout as number) ?? 30_000;
+      // Consolidated: code execution + var management
+      const action = args.action as string | undefined;
+      if (action) {
+        // Var management mode (no code needed)
+        const sessionId = args.sessionId as string;
+        if (!sessionId) throw new Error("sandbox_execute var management requires sessionId");
+        switch (action) {
+          case "list_vars":
+            return JSON.stringify(sandboxStore.listVars(sessionId), null, 2);
+          case "get_var": {
+            const varName = args.varName as string;
+            if (!varName) throw new Error("get_var requires varName");
+            const val = sandboxStore.getVar(sessionId, varName);
+            return val ?? `Variable not found: ${varName}`;
+          }
+          case "delete_var": {
+            const varName = args.varName as string;
+            if (!varName) throw new Error("delete_var requires varName");
+            sandboxStore.deleteVar(sessionId, varName);
+            return `Deleted ${varName} from session ${sessionId}`;
+          }
+          default:
+            throw new Error(`Unknown action: ${action}`);
+        }
+      }
+
+      const validated = validateOrchestrator("sandbox_execute", args);
+      const code = validated.code;
+      const sessionId = validated.sessionId ?? `sandbox-${randomUUID()}`;
+      const timeout = validated.timeout ?? 30_000;
 
       const result = await executeSandbox({
         code,
@@ -548,21 +629,17 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     }
 
     case "sandbox_vars": {
-      const sessionId = args.sessionId as string;
-      if (!sessionId) throw new Error("sandbox_vars requires sessionId");
-      const action = (args.action as string) ?? "list";
+      const { sessionId, action, varName } = validateOrchestrator("sandbox_vars", args);
 
       switch (action) {
         case "list":
           return JSON.stringify(sandboxStore.listVars(sessionId), null, 2);
         case "get": {
-          const varName = args.varName as string;
           if (!varName) throw new Error("sandbox_vars get requires varName");
           const val = sandboxStore.getVar(sessionId, varName);
           return val ?? `Variable not found: ${varName}`;
         }
         case "delete": {
-          const varName = args.varName as string;
           if (!varName) throw new Error("sandbox_vars delete requires varName");
           sandboxStore.deleteVar(sessionId, varName);
           return `Deleted ${varName} from session ${sessionId}`;
@@ -866,22 +943,58 @@ const server = new Server(
 );
 
 // ── Result truncation (MCX-inspired token reduction) ──────────
-const CHAR_LIMIT = 25_000;
-const TRUNCATE_ITEMS = 10;
+const CHAR_LIMIT = CONFIG.truncation.maxResponseSize;
+const TRUNCATE_ITEMS = CONFIG.truncation.maxArrayItems;
 
 function smartTruncate(value: unknown, maxItems = TRUNCATE_ITEMS): string {
-  const raw = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  // Handle circular references gracefully
+  const raw = typeof value === "string" ? value : safeStringify(value, 2);
   if (raw.length <= CHAR_LIMIT) return raw;
 
-  // Try array truncation first
+  // Try array truncation first — keep first + last items with marker
   if (Array.isArray(value) && value.length > maxItems) {
-    const sliced = value.slice(0, maxItems);
-    const summary = JSON.stringify(sliced, null, 2);
-    return `${summary}\n\n... +${value.length - maxItems} more items (total: ${value.length}). Use sandbox_execute to filter/transform in-process.`;
+    const truncated = truncateArray(value, maxItems);
+    const summary = safeStringify(truncated, 2);
+    return capResponse(summary, CHAR_LIMIT);
   }
 
-  // Hard truncation as last resort
-  return raw.slice(0, CHAR_LIMIT) + `\n\n... [truncated at ${CHAR_LIMIT} chars, original ${raw.length}. Use sandbox_execute to filter data in-process.]`;
+  // Smart head/tail truncation preserving context from both ends
+  return smartTruncateStr(raw, { maxLength: CHAR_LIMIT });
+}
+
+// ── Search throttling ─────────────────────────────────────────
+const SEARCH_WINDOW_MS = 60_000;
+const SEARCH_MAX_NORMAL = CONFIG.search.rateLimit;
+const SEARCH_MAX_BURST = CONFIG.search.rateLimitBurst;
+
+interface ThrottleState {
+  timestamps: number[];
+  blocked: number;
+}
+
+const searchThrottle = new Map<string, ThrottleState>();
+
+function isSearchThrottled(sessionId: string): { allowed: boolean; remaining: number } {
+  const now = Date.now();
+  let state = searchThrottle.get(sessionId);
+  if (!state) {
+    state = { timestamps: [], blocked: 0 };
+    searchThrottle.set(sessionId, state);
+  }
+
+  // Prune timestamps outside the window
+  state.timestamps = state.timestamps.filter(t => now - t < SEARCH_WINDOW_MS);
+
+  const total = state.timestamps.length;
+  const max = total >= SEARCH_MAX_NORMAL ? SEARCH_MAX_BURST : SEARCH_MAX_NORMAL;
+
+  if (total >= max) {
+    state.blocked++;
+    return { allowed: false, remaining: 0 };
+  }
+
+  state.timestamps.push(now);
+  return { allowed: true, remaining: max - total - 1 };
 }
 
 /** Build a concise skill summary string for tool descriptions (progressive disclosure). */
@@ -926,25 +1039,30 @@ ${skillSummary}
 ## Token Efficiency
 Filter/transform data inside the sandbox. Return only what matters.
 Example: const invoices = await skill("fetch_url", {url, format:"json"}); return {count: invoices.length, total: sum(invoices, "amount")};`,
-      inputSchema: sandboxExecuteSkill.inputSchema,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          ...sandboxExecuteSkill.inputSchema.properties,
+          // Var management (alternative to running code)
+          action: { type: "string", description: "Var management: 'list_vars', 'get_var', 'delete_var'. If set, code is not required.", enum: ["list_vars", "get_var", "delete_var"] },
+          varName: { type: "string", description: "Variable name (for get_var/delete_var)" },
+        },
+      },
     },
     // Routing: delegate to workers when sandbox isn't needed
+    // Supports sync (default) and async mode (set async:true, returns taskId; poll with taskId arg)
     {
       name: "delegate",
-      description: "Route a task to a worker agent. Use sandbox_execute instead when you need to filter or transform results.",
-      inputSchema: delegateSkill.inputSchema,
-    },
-    // Async delegate for long-running workflows
-    {
-      name: "delegate_async",
-      description: "Fire-and-forget delegate — returns taskId. Poll with get_task_result.",
-      inputSchema: delegateAsyncSkill.inputSchema,
-    },
-    // Task polling
-    {
-      name: "get_task_result",
-      description: "Poll async task status/result.",
-      inputSchema: getTaskResultSkill.inputSchema,
+      description: `Route a task to a worker agent. Use sandbox_execute instead when you need to filter or transform results.
+Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an async task's result.`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          ...delegateSkill.inputSchema.properties,
+          async: { type: "boolean", description: "If true, run asynchronously and return taskId" },
+          taskId: { type: "string", description: "Poll result of a previous async delegate" },
+        },
+      },
     },
     // Discovery: list agents and their skills
     {
@@ -957,12 +1075,6 @@ Example: const invoices = await skill("fetch_url", {url, format:"json"}); return
       name: "run_shell_stream",
       description: "Execute shell command with real-time streaming output.",
       inputSchema: runShellStreamSkill.inputSchema,
-    },
-    // Sandbox variable management
-    {
-      name: "sandbox_vars",
-      description: "List, get, or delete persisted sandbox variables.",
-      inputSchema: sandboxVarsSkill.inputSchema,
     },
     // Design workflow (high-level orchestration)
     {
@@ -1168,7 +1280,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       clearTimeout(timer);
     }
 
-    return { content: [{ type: "text", text: accumulated || "(no output)" }] };
+    return { content: [{ type: "text", text: capResponse(accumulated || "(no output)", CHAR_LIMIT) }] };
   }
 
   const text = String((args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "");
@@ -1177,7 +1289,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { parsed = raw; }
   const truncated = smartTruncate(parsed);
-  return { content: [{ type: "text", text: truncated }] };
+  return { content: [{ type: "text", text: capResponse(truncated, CHAR_LIMIT) }] };
 });
 
 // ── A2A HTTP auth ────────────────────────────────────────────────
