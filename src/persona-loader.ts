@@ -64,7 +64,7 @@ function parsePersonaFile(content: string): PersonaConfig {
 function loadFromDisk(agentName: string): PersonaConfig {
   const filePath = resolve(PERSONAS_DIR, `${agentName}.md`);
   // Defense-in-depth: ensure resolved path stays within PERSONAS_DIR
-  if (!filePath.startsWith(PERSONAS_DIR + "/")) {
+  if (!filePath.startsWith(PERSONAS_DIR + require("path").sep)) {
     process.stderr.write(`[persona-loader] blocked path traversal attempt: ${agentName}\n`);
     return { ...DEFAULT_PERSONA };
   }
