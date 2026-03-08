@@ -668,14 +668,34 @@ async function handleSkill(
 
       // Match template variant first
       const match = await matchTemplate(idea, pipelineId);
-      const specJsonString = await normalizeIntent(idea, pipelineId, match.variantSpec);
-      const spec = JSON.parse(specJsonString);
+      const specText = await normalizeIntent(idea, pipelineId, match.variantSpec);
 
-      // Add match info to the spec object
-      spec.templateMatch = {
-        variantId: match.variantId,
-        confidence: match.confidence,
-        reason: match.reason,
+      // Wrap spec and match info in structured JSON to keep the skill contract
+      let spec: unknown = null;
+      let specRaw: string | undefined = undefined;
+      try {
+        spec = JSON.parse(specText);
+      } catch {
+        // If normalizeIntent did not return valid JSON, preserve the raw text
+        specRaw = specText;
+      }
+
+      const response: Record<string, unknown> = {
+        match: {
+          pipelineId,
+          variantId: (match as any).variantId ?? null,
+          confidence: (match as any).confidence ?? null,
+          reason: (match as any).reason ?? null,
+        },
+      };
+
+      if (specRaw !== undefined) {
+        response.specRaw = specRaw;
+      } else {
+        response.spec = spec;
+      }
+
+      return JSON.stringify(response, null, 2);
       };
 
       // Include match info in response
