@@ -1,34 +1,100 @@
 # a2a-mcp-server
 
-**A multi-agent orchestration platform that bridges MCP and A2A protocols — giving Claude Code a team of specialist agents instead of a single monolithic tool.**
+**A multi-agent orchestration platform that bridges MCP and A2A protocols — designed to dramatically reduce token consumption when working with Claude Code.**
 
 ---
 
-## The Problem
+## Why This Exists
 
-AI coding assistants like Claude Code are powerful, but they hit walls:
+Every message you send through Claude costs tokens — and the default workflow is wasteful. Query an API, get 50KB of JSON back, Claude reads all of it, you ask it to filter three fields, it reads it again. Run a shell command, pipe the output through Claude just to count lines. Repeat context about your project in every conversation because there's no memory between sessions.
 
-- **One tool, one brain.** Claude Code talks to one MCP server at a time. If you need shell access, web fetching, AI reasoning, code review, and knowledge management, you're either chaining tools manually or cramming everything into a single bloated server.
-- **No agent collaboration.** There's no standard way for AI agents to talk to *each other*. You end up being the human router — copy-pasting outputs between tools, losing context at every hop.
-- **No persistent memory.** Every session starts from zero. Project context, previous decisions, and accumulated knowledge vanish when the conversation ends.
-- **Project scaffolding is tedious.** Going from "I want a habit tracker app" to a runnable project with proper structure, quality checks, and best practices still requires hours of boilerplate work.
-- **Credential chaos across machines.** OAuth tokens, API keys, and auth configs are scattered across dotfiles. Setting up a new dev machine means re-authenticating everything from scratch.
+**This project exists to keep data out of Claude's context window unless it actually needs to be there.**
 
-## The Solution
+## How It Reduces Token Spending
 
-This project spins up **7 specialist worker agents** — each running as its own process, each owning a focused set of skills — all coordinated by a single MCP orchestrator. Claude Code sees one `delegate` tool; behind it, the right agent picks up the task automatically.
+The core idea: offload computation, filtering, and state management to **local processes** so Claude only sees the small, relevant results — not the raw data.
 
-- **Shell Agent** runs commands and streams output in real-time
-- **Web Agent** fetches URLs and calls external APIs
-- **AI Agent** queries Claude (or falls back to CLI OAuth) and searches files
-- **Code Agent** runs OpenAI Codex for code generation and review
-- **Knowledge Agent** manages an Obsidian vault as a persistent knowledge base
-- **Design Agent** uses Gemini to critique UI designs and suggest screen flows
-- **Factory Agent** generates complete, runnable projects from a vague idea — Expo apps, Next.js sites, MCP servers, AI agents, and REST APIs — with automated quality gates
+### 1. Sandbox Execution — Process Data Locally, Not Through Claude
 
-Every agent shares **dual-write memory** (SQLite + Obsidian), so context persists across sessions. A **sandbox executor** lets you run TypeScript that calls any agent skill programmatically. And a **credential sync system** encrypts and transfers OAuth tokens between machines.
+The biggest token saver. Instead of sending a 100KB API response through Claude and asking it to "extract the names", you run TypeScript locally in an isolated Bun subprocess:
 
-The agents communicate via Google's [A2A (Agent-to-Agent) protocol](https://github.com/google/A2A) — an open standard for inter-agent communication over HTTP + JSON-RPC 2.0. You can register external A2A agents too, extending the system without touching the core.
+```typescript
+// This runs LOCALLY — Claude never sees the raw 100KB
+sandbox_execute {
+  code: `
+    const data = await skill('call_api', { url: 'https://api.example.com/users', method: 'GET' });
+    const parsed = JSON.parse(data);
+    return parsed.map(u => u.name).join('\\n');  // Only ~500 bytes returned to Claude
+  `
+}
+```
+
+Data helpers like `pick()`, `first()`, `last()`, `sum()`, `count()` reduce datasets before they ever touch Claude's context. A 1000-row result becomes 10 rows or a single number.
+
+### 2. FTS5 Auto-Indexing — Search Large Results Instead of Reading Them
+
+When a sandbox variable exceeds **4KB**, it's automatically indexed into SQLite FTS5. Instead of dumping the full dataset back into Claude's context, you search it:
+
+```typescript
+// First call: fetch and store (Claude sees "stored", not the data)
+$vars.logs = await skill('run_shell', { command: 'cat /var/log/app.log' });
+
+// Later: search locally, only matching lines go to Claude
+return search('logs', 'ERROR timeout');  // Returns max 50 matches
+```
+
+A 500KB log file becomes a search index. Claude only sees the 50 matching lines.
+
+### 3. Persistent Memory — Stop Re-Explaining Your Project
+
+Every agent shares dual-write memory (SQLite + Obsidian markdown). Project context, decisions, and accumulated knowledge survive across sessions:
+
+- **`remember` / `recall`** — key-value store available on every agent
+- **Project context preamble** — summary, goals, and tech stack auto-injected into every `delegate` call (~200-500 chars, set once)
+- **Knowledge agent** — full Obsidian vault as persistent knowledge base with search
+
+Instead of spending 2,000 tokens re-explaining your project architecture every session, `set_project_context` stores it once and it's injected automatically as a ~100-token preamble.
+
+### 4. Bounded Session History — Context Doesn't Grow Forever
+
+Session history is capped at **20 turns (40 messages)**. Older turns are permanently dropped, preventing the context window from filling up with stale conversation history on long-running tasks.
+
+### 5. Lightweight Routing — Minimal Metadata in Context
+
+When the orchestrator routes a task to a worker, it sends only **skill IDs** — not full JSON schemas. Agent discovery returns names and IDs (~100 bytes per agent), not kilobytes of input schemas. Full schemas are only fetched on-demand via `describe(skillId)`.
+
+### 6. Input Truncation — Hard Caps on What Enters the Context
+
+All user-provided content is truncated before being sent to Claude:
+- User inputs: **10,000 chars** max
+- Template content: **50,000 chars** max
+- Claude API calls: capped at **1,024 output tokens** per skill invocation
+
+This prevents a single oversized input from consuming the entire context budget.
+
+### 7. Multi-Agent Architecture — Separate Context Per Worker
+
+Each worker agent runs as its own process with its own context. The shell agent doesn't carry the knowledge agent's conversation history. The AI agent doesn't see the design agent's prompts. Work is isolated — only the orchestrator's routing context is shared, and that's kept minimal.
+
+---
+
+## The Agents
+
+7 specialist workers, each a separate process, coordinated by a single MCP orchestrator:
+
+| Agent | Port | Skills |
+|-------|------|--------|
+| **Shell** | 8081 | `run_shell`, `read_file`, `write_file`, SSE streaming |
+| **Web** | 8082 | `fetch_url`, `call_api` |
+| **AI** | 8083 | `ask_claude`, `search_files`, `query_sqlite` |
+| **Code** | 8084 | `codex_exec`, `codex_review` (OpenAI Codex CLI) |
+| **Knowledge** | 8085 | `create_note`, `read_note`, `update_note`, `search_notes`, `list_notes` |
+| **Design** | 8086 | `enhance_ui_prompt`, `suggest_screens`, `design_critique` (Gemini) |
+| **Factory** | 8087 | `create_project`, `list_templates`, `list_pipelines`, `quality_gate` |
+
+All agents share `remember` / `recall` skills backed by SQLite (`~/.a2a-memory.db`) + Obsidian (`~/Documents/Obsidian/a2a-knowledge/_memory/`).
+
+Agents communicate via Google's [A2A protocol](https://github.com/google/A2A) — JSON-RPC 2.0 over HTTP. You can register external A2A agents too.
 
 ---
 
