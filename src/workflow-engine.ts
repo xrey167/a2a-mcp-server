@@ -89,7 +89,7 @@ function resolveTemplates(
   stepResults: Map<string, StepResult>,
 ): unknown {
   if (typeof value === "string") {
-    return value.replace(/\{\{(\w+)\.result\}\}/g, (_, stepId) => {
+    return value.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
       const result = stepResults.get(stepId);
       return result?.result ?? `<step ${stepId} not found>`;
     });
