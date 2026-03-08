@@ -33,6 +33,32 @@ function checkRateLimit(): boolean {
   return true;
 }
 
+/** Read response body with a hard byte limit. Returns null if limit exceeded. */
+async function readBodyWithLimit(res: Response, maxBytes: number): Promise<string | null> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let chunks: string[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        reader.cancel();
+        return null;
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+    // Flush decoder
+    chunks.push(decoder.decode());
+    return chunks.join("");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 const AGENT_CARD = {
   name: NAME,
   description: "Web/HTTP agent — fetch URLs, call APIs, persistent memory",
@@ -56,11 +82,15 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { url, format } = WebSchemas.fetch_url.parse({ url: args.url ?? text, ...args });
       const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+      // Early reject if content-length header is set and exceeds limit
       const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
       if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
+      // Stream body with byte limit to guard against missing/spoofed content-length
+      const body = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+      if (body === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
       return format === "json"
-        ? safeStringify(await res.json(), 2)
-        : await res.text();
+        ? safeStringify(JSON.parse(body), 2)
+        : body;
     }
     case "call_api": {
       const { url, method, headers, body } = WebSchemas.call_api.parse({ url: args.url ?? text, ...args });

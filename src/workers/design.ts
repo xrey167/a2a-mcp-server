@@ -4,7 +4,7 @@ import { spawnSync } from "child_process";
 import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
-import { sanitizeUserInput, buildSafePrompt } from "../prompt-sanitizer.js";
+import { sanitizeUserInput } from "../prompt-sanitizer.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
 
 const DesignSchemas = {

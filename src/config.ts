@@ -7,8 +7,13 @@ import { join } from "path";
 import { homedir } from "os";
 import { z } from "zod";
 
-const CONFIG_DIR = join(homedir(), ".a2a-mcp");
-const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+function getConfigDir(): string {
+  return join(homedir(), ".a2a-mcp");
+}
+
+function getConfigFile(): string {
+  return join(getConfigDir(), "config.json");
+}
 
 // ── Config Schema ─────────────────────────────────────────────
 
@@ -138,12 +143,12 @@ export function loadConfig(): Config {
 
   let raw: Record<string, unknown> = {};
 
-  if (existsSync(CONFIG_FILE)) {
+  if (existsSync(getConfigFile())) {
     try {
-      raw = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
-      process.stderr.write(`[config] loaded from ${CONFIG_FILE}\n`);
+      raw = JSON.parse(readFileSync(getConfigFile(), "utf-8"));
+      process.stderr.write(`[config] loaded from ${getConfigFile()}\n`);
     } catch (err) {
-      process.stderr.write(`[config] failed to parse ${CONFIG_FILE}: ${err}\n`);
+      process.stderr.write(`[config] failed to parse ${getConfigFile()}: ${err}\n`);
     }
   }
 
@@ -191,13 +196,13 @@ export function resetConfig(): void {
  * Ensure the config directory exists and write a default config.json.
  */
 export function initConfigDir(): void {
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+  if (!existsSync(getConfigDir())) {
+    mkdirSync(getConfigDir(), { recursive: true });
   }
-  if (!existsSync(CONFIG_FILE)) {
+  if (!existsSync(getConfigFile())) {
     const defaults = JSON.stringify(applyDefaults(ConfigSchema.parse({})), null, 2);
     const { writeFileSync } = require("fs");
-    writeFileSync(CONFIG_FILE, defaults, "utf-8");
-    process.stderr.write(`[config] created default config at ${CONFIG_FILE}\n`);
+    writeFileSync(getConfigFile(), defaults, "utf-8");
+    process.stderr.write(`[config] created default config at ${getConfigFile()}\n`);
   }
 }
