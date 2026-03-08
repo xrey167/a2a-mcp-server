@@ -41,6 +41,22 @@ const CONFIG = loadConfig();
 // Only worker ports allowed — port 8080 (orchestrator) excluded to prevent infinite recursion.
 const ALLOWED_PORTS = new Set([8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088]);
 
+// ── Webhook skill denylist ────────────────────────────────────────
+// These skills execute code or modify the filesystem and must not be
+// invocable via the unauthenticated webhook endpoint.
+const WEBHOOK_BLOCKED_SKILLS = new Set([
+  "run_shell",
+  "run_shell_stream",
+  "write_file",
+  "read_file",
+  "codex_exec",
+  "sandbox_execute",
+  "sandbox_vars",
+  "search_files",
+  "query_sqlite",
+  "workflow_execute",
+]);
+
 function sanitizeUrlForLog(url: string): string {
   try {
     const parsed = new URL(url);
@@ -712,10 +728,14 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     case "register_webhook": {
       const name = args.name as string;
       if (!name) throw new Error("register_webhook requires name");
+      const skillId = args.skillId as string ?? "delegate";
+      if (WEBHOOK_BLOCKED_SKILLS.has(skillId)) {
+        throw new Error(`Skill "${skillId}" is not permitted as a webhook target because it can execute code or modify the filesystem.`);
+      }
       const config = registerWebhook({
         name,
         secret: args.secret as string | undefined,
-        skillId: args.skillId as string ?? "delegate",
+        skillId,
         staticArgs: args.staticArgs as Record<string, unknown> | undefined,
         fieldMappings: args.fieldMappings as Record<string, string> | undefined,
         async: args.async !== false,
@@ -1212,12 +1232,12 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
     // Webhook management
     {
       name: "register_webhook",
-      description: "Register a webhook endpoint. Returns the URL to POST to. Supports HMAC signature verification and payload field mapping.",
+      description: "Register a webhook endpoint. Returns the URL to POST to. Supports HMAC signature verification and payload field mapping. Note: privileged skills that execute code or modify the filesystem (e.g. run_shell, write_file, codex_exec, sandbox_execute) are not permitted as webhook targets.",
       inputSchema: {
         type: "object" as const,
         properties: {
           name: { type: "string", description: "Human-readable webhook name" },
-          skillId: { type: "string", description: "Skill to invoke when webhook fires (default: delegate)" },
+          skillId: { type: "string", description: "Skill to invoke when webhook fires (default: delegate). Privileged system skills are blocked." },
           secret: { type: "string", description: "HMAC-SHA256 secret for signature verification (optional)" },
           staticArgs: { type: "object", description: "Static args merged with transformed payload" },
           fieldMappings: { type: "object", description: "Map webhook payload fields to skill args: { argName: 'payload.path' }" },
@@ -1691,6 +1711,13 @@ async function startHttpServer() {
     );
 
     const payloadSize = JSON.stringify(request.body).length;
+
+    // Defense-in-depth: block privileged skills even if they were registered before the denylist was introduced
+    if (WEBHOOK_BLOCKED_SKILLS.has(webhook.skillId)) {
+      logWebhookCall(webhookId, "rejected", undefined, `Skill "${webhook.skillId}" is not permitted as a webhook target`, payloadSize);
+      reply.code(403);
+      return { error: `Skill "${webhook.skillId}" is not permitted as a webhook target` };
+    }
 
     try {
       if (webhook.async !== false) {
