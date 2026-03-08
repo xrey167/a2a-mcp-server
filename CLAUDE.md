@@ -41,10 +41,15 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 
 All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 
+**Sandbox execution:** `sandbox_execute` runs TypeScript in isolated Bun subprocesses with access to all worker skills via `skill(id, args)`. Variables persist per session in SQLite. Results >4KB auto-indexed for FTS5 search via `search(varName, query)`. `sandbox_vars` manages persisted variables.
+
 **Shared modules:**
 - `src/a2a.ts` — `sendTask(url, params)` and `discoverAgent(url)` helpers
 - `src/memory.ts` — dual-write: SQLite (`~/.a2a-memory.db`) + Obsidian markdown (`~/Documents/Obsidian/a2a-knowledge/_memory/`)
 - `src/skills.ts` — built-in skill registry; also used as fallback routing when no worker owns a skill
+- `src/sandbox.ts` — sandbox executor: spawns isolated Bun subprocesses, handles stdin/stdout IPC for skill calls, manages timeout/cleanup
+- `src/sandbox-store.ts` — `~/.a2a-sandbox.db`: variable persistence (SQLite) + FTS5 auto-indexing for large results (>4KB)
+- `src/sandbox-prelude.ts` — TypeScript prelude template injected into sandbox code (skill(), search(), helpers, $vars)
 
 **Routing in `delegate` skill (server.ts):**
 1. `agentUrl` provided → send directly
