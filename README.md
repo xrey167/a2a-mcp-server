@@ -285,9 +285,9 @@ All inter-agent calls are wrapped in circuit breakers that prevent cascading fai
 
 ```
 # View all breaker states
-get_metrics   # includes circuit breaker status
+get_circuit_breakers
 
-# Or via MCP resource
+# Or via A2A resource
 # a2a://circuit-breakers
 ```
 
