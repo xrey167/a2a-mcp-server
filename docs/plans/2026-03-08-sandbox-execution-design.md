@@ -2,15 +2,14 @@
 
 **Date:** 2026-03-08
 **Status:** Approved
-**Inspiration:** [MCX](https://github.com/schizoidcock/mcx) — sandboxed code execution for ~98% token reduction
 
 ## Problem
 
-Current architecture passes full API/tool results through MCP into the model's context window. A 50KB JSON response costs ~15,000 tokens even when the agent only needs a 3-field summary. MCX solves this by letting agents write code that processes data locally, returning only compact results.
+Current architecture passes full API/tool results through MCP into the model's context window. A 50KB JSON response costs ~15,000 tokens even when the agent only needs a 3-field summary.
 
 ## Solution
 
-Add an MCX-style sandbox execution engine as orchestrator-level skills in `server.ts`. Agents write TypeScript code that runs in an isolated Bun subprocess. The sandbox has access to all worker skills via IPC, and results are persisted in SQLite with FTS5 auto-indexing for large outputs.
+Add an sandbox execution engine as orchestrator-level skills in `server.ts`. Agents write TypeScript code that runs in an isolated Bun subprocess. The sandbox has access to all worker skills via IPC, and results are persisted in SQLite with FTS5 auto-indexing for large outputs.
 
 ## New MCP Tools
 
