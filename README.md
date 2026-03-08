@@ -1,6 +1,36 @@
 # a2a-mcp-server
 
-Multi-agent system that bridges **MCP** (Model Context Protocol) and **A2A** (Agent-to-Agent) protocols. Claude Code connects via MCP; agents talk to each other via A2A over HTTP.
+**A multi-agent orchestration platform that bridges MCP and A2A protocols — giving Claude Code a team of specialist agents instead of a single monolithic tool.**
+
+---
+
+## The Problem
+
+AI coding assistants like Claude Code are powerful, but they hit walls:
+
+- **One tool, one brain.** Claude Code talks to one MCP server at a time. If you need shell access, web fetching, AI reasoning, code review, and knowledge management, you're either chaining tools manually or cramming everything into a single bloated server.
+- **No agent collaboration.** There's no standard way for AI agents to talk to *each other*. You end up being the human router — copy-pasting outputs between tools, losing context at every hop.
+- **No persistent memory.** Every session starts from zero. Project context, previous decisions, and accumulated knowledge vanish when the conversation ends.
+- **Project scaffolding is tedious.** Going from "I want a habit tracker app" to a runnable project with proper structure, quality checks, and best practices still requires hours of boilerplate work.
+- **Credential chaos across machines.** OAuth tokens, API keys, and auth configs are scattered across dotfiles. Setting up a new dev machine means re-authenticating everything from scratch.
+
+## The Solution
+
+This project spins up **7 specialist worker agents** — each running as its own process, each owning a focused set of skills — all coordinated by a single MCP orchestrator. Claude Code sees one `delegate` tool; behind it, the right agent picks up the task automatically.
+
+- **Shell Agent** runs commands and streams output in real-time
+- **Web Agent** fetches URLs and calls external APIs
+- **AI Agent** queries Claude (or falls back to CLI OAuth) and searches files
+- **Code Agent** runs OpenAI Codex for code generation and review
+- **Knowledge Agent** manages an Obsidian vault as a persistent knowledge base
+- **Design Agent** uses Gemini to critique UI designs and suggest screen flows
+- **Factory Agent** generates complete, runnable projects from a vague idea — Expo apps, Next.js sites, MCP servers, AI agents, and REST APIs — with automated quality gates
+
+Every agent shares **dual-write memory** (SQLite + Obsidian), so context persists across sessions. A **sandbox executor** lets you run TypeScript that calls any agent skill programmatically. And a **credential sync system** encrypts and transfers OAuth tokens between machines.
+
+The agents communicate via Google's [A2A (Agent-to-Agent) protocol](https://github.com/google/A2A) — an open standard for inter-agent communication over HTTP + JSON-RPC 2.0. You can register external A2A agents too, extending the system without touching the core.
+
+---
 
 ## Architecture
 
