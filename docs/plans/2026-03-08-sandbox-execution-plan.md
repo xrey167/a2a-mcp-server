@@ -416,7 +416,7 @@ function table(arr: any[]): string {
   const header = keys.map((k, i) => k.padEnd(widths[i])).join(" | ");
   const sep = widths.map(w => "-".repeat(w)).join("-+-");
   const rows = arr.map(r => keys.map((k, i) => String(r[k] ?? "").padEnd(widths[i])).join(" | "));
-  return [header, sep, ...rows].join("\\n");
+  return [header, sep, ...rows].join("\n");
 }
 
 // ── Main wrapper ─────────────────────────────────────────
