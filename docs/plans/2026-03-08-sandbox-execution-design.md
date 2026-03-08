@@ -190,7 +190,7 @@ CREATE TRIGGER IF NOT EXISTS sandbox_au AFTER UPDATE ON sandbox_vars BEGIN
   INSERT INTO sandbox_fts(sandbox_fts, rowid, session, name, value)
     VALUES('delete', OLD.rowid, OLD.session, OLD.name, OLD.value);
   INSERT INTO sandbox_fts(rowid, session, name, value)
-    VALUES (NEW.rowid, NEW.session, NEW.name, NEW.value);
+    SELECT NEW.rowid, NEW.session, NEW.name, NEW.value WHERE NEW.size > 4096;
 END;
 ```
 
