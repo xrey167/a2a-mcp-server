@@ -34,6 +34,13 @@ import { startSkillTimer, recordSkillCall, registerWorkerMetric, getMetricsSnaps
 import { executeWorkflow, validateWorkflow, type WorkflowDefinition } from "./workflow-engine.js";
 import { registerWebhook, unregisterWebhook, getWebhook, listWebhooks, toggleWebhook, verifySignature, transformPayload, logWebhookCall, getWebhookLog } from "./webhooks.js";
 
+// Extend Fastify's request interface with rawBody for HMAC verification
+declare module "fastify" {
+  interface FastifyRequest {
+    rawBody?: string;
+  }
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 
@@ -712,15 +719,17 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     case "register_webhook": {
       const name = args.name as string;
       if (!name) throw new Error("register_webhook requires name");
+      const secret = args.secret as string | undefined;
+      if (!secret) throw new Error("register_webhook requires secret — a shared secret is mandatory to enforce HMAC-SHA256 authentication on the webhook endpoint");
       const config = registerWebhook({
         name,
-        secret: args.secret as string | undefined,
+        secret,
         skillId: args.skillId as string ?? "delegate",
         staticArgs: args.staticArgs as Record<string, unknown> | undefined,
         fieldMappings: args.fieldMappings as Record<string, string> | undefined,
         async: args.async !== false,
       });
-      return JSON.stringify({ ...config, endpoint: `POST http://localhost:8080/webhooks/${config.id}` }, null, 2);
+      return JSON.stringify({ ...config, secret: "***", endpoint: `POST http://localhost:8080/webhooks/${config.id}` }, null, 2);
     }
 
     case "unregister_webhook": {
@@ -1212,17 +1221,17 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
     // Webhook management
     {
       name: "register_webhook",
-      description: "Register a webhook endpoint. Returns the URL to POST to. Supports HMAC signature verification and payload field mapping.",
+      description: "Register a webhook endpoint. Returns the URL to POST to. A secret is required — all requests to the endpoint must carry an HMAC-SHA256 X-Hub-Signature-256 header computed from that secret.",
       inputSchema: {
         type: "object" as const,
         properties: {
           name: { type: "string", description: "Human-readable webhook name" },
           skillId: { type: "string", description: "Skill to invoke when webhook fires (default: delegate)" },
-          secret: { type: "string", description: "HMAC-SHA256 secret for signature verification (optional)" },
+          secret: { type: "string", description: "HMAC-SHA256 secret for signature verification (required)" },
           staticArgs: { type: "object", description: "Static args merged with transformed payload" },
           fieldMappings: { type: "object", description: "Map webhook payload fields to skill args: { argName: 'payload.path' }" },
         },
-        required: ["name"],
+        required: ["name", "secret"],
       },
     },
     {
@@ -1493,6 +1502,18 @@ async function pollWorkerHealth() {
 async function startHttpServer() {
   const app = Fastify({ logger: false, connectionTimeout: 300_000 });
 
+  // Capture raw request body (as a string) before JSON parsing so that
+  // webhook HMAC-SHA256 signature verification uses the exact bytes sent
+  // by the caller rather than a re-serialised JSON.stringify() round-trip.
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    req.rawBody = body as string;
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      done(err as Error);
+    }
+  });
+
   // Agent card: merge all worker skills
   app.get("/.well-known/agent.json", async () => {
     const allSkills: Array<{ id: string; name: string; description: string }> = [
@@ -1630,7 +1651,26 @@ async function startHttpServer() {
   });
 
   // ── Webhook ingestion endpoint ──────────────────────────────
+  // Simple per-IP sliding-window rate limiter: max 60 requests per minute.
+  const webhookRateLimiter = new Map<string, { count: number; windowStart: number }>();
+  const WEBHOOK_RATE_LIMIT = 60;
+  const WEBHOOK_RATE_WINDOW_MS = 60_000;
+
   app.post<{ Params: { id: string }; Body: unknown }>("/webhooks/:id", async (request, reply) => {
+    // Rate limit by remote IP to mitigate brute-force and DoS
+    const ip = request.ip ?? "unknown";
+    const now = Date.now();
+    const entry = webhookRateLimiter.get(ip);
+    if (!entry || now - entry.windowStart > WEBHOOK_RATE_WINDOW_MS) {
+      webhookRateLimiter.set(ip, { count: 1, windowStart: now });
+    } else {
+      entry.count++;
+      if (entry.count > WEBHOOK_RATE_LIMIT) {
+        reply.code(429);
+        return { error: "Too many requests" };
+      }
+    }
+
     const webhookId = request.params.id;
     const webhook = getWebhook(webhookId);
     if (!webhook) {
@@ -1642,20 +1682,34 @@ async function startHttpServer() {
       return { error: "Webhook is disabled" };
     }
 
-    // Verify HMAC signature if secret is configured
-    if (webhook.secret) {
-      const signature = request.headers["x-hub-signature-256"] as string | undefined;
-      if (!signature) {
-        logWebhookCall(webhookId, "rejected", undefined, "Missing signature");
-        reply.code(401);
-        return { error: "Missing X-Hub-Signature-256 header" };
-      }
-      const rawBody = JSON.stringify(request.body);
-      if (!verifySignature(rawBody, signature, webhook.secret)) {
-        logWebhookCall(webhookId, "rejected", undefined, "Invalid signature");
-        reply.code(401);
-        return { error: "Invalid signature" };
-      }
+    // Always require HMAC signature verification.
+    // Webhooks registered before secrets were mandatory will be rejected here
+    // until they are unregistered and re-registered with a secret.
+    if (!webhook.secret) {
+      logWebhookCall(webhookId, "rejected", undefined, "No secret configured — re-register with a secret");
+      reply.code(403);
+      return { error: "Webhook has no secret configured. Unregister and re-register with a secret to enable HMAC authentication." };
+    }
+
+    const signature = request.headers["x-hub-signature-256"] as string | undefined;
+    if (!signature) {
+      logWebhookCall(webhookId, "rejected", undefined, "Missing signature");
+      reply.code(401);
+      return { error: "Missing X-Hub-Signature-256 header" };
+    }
+    // Use the raw body string captured before JSON parsing for accurate HMAC verification.
+    // If rawBody is absent (non-JSON content type), reject rather than falling back to
+    // JSON.stringify which may produce different bytes than the original payload.
+    const rawBody = request.rawBody;
+    if (rawBody === undefined) {
+      logWebhookCall(webhookId, "rejected", undefined, "Unable to capture raw body for signature verification");
+      reply.code(400);
+      return { error: "Content-Type must be application/json for signature verification" };
+    }
+    if (!verifySignature(rawBody, signature, webhook.secret)) {
+      logWebhookCall(webhookId, "rejected", undefined, "Invalid signature");
+      reply.code(401);
+      return { error: "Invalid signature" };
     }
 
     // Transform payload
