@@ -29,7 +29,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── URL validation (SSRF prevention) ─────────────────────────────
 // Only worker ports allowed — port 8080 (orchestrator) excluded to prevent infinite recursion.
-const ALLOWED_PORTS = new Set([8081, 8082, 8083, 8084, 8085, 8086]);
+const ALLOWED_PORTS = new Set([8081, 8082, 8083, 8084, 8085, 8086, 8087]);
 
 function sanitizeUrlForLog(url: string): string {
   try {
@@ -64,6 +64,7 @@ const WORKERS = [
   { name: "code",      path: join(__dirname, "workers/code.ts"),      port: 8084 },
   { name: "knowledge", path: join(__dirname, "workers/knowledge.ts"), port: 8085 },
   { name: "design",    path: join(__dirname, "workers/design.ts"),    port: 8086 },
+  { name: "factory",   path: join(__dirname, "workers/factory.ts"),   port: 8087 },
 ];
 
 const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
@@ -345,6 +346,50 @@ function startDesignWorkflow(args: Record<string, unknown>): string {
   return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
 }
 
+// ── Factory workflow ─────────────────────────────────────────────
+/** Start the project generation pipeline asynchronously. Returns the taskId JSON immediately. */
+function startFactoryWorkflow(args: Record<string, unknown>): string {
+  const idea = args.idea as string;
+  if (!idea) throw new Error("factory_workflow requires idea");
+  const pipelineId = (args.pipeline as string) ?? "app";
+  const outputDir = args.outputDir as string | undefined;
+  const factoryWorkerUrl = workerCards.find(c => c.name === "factory-agent")?.url ?? "http://localhost:8087";
+
+  const task = createTask({ skillId: "factory_workflow" });
+  markWorking(task.id);
+
+  (async () => {
+    try {
+      emitProgress(task.id, `Starting ${pipelineId} pipeline for: "${idea}"`);
+
+      // Step 1: Normalize intent
+      emitProgress(task.id, "Normalizing intent — expanding idea into detailed spec…");
+      const specResult = await sendTask(factoryWorkerUrl, {
+        skillId: "normalize_intent",
+        args: { idea, pipeline: pipelineId },
+        message: { role: "user" as const, parts: [{ kind: "text" as const, text: idea }] },
+      }, { timeoutMs: 120_000 });
+      emitProgress(task.id, "✓ Spec generated");
+
+      // Step 2: Full project creation (scaffold + generate + QA loop)
+      emitProgress(task.id, "Creating project — scaffold, code generation, quality review…");
+      const projectResult = await sendTask(factoryWorkerUrl, {
+        skillId: "create_project",
+        args: { idea, pipeline: pipelineId, outputDir },
+        message: { role: "user" as const, parts: [{ kind: "text" as const, text: idea }] },
+      }, { timeoutMs: 600_000 }); // 10 min — full pipeline can take time
+      emitProgress(task.id, "✓ Project created and reviewed");
+
+      markCompleted(task.id, projectResult);
+    } catch (err) {
+      try { markFailed(task.id, { code: "FACTORY_ERROR", message: String(err) }); }
+      catch (e) { process.stderr.write(`[orchestrator] factory_workflow markFailed error: ${e}\n`); }
+    }
+  })();
+
+  return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
+}
+
 // ── Shared skill dispatcher ──────────────────────────────────────
 /**
  * Execute any orchestrator skill by name. Returns a plain string result.
@@ -452,6 +497,9 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
 
     case "design_workflow":
       return startDesignWorkflow(args);
+
+    case "factory_workflow":
+      return startFactoryWorkflow(args);
 
     case "sandbox_execute": {
       const code = args.code as string;
@@ -749,6 +797,21 @@ const designWorkflowSkill = {
   },
 };
 
+const factoryWorkflowSkill = {
+  id: "factory_workflow",
+  name: "Factory Workflow",
+  description: "Full project generation pipeline: normalize idea → scaffold → generate code → quality review (Ralph Mode). Returns {taskId} immediately — poll with get_task_result until status is 'completed'. Supports pipelines: app, website, mcp-server, agent, api.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      idea: { type: "string", description: "Project idea or concept (e.g. 'a meditation timer app with streak tracking')" },
+      pipeline: { type: "string", description: "Pipeline type: app (Expo), website (Next.js), mcp-server (MCP + Bun), agent (AI agent), api (REST API)", enum: ["app", "website", "mcp-server", "agent", "api"] },
+      outputDir: { type: "string", description: "Custom output directory (default: /tmp/factory/<name>-<ts>)" },
+    },
+    required: ["idea"],
+  },
+};
+
 const sandboxExecuteSkill = {
   id: "sandbox_execute",
   name: "Sandbox Execute",
@@ -804,6 +867,7 @@ function getAllToolDefs() {
     { name: getProjectContextSkill.id, description: getProjectContextSkill.description, inputSchema: getProjectContextSkill.inputSchema },
     { name: setProjectContextSkill.id, description: setProjectContextSkill.description, inputSchema: setProjectContextSkill.inputSchema },
     { name: designWorkflowSkill.id, description: designWorkflowSkill.description, inputSchema: designWorkflowSkill.inputSchema },
+    { name: factoryWorkflowSkill.id, description: factoryWorkflowSkill.description, inputSchema: factoryWorkflowSkill.inputSchema },
     { name: sandboxExecuteSkill.id, description: sandboxExecuteSkill.description, inputSchema: sandboxExecuteSkill.inputSchema },
     { name: sandboxVarsSkill.id, description: sandboxVarsSkill.description, inputSchema: sandboxVarsSkill.inputSchema },
     // local skills from skills.ts (backwards compat)
@@ -886,7 +950,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 // ── MCP Prompts ─────────────────────────────────────────────────
 
-const ALLOWED_PERSONAS = new Set(["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent"]);
+const ALLOWED_PERSONAS = new Set(["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent", "factory-agent"]);
 
 server.setRequestHandler(ListPromptsRequestSchema, async () => {
   const prompts: Array<{ name: string; description: string; arguments?: Array<{ name: string; description: string; required?: boolean }> }> = [];
