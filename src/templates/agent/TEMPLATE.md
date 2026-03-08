@@ -46,8 +46,8 @@ An AI agent with a tool-calling loop powered by Claude. Includes a Fastify HTTP 
 |---|---|
 | Runtime | Bun |
 | Language | TypeScript (strict) |
-| AI SDK | @anthropic-ai/sdk ^0.39.0 |
-| Model | claude-sonnet-4-6 |
+| AI SDK | @anthropic-ai/sdk ^0.78.0 |
+| Model | claude-sonnet-4-20250514 |
 | HTTP | Fastify ^5.0.0 |
 
 ---
