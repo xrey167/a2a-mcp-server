@@ -3,15 +3,17 @@
   <img src="https://img.shields.io/badge/lang-TypeScript-3178c6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/protocol-MCP_(Anthropic)-6366f1" alt="MCP" />
   <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
+  <img src="https://img.shields.io/badge/protocol-ACP_(Zed)-ef4444" alt="ACP" />
   <img src="https://img.shields.io/badge/agents-7_workers-f59e0b" alt="Agents" />
+  <img src="https://img.shields.io/badge/MCP_tools-6_consolidated-8b5cf6" alt="Tools" />
   <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
 </p>
 
 # a2a-mcp-server
 
-A **full multi-agent system** — not just a bridge — that connects Anthropic’s [MCP](https://modelcontextprotocol.io) and Google’s [A2A](https://a2a-protocol.org) protocols. One orchestrator manages six specialized worker agents, routes tasks intelligently, and maintains shared memory across all agents.
+A **full multi-agent system** — not just a bridge — that connects Anthropic’s [MCP](https://modelcontextprotocol.io) and Google’s [A2A](https://a2a-protocol.org) protocols. One orchestrator manages seven specialized worker agents, routes tasks intelligently, and maintains shared memory across all agents.
 
-Claude Code connects via MCP (stdio). Agents talk to each other via A2A (HTTP + JSON-RPC 2.0). Both protocols, each doing what it’s best at.
+Claude Code connects via MCP (stdio), Zed connects via ACP (stdin/stdout NDJSON). Agents talk to each other via A2A (HTTP + JSON-RPC 2.0). Three protocols, each doing what it’s best at.
 
 -----
 | Mechanism | Without | With | Token Reduction |
@@ -33,8 +35,10 @@ Most [A2A-MCP integrations](https://github.com/modelcontextprotocol/servers) are
 |**Agents**       |Proxy to external agents|7 built-in workers with real logic           |
 |**Memory**       |None                    |Dual-write: SQLite (FTS5) + Obsidian markdown|
 |**Routing**      |Manual                  |Smart auto-routing via AI agent              |
+|**MCP surface**  |One tool per skill      |6 consolidated tools (MCX-inspired)          |
 |**Extensibility**|Code changes            |Hot-reload plugins + personas, no restart    |
-|**Auth**         |Basic tokens            |OAuth2 flows + AES-256-GCM credential sync   |
+|**Security**     |Basic tokens            |Prompt injection prevention, SSRF guards, path traversal protection, OAuth2, AES-256-GCM credential sync|
+|**Protocols**    |MCP only                |MCP + ACP (Zed) + A2A                        |
 |**Runtime**      |Python (most)           |TypeScript / Bun                             |
 
 -----
@@ -42,14 +46,14 @@ Most [A2A-MCP integrations](https://github.com/modelcontextprotocol/servers) are
 ## Architecture
 
 ```
-Claude Code
-    │
-    │  MCP (stdio)
-    ▼
+Claude Code                Zed Editor
+    │                          │
+    │  MCP (stdio)             │  ACP (stdin/stdout NDJSON)
+    ▼                          ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         ORCHESTRATOR · :8080                            │
 │          smart routing · project context · sessions · sandbox           │
-│             async tasks · memory · agent registry · plugins             │
+│        async tasks · memory · agent registry · plugins · security       │
 └──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────┘
    │          │          │          │          │          │          │
    │          │       A2A (HTTP + JSON-RPC 2.0)         │          │
@@ -69,7 +73,7 @@ Claude Code
 |**Design**   |8086|End-to-end UI design pipeline (Gemini + Stitch MCP)            |
 |**Factory**  |8087|Turn ideas into production-ready projects via multi-agent pipelines|
 
-Every agent shares `remember` / `recall` / `memory_search` — backed by **SQLite** for fast FTS5 queries and **Obsidian** for human-readable persistence.
+Every agent shares `remember` / `recall` / `memory_search` — backed by **SQLite** for fast FTS5 queries and **Obsidian** for human-readable persistence. Workers auto-respawn on crash with exponential backoff.
 
 -----
 
@@ -90,7 +94,7 @@ cd a2a-mcp-server
 bun install
 ```
 
-### Register with Claude Code
+### Register with Claude Code (MCP)
 
 ```bash
 claude mcp add --scope user a2a-mcp-bridge -- bun /path/to/a2a-mcp-server/src/server.ts
@@ -100,6 +104,22 @@ The server starts automatically when Claude Code launches. For standalone:
 
 ```bash
 bun src/server.ts
+```
+
+### Register with Zed (ACP)
+
+Add to your Zed `settings.json`:
+
+```json
+{
+  "agent": {
+    "profiles": {
+      "a2a-bridge": {
+        "binary": { "path": "bun", "args": ["/path/to/a2a-mcp-server/src/acp-server.ts"] }
+      }
+    }
+  }
+}
 ```
 
 -----
@@ -182,10 +202,16 @@ export const skills: Skill[] = [{
 
 **Declarative skills** can also be defined as `_plugins/<n>/plugin.md` in your Obsidian vault.
 
-### 🔐 Security & credential sync
+### 🔐 Security
 
-- **Local** — loopback (`127.0.0.1`) always trusted, no auth header needed
-- **Remote** — all external callers require `Authorization: Bearer <A2A_API_KEY>`
+Defense-in-depth across all layers (see [SECURITY.md](SECURITY.md) for full details):
+
+- **Prompt injection prevention** — all user input sanitized via `prompt-sanitizer.ts` (character escaping, XML tag boundaries, anti-injection instructions)
+- **SSRF protection** — URL validation restricts requests to allowed worker ports; orchestrator port excluded to prevent recursion
+- **Path traversal prevention** — `path-utils.ts` blocks `../` escapes and symlink attacks
+- **Input truncation** — hard caps on user input (10K chars), templates (50K chars), and output tokens (1,024)
+- **Local trust** — loopback (`127.0.0.1`) always trusted, no auth header needed
+- **Remote auth** — all external callers require `Authorization: Bearer <A2A_API_KEY>`
 - **OAuth2** — browser-based flow for Google, GitHub, Linear (or custom providers)
 - **Cross-machine sync** — push/pull credentials encrypted with AES-256-GCM
 
@@ -263,49 +289,52 @@ delegate { skillId: "list_pipelines", message: "show available pipelines" }
 
 **Available pipelines:**
 
-|Pipeline      |Stack                              |Description                          |
-|:-------------|:----------------------------------|:------------------------------------|
-|`app`         |Expo + React Native + TypeScript   |Mobile app with navigation and state |
-|`website`     |Next.js + React + Tailwind CSS     |Website with pages, SEO, and styling |
-|`mcp-server`  |TypeScript + Bun + MCP SDK         |MCP server with tool definitions     |
-|`agent`       |TypeScript + Claude SDK            |AI agent with tool-calling           |
-|`api`         |Fastify + SQLite + TypeScript      |REST/GraphQL API with data layer     |
+|Pipeline      |Stack                              |Variants                         |
+|:-------------|:----------------------------------|:--------------------------------|
+|`app`         |Expo + React Native + TypeScript   |`saas-starter`, `e-commerce`, `social-app`|
+|`website`     |Next.js + React + Tailwind CSS     |`portfolio`, `saas-landing`      |
+|`mcp-server`  |TypeScript + Bun + MCP SDK         |`dev-tools`, `data-connector`    |
+|`agent`       |TypeScript + Claude SDK            |`api-integration`, `content-generator`|
+|`api`         |Fastify + SQLite + TypeScript      |`marketplace`, `crud-service`    |
 
-Each pipeline supports **template variants** (e.g., `saas-starter`, `e-commerce`) and a **quality gate** that scores generated code across multiple dimensions (code quality, type safety, accessibility, etc.) with automatic fix loops.
+Each pipeline supports **template variants** and a **quality gate** ("Ralph Mode") that scores generated code across multiple dimensions (code quality, type safety, accessibility, etc.) with automatic fix loops.
 
 -----
 
 ## Function reference
 
-All functions are exposed as MCP tools to Claude Code and are also callable via the A2A protocol directly.
+The MCP surface is consolidated into **6 core tools** (MCX-inspired: minimal tool count, maximum capability). All underlying worker skills remain callable via `sandbox_execute` with `skill(id, args)` or `delegate` with `skillId`.
 
-### Orchestration & routing
+### MCP tools (exposed to Claude Code / ACP)
 
-|Function          |Description                                                                            |
-|:-----------------|:--------------------------------------------------------------------------------------|
-|`delegate`        |Route a task to the best worker (sync). Auto-injects project context + session history.|
-|`delegate_async`  |Fire-and-forget — returns `taskId`, poll with `get_task_result`                        |
-|`get_task_result` |Poll: `pending` / `completed` / `failed` / `canceled` / `not_found`                    |
-|`list_agents`     |All agent cards + skills (built-in + external)                                         |
-|`register_agent`  |Register external A2A agent by URL (discovers `/.well-known/agent.json`)               |
-|`unregister_agent`|Remove external agent from registry                                                    |
+|Tool               |Description                                                                      |
+|:-------------------|:--------------------------------------------------------------------------------|
+|`sandbox_execute`   |Execute TypeScript in an isolated sandbox with access to all skills via `skill(id, args)`. Supports var management (`list_vars`, `get_var`, `delete_var`).|
+|`delegate`          |Route a task to a worker agent (sync by default). Set `async: true` for fire-and-forget (returns `taskId`). Pass `taskId` to poll result.|
+|`list_agents`       |List all worker agents, external agents, and their skills.                       |
+|`run_shell_stream`  |Execute shell command with real-time streaming output.                           |
+|`design_workflow`   |Full design pipeline: suggest screens, generate each. Returns `taskId`.          |
+|`factory_workflow`  |Full project generation pipeline. Returns `taskId`.                              |
 
-### Sessions
+### Skills (callable via sandbox or delegate)
 
-|Function             |Parameters |Description                                     |
-|:--------------------|:----------|:-----------------------------------------------|
-|`get_session_history`|`sessionId`|Last 20 turns (40 messages), auto-expire 30 days|
-|`clear_session`      |`sessionId`|Clear conversation history                      |
+All skills below are accessible through `sandbox_execute` using `skill(id, args)` or through `delegate` with `skillId`.
 
-### Memory (shared across all agents)
+#### Orchestration & memory
 
-|Function        |Parameters        |Description                                   |
-|:---------------|:-----------------|:---------------------------------------------|
-|`remember`      |`key`, `value`    |Store key-value (dual-write SQLite + Obsidian)|
-|`recall`        |`key?`            |Get one value or all memories for agent       |
-|`memory_search` |`query`, `agent?` |Full-text search (FTS5) across all agents     |
-|`memory_list`   |`agent`, `prefix?`|List keys by agent, optionally filtered       |
-|`memory_cleanup`|`maxAgeDays`      |Delete old entries from both stores           |
+|Skill             |Description                                                                      |
+|:-----------------|:--------------------------------------------------------------------------------|
+|`remember`        |Store key-value (dual-write SQLite + Obsidian)                                   |
+|`recall`          |Get one value or all memories for agent                                          |
+|`memory_search`   |Full-text search (FTS5) across all agents                                        |
+|`memory_list`     |List keys by agent, optionally filtered                                          |
+|`memory_cleanup`  |Delete old entries from both stores                                              |
+|`register_agent`  |Register external A2A agent by URL (discovers `/.well-known/agent.json`)         |
+|`unregister_agent`|Remove external agent from registry                                              |
+|`get_session_history`|Last 20 turns (40 messages), auto-expire 30 days                              |
+|`clear_session`   |Clear conversation history                                                       |
+|`get_project_context`|Return project summary, goals, stack, notes                                   |
+|`set_project_context`|Update project context — auto-injected into `delegate` calls                  |
 
 <details>
 <summary><strong>Shell Agent · :8081</strong></summary>
@@ -589,8 +618,8 @@ GitHub Actions runs on every push/PR to `main`:
 ### Add a new worker agent
 
 1. Create `src/workers/<n>.ts` — Fastify server with `AGENT_CARD` and skill handlers
-1. Add to `WORKERS` array in `src/server.ts`
-1. All output → `process.stderr` (stdout reserved for MCP JSON-RPC)
+1. Add to `WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
+1. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
 
 ### Add a plugin (hot-reloaded)
 
@@ -612,9 +641,12 @@ Discovers the agent card via `GET /.well-known/agent.json` and persists to `~/.a
 a2a-mcp-server/
 ├── src/
 │   ├── server.ts              # MCP entry + orchestrator (port 8080)
+│   ├── acp-server.ts          # ACP entry for Zed editor
+│   ├── acp-transport.ts       # ACP NDJSON JSON-RPC 2.0 transport
+│   ├── acp-types.ts           # ACP protocol type definitions
 │   ├── workers/               # Worker agent implementations (7 agents)
 │   ├── pipelines/             # Project generation pipeline definitions
-│   ├── templates/             # Scaffolding templates per pipeline
+│   ├── templates/             # Scaffolding templates + variants per pipeline
 │   ├── personas/              # Agent persona .md files (hot-reload)
 │   ├── plugins/               # Skill plugins (hot-reload)
 │   ├── sandbox.ts             # Isolated Bun subprocess executor
@@ -623,9 +655,17 @@ a2a-mcp-server/
 │   ├── a2a.ts                 # sendTask / discoverAgent helpers
 │   ├── memory.ts              # Dual-write: SQLite + Obsidian
 │   ├── skills.ts              # Built-in skill registry
+│   ├── config.ts              # Unified config loader (~/.a2a-mcp/config.json + env)
+│   ├── prompt-sanitizer.ts    # Prompt injection prevention
+│   ├── path-utils.ts          # Path traversal prevention
+│   ├── env-filter.ts          # Safe environment variable filtering
+│   ├── truncate.ts            # Smart response truncation
+│   ├── safe-json.ts           # Circular-reference-safe JSON serialization
+│   ├── logger.ts              # Structured logging (stderr only)
 │   └── ...
 ├── scripts/                   # Utility scripts
 ├── CLAUDE.md                  # Claude Code project context
+├── SECURITY.md                # Security architecture documentation
 └── package.json
 ```
 
@@ -638,5 +678,5 @@ MIT
 -----
 
 <p align="center">
-  Built with <a href="https://bun.sh">Bun</a> · <a href="https://modelcontextprotocol.io">MCP</a> · <a href="https://a2a-protocol.org">A2A</a>
+  Built with <a href="https://bun.sh">Bun</a> · <a href="https://modelcontextprotocol.io">MCP</a> · <a href="https://a2a-protocol.org">A2A</a> · ACP
 </p>
