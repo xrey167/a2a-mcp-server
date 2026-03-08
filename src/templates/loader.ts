@@ -184,8 +184,15 @@ function parseTemplateSpec(
     const result: Record<string, string> = {};
     for (const line of content.split("\n")) {
       const match = line.match(/^\|\s*(.+?)\s*\|\s*(.+?)\s*\|/);
-      if (match && !match[1].includes("---")) {
-        result[match[1].trim()] = match[2].trim();
+      if (match) {
+        const keyCell = match[1].trim();
+        const valueCell = match[2].trim();
+        const isHeaderSeparator =
+          keyCell.includes("---") || valueCell.includes("---");
+        const isHeaderRow = keyCell.toLowerCase() === "component";
+        if (!isHeaderSeparator && !isHeaderRow) {
+          result[keyCell] = valueCell;
+        }
       }
     }
     return result;
