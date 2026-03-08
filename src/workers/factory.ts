@@ -396,8 +396,12 @@ async function scaffoldProject(
   // Load template files from src/templates/<pipelineId>/
   const templateFiles = await loadTemplate(pipeline.id, {
     name: projectName,
-    // Generate a valid bundle ID (replace hyphens with underscores for iOS/Android)
-    bundleId: projectName.replace(/-/g, "_").replace(/[^a-z0-9_]/g, ""),
+    // Generate a valid bundle ID segment: only lowercase letters and digits,
+    // must start with a letter, fall back to "app" if empty/starts with digit.
+    bundleId: (() => {
+      const raw = projectName.toLowerCase().replace(/[^a-z0-9]/g, "");
+      return /^[a-z]/.test(raw) ? raw : raw ? `a${raw}` : "app";
+    })(),
     description: description ?? `A ${pipeline.name} project`,
   });
 
