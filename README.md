@@ -317,7 +317,7 @@ workflow_execute {
     id: "analyze-and-report",
     steps: [
       { id: "fetch", skillId: "fetch_url", args: { url: "https://api.example.com/data" } },
-      { id: "parse", skillId: "parse_json", args: { data: "{{fetch.result}}" }, dependsOn: ["fetch"] },
+      { id: "parse", skillId: "parse_json", args: { json: "{{fetch.result}}" }, dependsOn: ["fetch"] },
       { id: "analyze", skillId: "analyze_data", args: { data: "{{parse.result}}" }, dependsOn: ["parse"] }
     ]
   }
