@@ -16,7 +16,11 @@ describe("Config timeouts and web sections", () => {
   });
 
   afterEach(() => {
-    process.env.HOME = origHome;
+    if (origHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = origHome;
+    }
   });
 
   test("loads default timeout values", () => {
