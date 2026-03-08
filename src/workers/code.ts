@@ -1,7 +1,13 @@
 import Fastify from "fastify";
 import { spawnSync } from "child_process";
+import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
+
+const CodeSchemas = {
+  codex_exec: z.object({ prompt: z.string().min(1) }).passthrough(),
+};
 
 const PORT = 8084;
 const NAME = "code-agent";
@@ -25,7 +31,7 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
   if (memResult !== null) return memResult;
   switch (skillId) {
     case "codex_exec": {
-      const prompt = (args.prompt as string) ?? text;
+      const { prompt } = CodeSchemas.codex_exec.parse({ prompt: args.prompt ?? text, ...args });
       const result = spawnSync(
         "codex", ["exec", "--full-auto", prompt],
         { encoding: "utf-8", timeout: 120_000 }
@@ -66,6 +72,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     return { jsonrpc: "2.0", error: { code: -32601, message: "Method not found" } };
   }
 
+  const sizeErr = checkRequestSize(data);
+  if (sizeErr) { reply.code(413); return { jsonrpc: "2.0", error: { code: -32000, message: sizeErr } }; }
+
   const { skillId, args, message, id: taskId } = data.params ?? {};
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "codex_exec";
@@ -76,11 +85,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
   }
 
-  return {
-    jsonrpc: "2.0", id: data.id,
-    result: { id: taskId, status: { state: "completed" },
-      artifacts: [{ parts: [{ kind: "text" as const, text: resultText }] }] },
-  };
+  return buildA2AResponse(data.id, taskId, resultText);
 });
 
 getPersona(NAME);

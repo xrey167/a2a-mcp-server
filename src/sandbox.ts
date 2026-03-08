@@ -8,10 +8,11 @@ import { sandboxStore } from "./sandbox-store.js";
 import { smartTruncate } from "./truncate.js";
 import { safeStringify } from "./safe-json.js";
 import { filterEnvForSandbox } from "./env-filter.js";
+import { getConfig } from "./config.js";
 
-const DEFAULT_TIMEOUT = 30_000;
-const MAX_RESULT_SIZE = 25_000; // cap sandbox output at 25KB
-const INDEX_THRESHOLD = 4096;
+function getTimeout() { return getConfig().sandbox.timeout; }
+function getMaxResultSize() { return getConfig().sandbox.maxResultSize; }
+function getIndexThreshold() { return getConfig().sandbox.indexThreshold; }
 
 // ── Adapter discovery helpers ─────────────────────────────
 // These are injected by the orchestrator at wire-up time (Task 4)
@@ -51,7 +52,7 @@ interface SandboxResult {
 }
 
 export async function executeSandbox(opts: SandboxOptions): Promise<SandboxResult> {
-  const { code, sessionId, dispatch, timeout = DEFAULT_TIMEOUT } = opts;
+  const { code, sessionId, dispatch, timeout = getTimeout() } = opts;
 
   // Load existing vars from SQLite
   const existingVars = sandboxStore.getAllVars(sessionId);
@@ -150,14 +151,14 @@ async function runSubprocess(
             const json = safeStringify(value);
             sandboxStore.setVar(sessionId, name, json);
             newVars.push(name);
-            if (json.length > INDEX_THRESHOLD) indexed.push(name);
+            if (json.length > getIndexThreshold()) indexed.push(name);
           }
         }
 
         // Cap the result to prevent context window blow-up
         let resultStr = msg.result != null ? safeStringify(msg.result) : null;
-        if (resultStr && resultStr.length > MAX_RESULT_SIZE) {
-          resultStr = smartTruncate(resultStr, { maxLength: MAX_RESULT_SIZE });
+        if (resultStr && resultStr.length > getMaxResultSize()) {
+          resultStr = smartTruncate(resultStr, { maxLength: getMaxResultSize() });
         }
 
         finish({

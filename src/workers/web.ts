@@ -1,6 +1,14 @@
 import Fastify from "fastify";
+import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
+import { safeStringify } from "../safe-json.js";
+
+const WebSchemas = {
+  fetch_url: z.object({ url: z.string().url(), format: z.enum(["text", "json"]).optional().default("text") }).passthrough(),
+  call_api: z.object({ url: z.string().url(), method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).optional().default("GET"), headers: z.record(z.string()).optional().default({}), body: z.unknown().optional() }).passthrough(),
+};
 
 const PORT = 8082;
 const NAME = "web-agent";
@@ -24,23 +32,19 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
   if (memResult !== null) return memResult;
   switch (skillId) {
     case "fetch_url": {
-      const url = (args.url as string) ?? text;
-      const format = (args.format as string) ?? "text";
+      const { url, format } = WebSchemas.fetch_url.parse({ url: args.url ?? text, ...args });
       const res = await fetch(url);
       if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
       return format === "json"
-        ? JSON.stringify(await res.json(), null, 2)
+        ? safeStringify(await res.json(), 2)
         : await res.text();
     }
     case "call_api": {
-      const url = args.url as string;
-      const method = (args.method as string) ?? "GET";
-      const headers = (args.headers as Record<string, string>) ?? {};
-      const body = args.body;
+      const { url, method, headers, body } = WebSchemas.call_api.parse({ url: args.url ?? text, ...args });
       const res = await fetch(url, {
         method,
         headers: { "Content-Type": "application/json", ...headers },
-        body: body ? JSON.stringify(body) : undefined,
+        body: body ? safeStringify(body) : undefined,
       });
       return `HTTP ${res.status}\n${await res.text()}`;
     }
@@ -67,6 +71,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     return { jsonrpc: "2.0", error: { code: -32601, message: "Method not found" } };
   }
 
+  const sizeErr = checkRequestSize(data);
+  if (sizeErr) { reply.code(413); return { jsonrpc: "2.0", error: { code: -32000, message: sizeErr } }; }
+
   const { skillId, args, message, id: taskId } = data.params ?? {};
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "fetch_url";
@@ -77,11 +84,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
   }
 
-  return {
-    jsonrpc: "2.0", id: data.id,
-    result: { id: taskId, status: { state: "completed" },
-      artifacts: [{ parts: [{ kind: "text" as const, text: resultText }] }] },
-  };
+  return buildA2AResponse(data.id, taskId, resultText);
 });
 
 getPersona(NAME);

@@ -56,16 +56,44 @@ const ServerConfigSchema = z.object({
 });
 
 const ConfigSchema = z.object({
-  server: ServerConfigSchema.optional().default({}),
+  server: ServerConfigSchema.optional(),
   workers: z.array(WorkerConfigSchema).optional(),
-  search: SearchConfigSchema.optional().default({}),
-  sandbox: SandboxConfigSchema.optional().default({}),
-  truncation: TruncationConfigSchema.optional().default({}),
+  search: SearchConfigSchema.optional(),
+  sandbox: SandboxConfigSchema.optional(),
+  truncation: TruncationConfigSchema.optional(),
   /** Extra environment variables to pass to workers */
-  env: z.record(z.string()).optional().default({}),
+  env: z.record(z.string()).optional(),
 }).strict();
 
-export type Config = z.infer<typeof ConfigSchema>;
+// Zod 4 doesn't apply inner field defaults when the outer default is {};
+// we apply defaults manually after parsing.
+const DEFAULTS = {
+  server: ServerConfigSchema.parse({}),
+  search: SearchConfigSchema.parse({}),
+  sandbox: SandboxConfigSchema.parse({}),
+  truncation: TruncationConfigSchema.parse({}),
+  env: {} as Record<string, string>,
+};
+
+function applyDefaults(raw: z.infer<typeof ConfigSchema>): Config {
+  return {
+    server: { ...DEFAULTS.server, ...raw.server },
+    workers: raw.workers,
+    search: { ...DEFAULTS.search, ...raw.search },
+    sandbox: { ...DEFAULTS.sandbox, ...raw.sandbox },
+    truncation: { ...DEFAULTS.truncation, ...raw.truncation },
+    env: { ...DEFAULTS.env, ...raw.env },
+  };
+}
+
+export type Config = {
+  server: z.infer<typeof ServerConfigSchema>;
+  workers?: z.infer<typeof WorkerConfigSchema>[];
+  search: z.infer<typeof SearchConfigSchema>;
+  sandbox: z.infer<typeof SandboxConfigSchema>;
+  truncation: z.infer<typeof TruncationConfigSchema>;
+  env: Record<string, string>;
+};
 
 // ── Singleton ─────────────────────────────────────────────────
 
@@ -111,9 +139,9 @@ export function loadConfig(): Config {
   if (!result.success) {
     process.stderr.write(`[config] validation errors: ${result.error.message}\n`);
     process.stderr.write(`[config] using defaults\n`);
-    __config = ConfigSchema.parse({});
+    __config = applyDefaults(ConfigSchema.parse({}));
   } else {
-    __config = result.data;
+    __config = applyDefaults(result.data);
   }
 
   return __config;
@@ -141,7 +169,7 @@ export function initConfigDir(): void {
     mkdirSync(CONFIG_DIR, { recursive: true });
   }
   if (!existsSync(CONFIG_FILE)) {
-    const defaults = JSON.stringify(ConfigSchema.parse({}), null, 2);
+    const defaults = JSON.stringify(applyDefaults(ConfigSchema.parse({})), null, 2);
     const { writeFileSync } = require("fs");
     writeFileSync(CONFIG_FILE, defaults, "utf-8");
     process.stderr.write(`[config] created default config at ${CONFIG_FILE}\n`);

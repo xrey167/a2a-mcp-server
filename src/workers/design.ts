@@ -1,10 +1,18 @@
 import Fastify from "fastify";
 import { GoogleGenAI } from "@google/genai";
 import { spawnSync } from "child_process";
+import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { sanitizeForPrompt } from "../prompt-sanitizer.js";
 import { sanitizeUserInput } from "../prompt-sanitizer.js";
+import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
+
+const DesignSchemas = {
+  enhance_ui_prompt: z.object({ description: z.string().min(1), deviceType: z.string().optional().default("mobile") }).passthrough(),
+  suggest_screens: z.object({ appConcept: z.string().min(1), deviceType: z.string().optional().default("mobile") }).passthrough(),
+  design_critique: z.object({ description: z.string().min(1) }).passthrough(),
+};
 
 const PORT = 8086;
 const NAME = "design-agent";
@@ -173,20 +181,20 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
   if (memResult !== null) return memResult;
 
   switch (skillId) {
-    case "enhance_ui_prompt":
-      return enhanceUiPrompt(
-        (args.description as string) ?? text,
-        ((args.deviceType as string) ?? "mobile").toLowerCase(),
-      );
+    case "enhance_ui_prompt": {
+      const { description, deviceType } = DesignSchemas.enhance_ui_prompt.parse({ description: args.description ?? text, ...args });
+      return enhanceUiPrompt(description, deviceType.toLowerCase());
+    }
 
-    case "suggest_screens":
-      return suggestScreens(
-        (args.appConcept as string) ?? text,
-        ((args.deviceType as string) ?? "mobile").toLowerCase(),
-      );
+    case "suggest_screens": {
+      const { appConcept, deviceType } = DesignSchemas.suggest_screens.parse({ appConcept: args.appConcept ?? text, ...args });
+      return suggestScreens(appConcept, deviceType.toLowerCase());
+    }
 
-    case "design_critique":
-      return designCritique((args.description as string) ?? text);
+    case "design_critique": {
+      const { description } = DesignSchemas.design_critique.parse({ description: args.description ?? text, ...args });
+      return designCritique(description);
+    }
 
     default:
       return `Unknown skill: ${skillId}`;
@@ -216,17 +224,15 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "enhance_ui_prompt";
 
+  const sizeErr = checkRequestSize(data);
+  if (sizeErr) { reply.code(413); return { jsonrpc: "2.0", error: { code: -32000, message: sizeErr } }; }
+
   try {
     const result = await handleSkill(sid, args ?? { description: text }, text);
-    return {
-      jsonrpc: "2.0", id: data.id,
-      result: { id: taskId, status: { state: "completed" },
-        artifacts: [{ parts: [{ kind: "text" as const, text: result }] }] },
-    };
+    return buildA2AResponse(data.id, taskId, result);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
     reply.code(500);
-    return { jsonrpc: "2.0", id: data.id, error: { code: -32000, message: msg } };
+    return buildA2AError(data.id, err);
   }
 });
 
