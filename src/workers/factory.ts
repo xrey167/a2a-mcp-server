@@ -130,6 +130,22 @@ function stripJsonFences(raw: string): string {
   return raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
 }
 
+/**
+ * Sanitize a path for safe use in shell commands.
+ * Rejects paths with shell metacharacters to prevent command injection.
+ */
+function sanitizePath(path: string): string {
+  // Only allow alphanumeric, hyphens, underscores, dots, slashes, and tildes
+  if (!/^[a-zA-Z0-9_.\/~-]+$/.test(path)) {
+    throw new Error(`Unsafe path rejected: "${path}" — path contains disallowed characters`);
+  }
+  // Reject path traversal attempts
+  if (path.includes("..")) {
+    throw new Error(`Unsafe path rejected: "${path}" — path contains '..'`);
+  }
+  return path;
+}
+
 // ── Template Matching (Phase 0) ─────────────────────────────────
 
 interface MatchResult {
@@ -374,36 +390,43 @@ async function scaffoldProject(
   projectName: string,
   description?: string,
 ): Promise<string[]> {
+  // Sanitize outputDir to prevent command injection
+  const safeDir = sanitizePath(outputDir);
+
   // Load template files from src/templates/<pipelineId>/
   const templateFiles = await loadTemplate(pipeline.id, {
     name: projectName,
+    // Generate a valid bundle ID (replace hyphens with underscores for iOS/Android)
+    bundleId: projectName.replace(/-/g, "_").replace(/[^a-z0-9_]/g, ""),
     description: description ?? `A ${pipeline.name} project`,
   });
 
   // Ensure output directory exists
-  await runShell(`mkdir -p ${outputDir}`);
+  await runShell(`mkdir -p ${safeDir}`);
 
   // Collect all unique directories we need to create
   const dirs = new Set<string>();
   for (const file of templateFiles) {
     const lastSlash = file.relativePath.lastIndexOf("/");
     if (lastSlash > 0) {
-      dirs.add(`${outputDir}/${file.relativePath.substring(0, lastSlash)}`);
+      dirs.add(`${safeDir}/${file.relativePath.substring(0, lastSlash)}`);
     }
   }
   if (dirs.size > 0) {
-    await runShell(`mkdir -p ${Array.from(dirs).join(" ")}`);
+    // Sanitize each directory path before shell execution
+    const safeDirs = Array.from(dirs).map(d => sanitizePath(d));
+    await runShell(`mkdir -p ${safeDirs.join(" ")}`);
   }
 
-  // Write all template files
+  // Write all template files (uses write_file skill, not shell)
   const writtenFiles: string[] = [];
   for (const file of templateFiles) {
-    const fullPath = `${outputDir}/${file.relativePath}`;
+    const fullPath = `${safeDir}/${file.relativePath}`;
     await writeFile(fullPath, file.content);
     writtenFiles.push(fullPath);
   }
 
-  log(`scaffolded ${writtenFiles.length} template files to ${outputDir}`);
+  log(`scaffolded ${writtenFiles.length} template files to ${safeDir}`);
   return writtenFiles;
 }
 
@@ -605,7 +628,10 @@ For each file, use this exact format:
     if (relPath && content) {
       const fullPath = `${targetDir}/${relPath}`;
       const dir = fullPath.substring(0, fullPath.lastIndexOf("/"));
-      if (dir) await runShell(`mkdir -p ${dir}`);
+      if (dir) {
+        const safeDir = sanitizePath(dir);
+        await runShell(`mkdir -p ${safeDir}`);
+      }
       await writeFile(fullPath, content);
       files.push(fullPath);
     }

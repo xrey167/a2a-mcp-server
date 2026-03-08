@@ -84,9 +84,20 @@ async function collectFiles(dir: string, base: string = dir): Promise<Array<{ ab
   return files;
 }
 
+/**
+ * Sanitize a template variable value to prevent injection.
+ * Strips characters that could break out of string contexts in generated code.
+ */
+function sanitizeVar(value: string): string {
+  // Remove backticks, template literal markers, and other dangerous chars
+  return value.replace(/[`$\\]/g, "");
+}
+
 function substitute(text: string, vars: TemplateVars): string {
   return text.replace(/\{\{(\w+)\}\}/g, (match, key) => {
-    return vars[key] ?? match;
+    const value = vars[key];
+    if (value === undefined) return match;
+    return sanitizeVar(value);
   });
 }
 
@@ -117,9 +128,13 @@ export async function loadTemplate(pipelineId: string, vars: TemplateVars): Prom
     let resolvedPath = substitute(rel, vars);
     resolvedPath = resolvedPath.replace(/__name__/g, vars.name);
 
+    // Substitute {{vars}} and __name__ in content too (for consistency with paths)
+    let resolvedContent = substitute(content, vars);
+    resolvedContent = resolvedContent.replace(/__name__/g, sanitizeVar(vars.name));
+
     result.push({
       relativePath: resolvedPath,
-      content: substitute(content, vars),
+      content: resolvedContent,
     });
   }
 

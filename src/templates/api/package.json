@@ -5,7 +5,7 @@
   "scripts": {
     "start": "bun src/server.ts",
     "dev": "bun --watch src/server.ts",
-    "db:migrate": "bun src/db/migrate.ts",
+    "db:setup": "bun src/db/schema.ts",
     "test": "bun test"
   },
   "dependencies": {

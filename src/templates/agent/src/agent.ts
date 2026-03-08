@@ -25,7 +25,7 @@ export async function runAgent(userMessage: string): Promise<string> {
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-4-20250514",
       max_tokens: 4096,
       system: SYSTEM_PROMPT,
       tools: tools.map((t) => t.spec),
