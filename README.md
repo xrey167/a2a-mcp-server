@@ -508,11 +508,11 @@ All skills below are accessible through `sandbox_execute` using `skill(id, args)
 
 |Function        |Parameters                                          |Description                                       |
 |:---------------|:---------------------------------------------------|:-------------------------------------------------|
-|`parse_csv`     |`data`, `delimiter?`, `headers?`                    |Parse CSV text to array of objects                |
-|`parse_json`    |`data`                                              |Parse JSON string with error handling             |
+|`parse_csv`     |`csv`, `delimiter?`, `hasHeader?`                   |Parse CSV text to array of objects                |
+|`parse_json`    |`json`                                              |Parse JSON string with error handling             |
 |`transform_data`|`data`, `operations`                                |Chain transforms: filter, sort, group, aggregate, flatten, unique, take, skip, pick, omit, rename|
 |`analyze_data`  |`data`, `fields?`                                   |Statistical analysis: mean, median, stddev, percentiles, distributions|
-|`pivot_table`   |`data`, `rowField`, `valueField`, `columnField?`, `aggregation?`|Pivot with sum/count/avg/min/max aggregation|
+|`pivot_table`   |`data`, `rowField`, `valueField`, `colField?`, `aggregation?`|Pivot with sum/count/avg/min/max aggregation|
 
 </details>
 
