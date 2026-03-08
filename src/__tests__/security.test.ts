@@ -236,7 +236,7 @@ describe("Relative path sanitization (LLM output security)", () => {
       // Common LLM attack patterns
       expect(() => sanitizeRelativePath("../../../../bin/sh", testDir)).toThrow();
       expect(() => sanitizeRelativePath("src/../../../../../../root/.ssh/authorized_keys", testDir)).toThrow();
-      expect(() => sanitizeRelativePath("...//...//etc/passwd", testDir)).toThrow("disallowed characters");
+      expect(() => sanitizeRelativePath("...//...//etc/passwd", testDir)).toThrow("'..'");
       expect(() => sanitizeRelativePath("src;rm -rf /", testDir)).toThrow("disallowed characters");
     } finally {
       cleanupTestDir();
