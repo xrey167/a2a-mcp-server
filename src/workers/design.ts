@@ -3,6 +3,7 @@ import { GoogleGenAI } from "@google/genai";
 import { spawnSync } from "child_process";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { sanitizeUserInput } from "../prompt-sanitizer.js";
 
 const PORT = 8086;
 const NAME = "design-agent";
@@ -70,8 +71,8 @@ const DEVICE_VOCAB: Record<string, string> = {
 // ── Core: enhance a vague concept into a Stitch-ready design prompt ──
 async function enhanceUiPrompt(description: string, deviceType: string): Promise<string> {
   const vocab = DEVICE_VOCAB[deviceType] ?? DEVICE_VOCAB.mobile;
-  return callGemini(
-    `You are a senior UX designer writing design briefs for an AI UI generation tool called Stitch.
+
+  const systemInstruction = `You are a senior UX designer writing design briefs for an AI UI generation tool called Stitch.
 Your output is rendered directly — describe exactly what Stitch should draw.
 
 Rules:
@@ -81,35 +82,49 @@ Rules:
 - Include one visual style from: minimal, material, glassmorphic, neumorphic, flat, vibrant, or editorial.
 - Describe typography in two words: one for headings, one for body (e.g. "bold geometric headings, light readable body").
 - State the content hierarchy: what is dominant, what is secondary.
-- Mention key states where relevant: loading skeletons, empty states, active/selected highlights.`,
-    `Write a Stitch design prompt for this ${deviceType} UI: "${description}"`,
-  );
+- Mention key states where relevant: loading skeletons, empty states, active/selected highlights.
+
+Write a Stitch design prompt for the UI description provided below.`;
+
+  const userPrompt = `Target device type: ${deviceType}
+
+${sanitizeUserInput(description, "ui_description")}`;
+
+  return callGemini(systemInstruction, userPrompt);
 }
 
 // ── Suggest the set of screens an app needs ──────────────────────
 async function suggestScreens(appConcept: string, deviceType: string): Promise<string> {
-  const raw = await callGemini(
-    `You are a product designer planning the screen architecture for a new app.
+  const systemInstruction = `You are a product designer planning the screen architecture for a new app.
 Respond ONLY with a valid JSON array — no markdown fences, no explanation:
 [{ "name": "Screen Name", "prompt": "detailed Stitch-ready design prompt..." }, ...]
-Include 3-6 screens. Each prompt must specify colors, layout, and key components.`,
-    `App concept: "${appConcept}"\nTarget device: ${deviceType}\n\nList the essential screens as JSON.`,
-  );
+Include 3-6 screens. Each prompt must specify colors, layout, and key components.`;
+
+  const userPrompt = `Target device: ${deviceType}
+
+List the essential screens as JSON for the following app concept:
+
+${sanitizeUserInput(appConcept, "app_concept")}`;
+
+  const raw = await callGemini(systemInstruction, userPrompt);
   // Strip optional markdown code fences (``` or ```json) that models sometimes add despite instructions
   return raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
 }
 
 // ── Critique a design and return structured feedback ─────────────
 async function designCritique(description: string): Promise<string> {
-  return callGemini(
-    `You are a senior UX design critic with expertise in modern mobile and web UI.
+  const systemInstruction = `You are a senior UX design critic with expertise in modern mobile and web UI.
 Structure your response as:
 1. **Strengths** — what works well
 2. **Issues** — usability or visual concerns
 3. **Improvements** — 3-5 concrete actionable suggestions
-4. **Enhanced Prompt** — rewrite incorporating your improvements`,
-    `Analyze this design description:\n"${description}"`,
-  );
+4. **Enhanced Prompt** — rewrite incorporating your improvements`;
+
+  const userPrompt = `Analyze this design description:
+
+${sanitizeUserInput(description, "design_description")}`;
+
+  return callGemini(systemInstruction, userPrompt);
 }
 
 // ── Skill dispatcher ─────────────────────────────────────────────
