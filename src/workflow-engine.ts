@@ -243,7 +243,7 @@ export async function executeWorkflow(
         lastError = err instanceof Error ? err.message : String(err);
         if (attempt < maxRetries) {
           onProgress?.(`↻ "${label}" retry ${attempt + 1}/${maxRetries}`);
-          await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); // backoff
+          await new Promise(r => setTimeout(r, 1000 * (2 ** attempt))); // exponential backoff
         }
       }
     }
