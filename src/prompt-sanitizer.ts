@@ -63,7 +63,7 @@ export function sanitizeForPrompt(userInput: string, tagName = "user_input"): st
  *
  * @example
  * ```ts
- * const prompt = buildSafePrompt(
+ * const prompt = buildSimpleSafePrompt(
  *   "You are a helpful assistant",
  *   userIdea,
  *   "Analyze the user's project idea below"
