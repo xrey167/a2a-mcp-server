@@ -457,8 +457,9 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     }
 
     case "list_agents": {
-      const builtin = workerCards.map(c => ({ ...c, source: "builtin" }));
-      const external = getRegistryEntries().map(e => ({ ...e.card, source: "external", registeredAt: e.registeredAt, hasApiKey: !!e.apiKey }));
+      // Concise format: name + skills only (descriptions available via sandbox describe())
+      const builtin = workerCards.map(c => ({ name: c.name, url: c.url, skills: c.skills.map(s => s.id) }));
+      const external = getRegistryEntries().map(e => ({ name: e.card.name, url: e.card.url, skills: e.card.skills.map((s: any) => s.id), source: "external" }));
       return JSON.stringify([...builtin, ...external], null, 2);
     }
 
@@ -514,20 +515,23 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
         timeout,
       });
 
-      // Build compact response
-      const summary: Record<string, unknown> = {
-        sessionId,
-        result: result.result,
-      };
+      // Build compact response with smart truncation
+      const summary: Record<string, unknown> = { sessionId };
+      // Truncate result if it's a large array/object to reduce token usage
+      if (result.result !== null && result.result !== undefined) {
+        summary.result = Array.isArray(result.result) && result.result.length > TRUNCATE_ITEMS
+          ? { preview: result.result.slice(0, TRUNCATE_ITEMS), total: result.result.length, hint: "Data truncated. Store with $vars and use search() for targeted access." }
+          : result.result;
+      }
       if (result.error) summary.error = result.error;
       if (result.vars.length > 0) summary.vars = result.vars;
       if (result.indexed.length > 0) {
         summary.indexed = result.indexed.map(name => {
-          const raw = sandboxStore.getVar(sessionId, name);
-          return `${name} (${raw ? raw.length : 0} bytes, FTS5 indexed)`;
+          const rawVal = sandboxStore.getVar(sessionId, name);
+          return `${name} (${rawVal ? rawVal.length : 0} bytes, FTS5 indexed — use search("${name}", "query"))`;
         });
       }
-      return JSON.stringify(summary, null, 2);
+      return smartTruncate(summary);
     }
 
     case "sandbox_vars": {
@@ -848,49 +852,118 @@ const server = new Server(
   { capabilities: { tools: {}, resources: {}, prompts: {} } }
 );
 
-function getAllToolDefs() {
-  const tools = [
-    { name: delegateSkill.id, description: delegateSkill.description, inputSchema: delegateSkill.inputSchema },
-    { name: delegateAsyncSkill.id, description: delegateAsyncSkill.description, inputSchema: delegateAsyncSkill.inputSchema },
-    { name: getTaskResultSkill.id, description: getTaskResultSkill.description, inputSchema: getTaskResultSkill.inputSchema },
-    { name: getSessionHistorySkill.id, description: getSessionHistorySkill.description, inputSchema: getSessionHistorySkill.inputSchema },
-    { name: clearSessionSkill.id, description: clearSessionSkill.description, inputSchema: clearSessionSkill.inputSchema },
-    { name: registerAgentSkill.id, description: registerAgentSkill.description, inputSchema: registerAgentSkill.inputSchema },
-    { name: unregisterAgentSkill.id, description: unregisterAgentSkill.description, inputSchema: unregisterAgentSkill.inputSchema },
-    { name: runShellStreamSkill.id, description: runShellStreamSkill.description, inputSchema: runShellStreamSkill.inputSchema },
-    { name: listAgentsSkill.id, description: listAgentsSkill.description, inputSchema: listAgentsSkill.inputSchema },
-    { name: memorySearchSkill.id, description: memorySearchSkill.description, inputSchema: memorySearchSkill.inputSchema },
-    { name: memoryListSkill.id, description: memoryListSkill.description, inputSchema: memoryListSkill.inputSchema },
-    { name: memoryCleanupSkill.id, description: memoryCleanupSkill.description, inputSchema: memoryCleanupSkill.inputSchema },
-    { name: listMcpServersSkill.id, description: listMcpServersSkill.description, inputSchema: listMcpServersSkill.inputSchema },
-    { name: useMcpToolSkill.id, description: useMcpToolSkill.description, inputSchema: useMcpToolSkill.inputSchema },
-    { name: getProjectContextSkill.id, description: getProjectContextSkill.description, inputSchema: getProjectContextSkill.inputSchema },
-    { name: setProjectContextSkill.id, description: setProjectContextSkill.description, inputSchema: setProjectContextSkill.inputSchema },
-    { name: designWorkflowSkill.id, description: designWorkflowSkill.description, inputSchema: designWorkflowSkill.inputSchema },
-    { name: factoryWorkflowSkill.id, description: factoryWorkflowSkill.description, inputSchema: factoryWorkflowSkill.inputSchema },
-    { name: sandboxExecuteSkill.id, description: sandboxExecuteSkill.description, inputSchema: sandboxExecuteSkill.inputSchema },
-    { name: sandboxVarsSkill.id, description: sandboxVarsSkill.description, inputSchema: sandboxVarsSkill.inputSchema },
-    // local skills from skills.ts (backwards compat)
-    ...SKILLS.map(s => ({ name: s.id, description: s.description, inputSchema: s.inputSchema })),
-  ];
+// ── Result truncation (MCX-inspired token reduction) ──────────
+const CHAR_LIMIT = 25_000;
+const TRUNCATE_ITEMS = 10;
 
-  // Plugin skills (dynamically loaded from src/plugins/ and vault _plugins/)
-  for (const skill of pluginSkills.values()) {
-    if (tools.some(t => t.name === skill.id)) continue;
-    tools.push({ name: skill.id, description: `[plugin] ${skill.description}`, inputSchema: skill.inputSchema });
+function smartTruncate(value: unknown, maxItems = TRUNCATE_ITEMS): string {
+  const raw = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  if (raw.length <= CHAR_LIMIT) return raw;
+
+  // Try array truncation first
+  if (Array.isArray(value) && value.length > maxItems) {
+    const sliced = value.slice(0, maxItems);
+    const summary = JSON.stringify(sliced, null, 2);
+    return `${summary}\n\n... +${value.length - maxItems} more items (total: ${value.length}). Use sandbox_execute to filter/transform in-process.`;
   }
 
-  // Also expose worker skills directly
+  // Hard truncation as last resort
+  return raw.slice(0, CHAR_LIMIT) + `\n\n... [truncated at ${CHAR_LIMIT} chars, original ${raw.length}. Use sandbox_execute to filter data in-process.]`;
+}
+
+/** Build a concise skill summary string for tool descriptions (progressive disclosure). */
+function buildSkillSummary(): string {
+  const groups: Record<string, string[]> = {};
   for (const card of workerCards) {
-    for (const skill of card.skills) {
-      if (tools.some(t => t.name === skill.id)) continue;
-      tools.push({
-        name: skill.id,
-        description: `[${card.name}] ${skill.description}`,
-        inputSchema: { type: "object" as const, properties: { message: { type: "string" } }, required: [] as string[] },
-      });
-    }
+    groups[card.name] = card.skills.map(s => s.id);
   }
+  // Add local/plugin skills
+  const local = SKILLS.map(s => s.id);
+  if (local.length > 0) groups["builtin"] = local;
+  const pluginIds = [...pluginSkills.keys()];
+  if (pluginIds.length > 0) groups["plugins"] = pluginIds;
+
+  return Object.entries(groups)
+    .map(([name, ids]) => `${name}: ${ids.join(", ")}`)
+    .join("\n");
+}
+
+function getAllToolDefs() {
+  const skillSummary = buildSkillSummary();
+
+  // ── Core tools (MCX-inspired: minimal tool count, max capability) ──
+  const tools = [
+    // Primary tool: sandbox execution — code runs in-process, only results come back
+    {
+      name: "sandbox_execute",
+      description: `Execute TypeScript in an isolated sandbox with access to all skills via skill(id, args).
+
+## Available Skills
+${skillSummary}
+
+## Sandbox API
+- skill(id, args) — call any skill above
+- search(varName, query) — FTS5 search over stored vars
+- adapters() — list skills with descriptions
+- describe(id) — get full input schema for a skill
+- batch(items, fn, {concurrency}) — parallel processing
+- $vars — persistent variables across calls
+- pick(arr, ...keys), sum(arr, key), count(arr, key), first(arr, n), last(arr, n), table(arr) — data helpers
+
+## Token Efficiency
+Filter/transform data inside the sandbox. Return only what matters.
+Example: const invoices = await skill("fetch_url", {url, format:"json"}); return {count: invoices.length, total: sum(invoices, "amount")};`,
+      inputSchema: sandboxExecuteSkill.inputSchema,
+    },
+    // Routing: delegate to workers when sandbox isn't needed
+    {
+      name: "delegate",
+      description: "Route a task to a worker agent. Use sandbox_execute instead when you need to filter or transform results.",
+      inputSchema: delegateSkill.inputSchema,
+    },
+    // Async delegate for long-running workflows
+    {
+      name: "delegate_async",
+      description: "Fire-and-forget delegate — returns taskId. Poll with get_task_result.",
+      inputSchema: delegateAsyncSkill.inputSchema,
+    },
+    // Task polling
+    {
+      name: "get_task_result",
+      description: "Poll async task status/result.",
+      inputSchema: getTaskResultSkill.inputSchema,
+    },
+    // Discovery: list agents and their skills
+    {
+      name: "list_agents",
+      description: "List all worker agents, external agents, and their skills.",
+      inputSchema: listAgentsSkill.inputSchema,
+    },
+    // Shell streaming (special: needs MCP progress protocol)
+    {
+      name: "run_shell_stream",
+      description: "Execute shell command with real-time streaming output.",
+      inputSchema: runShellStreamSkill.inputSchema,
+    },
+    // Sandbox variable management
+    {
+      name: "sandbox_vars",
+      description: "List, get, or delete persisted sandbox variables.",
+      inputSchema: sandboxVarsSkill.inputSchema,
+    },
+    // Design workflow (high-level orchestration)
+    {
+      name: "design_workflow",
+      description: "Full design pipeline: suggest screens → generate each. Returns taskId.",
+      inputSchema: designWorkflowSkill.inputSchema,
+    },
+    // Factory workflow (high-level orchestration)
+    {
+      name: "factory_workflow",
+      description: "Full project generation pipeline. Returns taskId.",
+      inputSchema: factoryWorkflowSkill.inputSchema,
+    },
+  ];
 
   return tools;
 }
@@ -1086,7 +1159,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   const text = String((args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "");
-  return { content: [{ type: "text", text: await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, text) }] };
+  const raw = await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, text);
+  // Apply smart truncation to reduce token usage on large responses
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+  const truncated = smartTruncate(parsed);
+  return { content: [{ type: "text", text: truncated }] };
 });
 
 // ── A2A HTTP auth ────────────────────────────────────────────────
