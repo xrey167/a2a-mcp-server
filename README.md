@@ -15,7 +15,7 @@ Orchestrator — port 8080
     ├── AI Agent        8083  ask_claude · search_files · query_sqlite
     ├── Code Agent      8084  codex_exec · codex_review  (OpenAI Codex CLI)
     ├── Knowledge Agent 8085  create_note · read_note · update_note · search_notes · list_notes
-    └── Design Agent    8086  design_workflow · enhance_ui_prompt · suggest_screens
+    └── Design Agent    8086  enhance_ui_prompt · suggest_screens · design_critique
 ```
 
 Every agent shares `remember` / `recall` skills backed by dual-write memory:
@@ -682,7 +682,23 @@ design_workflow { appConcept: "a meditation timer for iOS", deviceType: "MOBILE"
 design_workflow { appConcept: "dashboard settings page", screensOnly: true, deviceType: "DESKTOP" }
 ```
 
-**Returns:** Project ID and per-screen generation results.
+**Returns:** `{ taskId, status: "working" }` — poll with `get_task_result` until `status` is `"completed"`.
+
+---
+
+#### `design_critique`
+
+Critique a UI design description and return actionable improvements. Powered by Gemini.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `description` | string | Yes | UI design description to critique |
+
+```bash
+delegate { skillId: "design_critique", args: { description: "A login screen with email/password fields and a submit button" } }
+```
+
+**Returns:** Actionable design improvement suggestions.
 
 ---
 
@@ -694,9 +710,9 @@ Send a task directly to any A2A agent by URL, bypassing the orchestrator's routi
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agentUrl` | string | Yes | Target A2A agent URL |
+| `agent_url` | string | Yes | Target A2A agent URL |
 | `message` | string | Yes | Message to send |
-| `skillId` | string | No | Skill ID to invoke |
+| `skill_id` | string | No | Skill ID to invoke |
 | `args` | object | No | Arguments for the remote skill |
 
 ```bash
@@ -709,6 +725,65 @@ call_a2a_agent {
 ```
 
 **Returns:** Result text from the remote agent.
+
+---
+
+### Sandbox Execution
+
+#### `sandbox_execute`
+
+Run TypeScript code in an isolated Bun subprocess with access to all worker skills. Variables persist across calls per session in SQLite. Large results (>4KB) are auto-indexed for FTS5 full-text search. Use this instead of `delegate` when you need to process or filter data locally to reduce token usage.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `code` | string | Yes | TypeScript code to run (the return value is sent back) |
+| `sessionId` | string | No | Session ID for variable persistence (auto-generated if omitted) |
+| `timeout` | number | No | Timeout in milliseconds (default: 30000) |
+
+**Available inside sandbox code:**
+- `skill(id, args)` — call any worker skill (e.g. `await skill("run_shell", { command: "ls" })`)
+- `search(varName, query)` — FTS5 search over auto-indexed variables
+- `adapters()` — list all available skill adapters (id + description)
+- `describe(skillId)` — get the full input schema for a skill
+- `batch(items, fn, opts?)` — process an array with concurrency control (default: 5)
+- `$vars` — persistent variable store (assign to persist, read across calls)
+- `pick(arr, ...keys)`, `sum(arr, key)`, `count(arr, key)`, `first(arr, n)`, `last(arr, n)`, `table(arr)` — data helpers
+
+```bash
+# Fetch and filter data locally
+sandbox_execute {
+  code: "const files = await skill('search_files', { pattern: '**/*.ts' }); return files.split('\\n').length;",
+  sessionId: "my-session"
+}
+
+# Persist a variable for later use
+sandbox_execute {
+  code: "$vars.results = await skill('query_sqlite', { database: '~/.a2a-memory.db', sql: 'SELECT * FROM memory LIMIT 100' }); return 'stored';",
+  sessionId: "my-session"
+}
+```
+
+**Returns:** `{ sessionId, result, vars?, indexed?, error? }`
+
+---
+
+#### `sandbox_vars`
+
+List, inspect, or delete persisted sandbox variables for a session.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sessionId` | string | Yes | Session ID |
+| `action` | string | No | `list` (default), `get`, or `delete` |
+| `varName` | string | No | Variable name (required for `get` / `delete`) |
+
+```bash
+sandbox_vars { sessionId: "my-session" }
+sandbox_vars { sessionId: "my-session", action: "get", varName: "results" }
+sandbox_vars { sessionId: "my-session", action: "delete", varName: "results" }
+```
+
+**Returns:** Variable metadata (list), variable value (get), or confirmation (delete).
 
 ---
 
@@ -935,6 +1010,8 @@ Declarative (prompt-based) skills can also be defined in your Obsidian vault und
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `ANTHROPIC_API_KEY` | Claude SDK authentication | Falls back to Claude Code OAuth |
+| `GOOGLE_API_KEY` | Gemini SDK authentication (design agent) | Falls back to `GEMINI_API_KEY`, then `gemini` CLI OAuth |
+| `GEMINI_API_KEY` | Alias for `GOOGLE_API_KEY` | (none) |
 | `A2A_API_KEY` | Bearer token for remote A2A access | Open mode (no auth) |
 | `OBSIDIAN_VAULT` | Override Obsidian vault path | `~/Documents/Obsidian/a2a-knowledge` |
 | `SYNC_SERVER_URL` | Remote server for credential sync | `http://localhost:8080` |
@@ -947,6 +1024,7 @@ Declarative (prompt-based) skills can also be defined in your Obsidian vault und
 | Service | Method |
 |---|---|
 | Claude API | `ANTHROPIC_API_KEY` env, or automatic OAuth via Claude Code |
+| Gemini API | `GOOGLE_API_KEY` or `GEMINI_API_KEY` env, or `gemini` CLI OAuth |
 | OpenAI / Codex | ChatGPT OAuth via `codex login` — stored in `~/.codex/auth.json` |
 | External MCPs | API keys, bearer tokens, or OAuth2 configured in `~/.a2a-mcp-auth.json` |
 
