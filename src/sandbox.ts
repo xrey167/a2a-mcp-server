@@ -76,7 +76,8 @@ async function runSubprocess(
   timeout: number,
 ): Promise<SandboxResult> {
   return new Promise((resolve) => {
-    const proc = Bun.spawn(["bun", tmpFile], {
+    // Use --smol to reduce memory footprint for sandboxed subprocesses
+    const proc = Bun.spawn(["bun", "--smol", tmpFile], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

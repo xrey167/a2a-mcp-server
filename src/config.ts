@@ -37,6 +37,24 @@ const SandboxConfigSchema = z.object({
   indexThreshold: z.number().int().positive().optional().default(4096),
 });
 
+const TimeoutsConfigSchema = z.object({
+  /** Shell command timeout in ms */
+  shell: z.number().int().positive().optional().default(15_000),
+  /** HTTP fetch timeout in ms */
+  fetch: z.number().int().positive().optional().default(30_000),
+  /** Codex CLI timeout in ms */
+  codex: z.number().int().positive().optional().default(120_000),
+  /** Peer-to-peer worker call timeout in ms */
+  peer: z.number().int().positive().optional().default(60_000),
+});
+
+const WebConfigSchema = z.object({
+  /** Requests per minute for outbound fetch/API calls (0 = unlimited) */
+  rateLimit: z.number().int().min(0).optional().default(0),
+  /** Max response body size in bytes */
+  maxResponseBytes: z.number().int().positive().optional().default(10 * 1024 * 1024),
+});
+
 const TruncationConfigSchema = z.object({
   /** Max response size in chars */
   maxResponseSize: z.number().int().positive().optional().default(25_000),
@@ -61,6 +79,8 @@ const ConfigSchema = z.object({
   search: SearchConfigSchema.optional(),
   sandbox: SandboxConfigSchema.optional(),
   truncation: TruncationConfigSchema.optional(),
+  timeouts: TimeoutsConfigSchema.optional(),
+  web: WebConfigSchema.optional(),
   /** Extra environment variables to pass to workers */
   env: z.record(z.string()).optional(),
 }).strict();
@@ -72,6 +92,8 @@ const DEFAULTS = {
   search: SearchConfigSchema.parse({}),
   sandbox: SandboxConfigSchema.parse({}),
   truncation: TruncationConfigSchema.parse({}),
+  timeouts: TimeoutsConfigSchema.parse({}),
+  web: WebConfigSchema.parse({}),
   env: {} as Record<string, string>,
 };
 
@@ -82,6 +104,8 @@ function applyDefaults(raw: z.infer<typeof ConfigSchema>): Config {
     search: { ...DEFAULTS.search, ...raw.search },
     sandbox: { ...DEFAULTS.sandbox, ...raw.sandbox },
     truncation: { ...DEFAULTS.truncation, ...raw.truncation },
+    timeouts: { ...DEFAULTS.timeouts, ...raw.timeouts },
+    web: { ...DEFAULTS.web, ...raw.web },
     env: { ...DEFAULTS.env, ...raw.env },
   };
 }
@@ -92,6 +116,8 @@ export type Config = {
   search: z.infer<typeof SearchConfigSchema>;
   sandbox: z.infer<typeof SandboxConfigSchema>;
   truncation: z.infer<typeof TruncationConfigSchema>;
+  timeouts: z.infer<typeof TimeoutsConfigSchema>;
+  web: z.infer<typeof WebConfigSchema>;
   env: Record<string, string>;
 };
 

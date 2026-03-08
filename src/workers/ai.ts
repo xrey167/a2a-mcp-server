@@ -8,7 +8,7 @@ import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
 
 const AiSchemas = {
-  ask_claude: z.object({ prompt: z.string().min(1), model: z.string().optional() }).passthrough(),
+  ask_claude: z.object({ prompt: z.string().min(1), model: z.string().optional(), max_tokens: z.number().int().positive().optional() }).passthrough(),
   search_files: z.object({ pattern: z.string().min(1), directory: z.string().optional().default(".") }).passthrough(),
   query_sqlite: z.object({ database: z.string().min(1), sql: z.string().min(1) }).passthrough(),
 };
@@ -39,13 +39,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
   if (memResult !== null) return memResult;
   switch (skillId) {
     case "ask_claude": {
-      const { prompt, model: argModel } = AiSchemas.ask_claude.parse({ prompt: args.prompt ?? text, ...args });
+      const { prompt, model: argModel, max_tokens: argMaxTokens } = AiSchemas.ask_claude.parse({ prompt: args.prompt ?? text, ...args });
       const persona = getPersona(NAME);
       const model = argModel ?? persona.model;
+      const maxTokens = argMaxTokens ?? parseInt(process.env.A2A_ASK_CLAUDE_MAX_TOKENS ?? "4096", 10);
       try {
         const client = new Anthropic();
         const message = await client.messages.create({
-          model, max_tokens: 1024,
+          model, max_tokens: maxTokens,
           system: persona.systemPrompt || undefined,
           messages: [{ role: "user", content: prompt }],
         });
