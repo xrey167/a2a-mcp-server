@@ -171,8 +171,8 @@ function resolveTemplates(
     // the workflow author is explicitly forwarding the entire step result as the
     // argument value — for shell skills this is the "run whatever the previous
     // step returned" pattern — so only basic cleaning is applied.
-    const isEmbedded = !/^\s*\{\{\w+\.result\}\}\s*$/.test(value);
-    return value.replace(/\{\{(\w+)\.result\}\}/g, (_, stepId) => {
+    const isEmbedded = !/^\s*\{\{[-\w]+\.result\}\}\s*$/.test(value);
+    return value.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
       const result = stepResults.get(stepId);
       const rawValue = result?.result ?? `<step ${stepId} not found>`;
       return sanitizeTemplateValue(rawValue, targetSkillId, isEmbedded);
@@ -327,7 +327,7 @@ export async function executeWorkflow(
         lastError = err instanceof Error ? err.message : String(err);
         if (attempt < maxRetries) {
           onProgress?.(`↻ "${label}" retry ${attempt + 1}/${maxRetries}`);
-          await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); // backoff
+          await new Promise(r => setTimeout(r, 1000 * (2 ** attempt))); // exponential backoff
         }
       }
     }
