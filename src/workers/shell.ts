@@ -3,6 +3,7 @@ import { spawnSync, spawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { sanitizePath } from "../path-utils.js";
 
 const PORT = 8081;
 const NAME = "shell-agent";
@@ -44,8 +45,10 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
     case "write_file": {
       const path = args.path as string;
       const content = args.content as string;
-      writeFileSync(path, content, "utf-8");
-      return `Written ${content.length} bytes to ${path}`;
+      // Sanitize the path to prevent path traversal attacks
+      const safePath = sanitizePath(path);
+      writeFileSync(safePath, content, "utf-8");
+      return `Written ${content.length} bytes to ${safePath}`;
     }
     default:
       return `Unknown skill: ${skillId}`;

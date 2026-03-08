@@ -26,6 +26,7 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { PIPELINES, listPipelines, getPipeline } from "../pipelines/index.js";
 import type { Pipeline } from "../pipelines/types.js";
+import { sanitizePath, sanitizeRelativePath } from "../path-utils.js";
 import {
   loadTemplate,
   loadSpec,
@@ -128,22 +129,6 @@ async function reviewCode(code: string, context: string): Promise<string> {
 
 function stripJsonFences(raw: string): string {
   return raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
-}
-
-/**
- * Sanitize a path for safe use in shell commands.
- * Rejects paths with shell metacharacters to prevent command injection.
- */
-function sanitizePath(path: string): string {
-  // Only allow alphanumeric, hyphens, underscores, dots, slashes, and tildes
-  if (!/^[a-zA-Z0-9_.\/~-]+$/.test(path)) {
-    throw new Error(`Unsafe path rejected: "${path}" — path contains disallowed characters`);
-  }
-  // Reject path traversal attempts
-  if (path.includes("..")) {
-    throw new Error(`Unsafe path rejected: "${path}" — path contains '..'`);
-  }
-  return path;
 }
 
 // ── Template Matching (Phase 0) ─────────────────────────────────
@@ -554,7 +539,9 @@ ${allCode}`;
           const filePath = fileBlocks[j].trim();
           const fileContent = fileBlocks[j + 1]?.trim();
           if (filePath && fileContent) {
-            await writeFile(filePath, fileContent);
+            // Sanitize the file path from LLM to prevent path traversal
+            const safePath = sanitizeRelativePath(filePath, targetDir);
+            await writeFile(safePath, fileContent);
           }
         }
 
@@ -640,7 +627,8 @@ For each file, use this exact format:
     const relPath = blocks[i].trim();
     const content = blocks[i + 1]?.trim();
     if (relPath && content) {
-      const fullPath = `${targetDir}/${relPath}`;
+      // Sanitize the relative path from LLM to prevent path traversal
+      const fullPath = sanitizeRelativePath(relPath, targetDir);
       const dir = fullPath.substring(0, fullPath.lastIndexOf("/"));
       if (dir) {
         const safeDir = sanitizePath(dir);
@@ -700,14 +688,6 @@ async function handleSkill(
       }
 
       return JSON.stringify(response, null, 2);
-      };
-
-      // Include match info in response
-      const matchInfo = match.variantId
-        ? `\n\n--- Template Match ---\nVariant: ${match.variantId} (${match.confidence} confidence)\nReason: ${match.reason}`
-        : "\n\n--- Template Match ---\nNo variant matched — using base template.";
-
-      return JSON.stringify(spec, null, 2) + matchInfo;
     }
 
     case "create_project": {

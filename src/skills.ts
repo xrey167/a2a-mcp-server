@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 import { Glob } from "bun";
 import { sendTask } from "./a2a.js";
 import { runClaudeCLI } from "./claude-cli.js";
+import { sanitizePath } from "./path-utils.js";
 
 export interface SkillArgs {
   [key: string]: unknown;
@@ -77,8 +78,10 @@ const writeFile: Skill = {
     required: ["path", "content"],
   },
   run: async ({ path, content }) => {
-    writeFileSync(path as string, content as string, "utf-8");
-    return `Written ${(content as string).length} bytes to ${path}`;
+    // Sanitize the path to prevent path traversal attacks
+    const safePath = sanitizePath(path as string);
+    writeFileSync(safePath, content as string, "utf-8");
+    return `Written ${(content as string).length} bytes to ${safePath}`;
   },
 };
 

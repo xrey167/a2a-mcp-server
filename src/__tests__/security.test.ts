@@ -1,5 +1,9 @@
 import { describe, test, expect } from "bun:test";
 import { AgentError } from "../errors.js";
+import { sanitizePath, sanitizeRelativePath } from "../path-utils.js";
+import { mkdtempSync, writeFileSync, existsSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 /**
  * Security-focused tests for review findings.
@@ -109,3 +113,133 @@ describe("Memory path sanitization", () => {
     expect(safeName("./")).toBe("unnamed");
   });
 });
+
+describe("File path sanitization (write_file security)", () => {
+  test("allows safe alphanumeric paths", () => {
+    expect(() => sanitizePath("file.txt")).not.toThrow();
+    expect(() => sanitizePath("src/index.ts")).not.toThrow();
+    expect(() => sanitizePath("my-project/src/app.js")).not.toThrow();
+    expect(() => sanitizePath("~/Documents/test.txt")).not.toThrow();
+    expect(() => sanitizePath("path/to/file_name.json")).not.toThrow();
+  });
+
+  test("rejects path traversal with ..", () => {
+    expect(() => sanitizePath("../etc/passwd")).toThrow("path contains '..'");
+    expect(() => sanitizePath("../../etc/shadow")).toThrow("path contains '..'");
+    expect(() => sanitizePath("src/../../../etc/passwd")).toThrow("path contains '..'");
+    expect(() => sanitizePath("..")).toThrow("path contains '..'");
+    expect(() => sanitizePath("./..")).toThrow("path contains '..'");
+    expect(() => sanitizePath("valid/../../invalid")).toThrow("path contains '..'");
+  });
+
+  test("rejects paths with shell metacharacters", () => {
+    expect(() => sanitizePath("file;rm -rf /")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file|cat /etc/passwd")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file&whoami")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file$HOME")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file`id`")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file$(whoami)")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file\nmalicious")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file\rmalicious")).toThrow("disallowed characters");
+  });
+
+  test("rejects paths with spaces and special characters", () => {
+    expect(() => sanitizePath("file name.txt")).toThrow("disallowed characters");
+    expect(() => sanitizePath("path with spaces/file.txt")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file*")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file?")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file[0]")).toThrow("disallowed characters");
+    expect(() => sanitizePath("file{1}")).toThrow("disallowed characters");
+  });
+
+  test("rejects empty or invalid paths", () => {
+    expect(() => sanitizePath("")).toThrow("non-empty string");
+    expect(() => sanitizePath(null as any)).toThrow("non-empty string");
+    expect(() => sanitizePath(undefined as any)).toThrow("non-empty string");
+  });
+});
+
+describe("Relative path sanitization (LLM output security)", () => {
+  let testDir: string;
+
+  // Create a temporary test directory before each test
+  function setupTestDir() {
+    testDir = mkdtempSync(join(tmpdir(), "path-test-"));
+  }
+
+  // Clean up after each test
+  function cleanupTestDir() {
+    if (testDir && existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  }
+
+  test("allows safe relative paths within project directory", () => {
+    setupTestDir();
+    try {
+      const result = sanitizeRelativePath("src/index.ts", testDir);
+      expect(result).toContain(testDir);
+      expect(result).toContain("src/index.ts");
+    } finally {
+      cleanupTestDir();
+    }
+  });
+
+  test("blocks path traversal attempts that escape project directory", () => {
+    setupTestDir();
+    try {
+      expect(() => sanitizeRelativePath("../../../etc/passwd", testDir)).toThrow();
+      expect(() => sanitizeRelativePath("../../secrets.txt", testDir)).toThrow();
+    } finally {
+      cleanupTestDir();
+    }
+  });
+
+  test("rejects absolute paths from LLM", () => {
+    setupTestDir();
+    try {
+      expect(() => sanitizeRelativePath("/etc/passwd", testDir)).toThrow("absolute path");
+      expect(() => sanitizeRelativePath("/tmp/malicious.sh", testDir)).toThrow("absolute path");
+      expect(() => sanitizeRelativePath("/home/user/.ssh/id_rsa", testDir)).toThrow("absolute path");
+    } finally {
+      cleanupTestDir();
+    }
+  });
+
+  test("blocks paths that resolve outside the base directory", () => {
+    setupTestDir();
+    try {
+      // Even if the path doesn't contain .. explicitly, if it resolves outside baseDir, reject it
+      expect(() => sanitizeRelativePath("src/../../../etc/passwd", testDir)).toThrow();
+    } finally {
+      cleanupTestDir();
+    }
+  });
+
+  test("validates paths stay within nested subdirectories", () => {
+    setupTestDir();
+    try {
+      const result1 = sanitizeRelativePath("src/components/Button.tsx", testDir);
+      expect(result1).toContain(testDir);
+
+      const result2 = sanitizeRelativePath("docs/api/reference.md", testDir);
+      expect(result2).toContain(testDir);
+    } finally {
+      cleanupTestDir();
+    }
+  });
+
+  test("rejects malicious LLM-crafted paths", () => {
+    setupTestDir();
+    try {
+      // Common LLM attack patterns
+      expect(() => sanitizeRelativePath("../../../../bin/sh", testDir)).toThrow();
+      expect(() => sanitizeRelativePath("src/../../../../../../root/.ssh/authorized_keys", testDir)).toThrow();
+      expect(() => sanitizeRelativePath("...//...//etc/passwd", testDir)).toThrow("disallowed characters");
+      expect(() => sanitizeRelativePath("src;rm -rf /", testDir)).toThrow("disallowed characters");
+    } finally {
+      cleanupTestDir();
+    }
+  });
+});
+
