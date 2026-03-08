@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { AgentError } from "../errors.js";
+import { sanitizeVar } from "../templates/loader.js";
 
 /**
  * Security-focused tests for review findings.
@@ -107,5 +108,47 @@ describe("Memory path sanitization", () => {
     expect(safeName("")).toBe("unnamed");
     expect(safeName("...")).toBe("unnamed");
     expect(safeName("./")).toBe("unnamed");
+  });
+});
+
+describe("Template variable sanitization (sanitizeVar)", () => {
+  test("strips backticks, dollar signs, and backslashes (original chars)", () => {
+    expect(sanitizeVar("foo`bar")).toBe("foobar");
+    expect(sanitizeVar("foo$bar")).toBe("foobar");
+    expect(sanitizeVar("foo\\bar")).toBe("foobar");
+  });
+
+  test("strips double and single quotes to prevent string literal injection", () => {
+    expect(sanitizeVar('foo"bar')).toBe("foobar");
+    expect(sanitizeVar("foo'bar")).toBe("foobar");
+    expect(sanitizeVar('evil", injected: "')).toBe("evil, injected:");
+  });
+
+  test("strips control characters including newlines and null bytes", () => {
+    expect(sanitizeVar("foo\nbar")).toBe("foobar");
+    expect(sanitizeVar("foo\r\nbar")).toBe("foobar");
+    expect(sanitizeVar("foo\x00bar")).toBe("foobar");
+    expect(sanitizeVar("foo\tbar")).toBe("foobar");
+  });
+
+  test("strips path separators to prevent directory traversal", () => {
+    expect(sanitizeVar("../../etc/passwd")).toBe("etcpasswd");
+    expect(sanitizeVar("foo/bar")).toBe("foobar");
+    expect(sanitizeVar("foo/../secret")).toBe("foosecret");
+  });
+
+  test("strips shell metacharacters", () => {
+    expect(sanitizeVar("foo; rm -rf /")).toBe("foo rm -rf");
+    expect(sanitizeVar("foo | cat /etc/passwd")).toBe("foo  cat etcpasswd");
+    expect(sanitizeVar("foo && evil")).toBe("foo  evil");
+    expect(sanitizeVar("foo > /dev/null")).toBe("foo  devnull");
+    expect(sanitizeVar("foo < input.txt")).toBe("foo  input.txt");
+  });
+
+  test("preserves normal project names and descriptions", () => {
+    expect(sanitizeVar("my-awesome-app")).toBe("my-awesome-app");
+    expect(sanitizeVar("MyApp 2.0")).toBe("MyApp 2.0");
+    expect(sanitizeVar("  hello  ")).toBe("hello");
+    expect(sanitizeVar("A helpful AI agent")).toBe("A helpful AI agent");
   });
 });
