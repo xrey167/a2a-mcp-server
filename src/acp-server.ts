@@ -20,6 +20,7 @@ import {
   sendNotification,
   sendRequest,
   handlePossibleResponse,
+  closeTransport,
 } from "./acp-transport.js";
 import type {
   JsonRpcRequest,
@@ -523,6 +524,7 @@ async function main() {
   // Graceful shutdown
   const cleanup = () => {
     log("shutting down...");
+    closeTransport();
     shutdownWorkers();
     process.exit(0);
   };
