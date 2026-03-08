@@ -195,6 +195,44 @@ Respond with ONLY valid JSON — no markdown fences, no explanation.`,
   },
 };
 
+// ── CLI Tool Pipeline ────────────────────────────────────────────
+const cliPipeline: Pipeline = {
+  id: "cli",
+  name: "CLI Tool",
+  description: "Command-line tool with TypeScript + Bun",
+  stack: ["TypeScript", "Bun", "Zod"],
+  intentPrompt: `You are a senior CLI developer expanding a vague command-line tool idea into a detailed spec.
+
+Given this idea: "{{idea}}"
+
+Produce a JSON object with these fields:
+- name: tool name (kebab-case, short)
+- description: one-sentence pitch of what this CLI does
+- commands: array of 3-8 commands, each with { name, description, args: Array<{ name, type: "string"|"number"|"boolean", required: boolean, description: string }>, flags: Array<{ name, short?: string, type, description }> }
+- globalFlags: array of flags available to all commands (beyond built-in --help/--version/--verbose/--json)
+- config: { fileName, format: "json"|"yaml"|"toml", fields: Array<{ name, type, default, description }> } or null if no config needed
+- outputFormats: which output formats to support ("text", "json", "table")
+- techNotes: any special requirements (APIs, file system access, network, etc.)
+- examples: array of 3-5 usage examples as strings
+
+Respond with ONLY valid JSON — no markdown fences, no explanation.`,
+  steps: [
+    { id: "normalize", label: "Expanding intent into spec", skillId: "ask_claude", replacesSpec: true },
+    { id: "scaffold", label: "Scaffolding project from template", skillId: "run_shell" },
+    { id: "generate_commands", label: "Generating command implementations", skillId: "ask_claude" },
+    { id: "generate_config", label: "Generating config management", skillId: "ask_claude" },
+    { id: "generate_utils", label: "Generating utility modules", skillId: "ask_claude" },
+    { id: "write_files", label: "Writing generated code to disk", skillId: "run_shell" },
+    { id: "quality_gate", label: "Ralph Mode — quality review", skillId: "ask_claude" },
+    { id: "fix_issues", label: "Fixing quality issues", skillId: "ask_claude", optional: true },
+  ],
+  qualityGate: {
+    dimensions: ["code_quality", "type_safety", "cli_ux", "error_handling", "documentation"],
+    passThreshold: 85,
+    maxIterations: 3,
+  },
+};
+
 // ── Pipeline Registry ───────────────────────────────────────────
 
 export const PIPELINES = new Map<string, Pipeline>([
@@ -203,6 +241,7 @@ export const PIPELINES = new Map<string, Pipeline>([
   ["mcp-server", mcpServerPipeline],
   ["agent", agentPipeline],
   ["api", apiPipeline],
+  ["cli", cliPipeline],
 ]);
 
 export function getPipeline(id: string): Pipeline | undefined {

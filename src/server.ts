@@ -29,13 +29,33 @@ import { smartTruncate as smartTruncateStr, capResponse, truncateArray } from ".
 import { safeStringify } from "./safe-json.js";
 import { z } from "zod";
 import { loadConfig } from "./config.js";
+import { getBreaker, getAllBreakerStats, resetAllBreakers, CircuitOpenError } from "./circuit-breaker.js";
+import { startSkillTimer, recordSkillCall, registerWorkerMetric, getMetricsSnapshot } from "./metrics.js";
+import { executeWorkflow, validateWorkflow, type WorkflowDefinition } from "./workflow-engine.js";
+import { registerWebhook, unregisterWebhook, getWebhook, listWebhooks, toggleWebhook, verifySignature, transformPayload, logWebhookCall, getWebhookLog } from "./webhooks.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 
 // ── URL validation (SSRF prevention) ─────────────────────────────
 // Only worker ports allowed — port 8080 (orchestrator) excluded to prevent infinite recursion.
-const ALLOWED_PORTS = new Set([8081, 8082, 8083, 8084, 8085, 8086, 8087]);
+const ALLOWED_PORTS = new Set([8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088]);
+
+// ── Webhook skill denylist ────────────────────────────────────────
+// These skills execute code or modify the filesystem and must not be
+// invocable via the unauthenticated webhook endpoint.
+const WEBHOOK_BLOCKED_SKILLS = new Set([
+  "run_shell",
+  "run_shell_stream",
+  "write_file",
+  "read_file",
+  "codex_exec",
+  "sandbox_execute",
+  "sandbox_vars",
+  "search_files",
+  "query_sqlite",
+  "workflow_execute",
+]);
 
 function sanitizeUrlForLog(url: string): string {
   try {
@@ -71,6 +91,7 @@ const WORKERS = [
   { name: "knowledge", path: join(__dirname, "workers/knowledge.ts"), port: 8085 },
   { name: "design",    path: join(__dirname, "workers/design.ts"),    port: 8086 },
   { name: "factory",   path: join(__dirname, "workers/factory.ts"),   port: 8087 },
+  { name: "data",      path: join(__dirname, "workers/data.ts"),      port: 8088 },
 ];
 
 const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
@@ -200,19 +221,34 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
 
   let result: string;
 
+  // Helper: send task through circuit breaker with metrics
+  async function sendWithResilience(url: string, params: Parameters<typeof sendTask>[1], opts?: Parameters<typeof sendTask>[2]): Promise<string> {
+    const workerName = workerCards.find(c => c.url === url)?.name ?? url;
+    const breaker = getBreaker(workerName);
+    const endTimer = startSkillTimer(params.skillId ?? "unknown", workerName);
+    try {
+      const res = await breaker.call(() => sendTask(url, params, opts));
+      endTimer();
+      return res;
+    } catch (err) {
+      endTimer(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  }
+
   // 1. Direct URL (validate to prevent SSRF)
   if (agentUrl) {
     if (!isAllowedUrl(agentUrl)) {
       throw new AgentError("INVALID_ARGS", `Blocked URL: only localhost worker ports are allowed, got: ${sanitizeUrlForLog(agentUrl)}`);
     }
-    result = await sendTask(agentUrl, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(agentUrl) });
+    result = await sendWithResilience(agentUrl, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(agentUrl) });
   }
   // 2. Route by skillId
   else if (skillId) {
     const router = buildSkillRouter(workerCards, getExternalCards());
     const url = router.get(skillId);
     if (url) {
-      result = await sendTask(url, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(url) });
+      result = await sendWithResilience(url, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(url) });
     } else {
       // Also check local skills (backwards compat)
       const localSkill = SKILL_MAP.get(skillId);
@@ -257,7 +293,7 @@ ${sanitizedMessage}`;
           if (!isAllowedUrl(parsed.url)) {
             throw new AgentError("ROUTING_ERROR", `LLM returned blocked URL: ${sanitizeUrlForLog(parsed.url)}`);
           }
-          result = await sendTask(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(parsed.url) });
+          result = await sendWithResilience(parsed.url, { skillId: parsed.skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(parsed.url) });
         } else {
           result = response;
         }
@@ -649,6 +685,83 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
       }
     }
 
+    // ── Workflow Engine ─────────────────────────────────────────
+    case "workflow_execute": {
+      const workflowDef = args.workflow as unknown;
+      const validationError = validateWorkflow(workflowDef);
+      if (validationError) throw new Error(`Invalid workflow: ${validationError}`);
+
+      const workflow = workflowDef as WorkflowDefinition;
+      const task = createTask({ skillId: "workflow_execute" });
+      markWorking(task.id);
+
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          try { markFailed(task.id, { code: "WORKFLOW_ERROR", message: String(err) }); }
+          catch (e) { process.stderr.write(`[orchestrator] workflow markFailed error: ${e}\n`); }
+        }
+      })();
+
+      return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
+    }
+
+    // ── Metrics ─────────────────────────────────────────────────
+    case "get_metrics":
+      return JSON.stringify(getMetricsSnapshot(), null, 2);
+
+    // ── Circuit Breaker ─────────────────────────────────────────
+    case "get_circuit_breakers":
+      return JSON.stringify(getAllBreakerStats(), null, 2);
+
+    case "reset_circuit_breakers":
+      resetAllBreakers();
+      return "All circuit breakers reset to closed state";
+
+    // ── Webhooks ────────────────────────────────────────────────
+    case "register_webhook": {
+      const name = args.name as string;
+      if (!name) throw new Error("register_webhook requires name");
+      const skillId = args.skillId as string ?? "delegate";
+      if (WEBHOOK_BLOCKED_SKILLS.has(skillId)) {
+        throw new Error(`Skill "${skillId}" is not permitted as a webhook target because it can execute code or modify the filesystem.`);
+      }
+      const config = registerWebhook({
+        name,
+        secret: args.secret as string | undefined,
+        skillId,
+        staticArgs: args.staticArgs as Record<string, unknown> | undefined,
+        fieldMappings: args.fieldMappings as Record<string, string> | undefined,
+        async: args.async !== false,
+      });
+      return JSON.stringify({ ...config, endpoint: `POST http://localhost:8080/webhooks/${config.id}` }, null, 2);
+    }
+
+    case "unregister_webhook": {
+      const id = args.id as string;
+      if (!id) throw new Error("unregister_webhook requires id");
+      return unregisterWebhook(id) ? `Webhook ${id} removed` : `Webhook not found: ${id}`;
+    }
+
+    case "list_webhooks":
+      return JSON.stringify(listWebhooks().map(w => ({
+        ...w,
+        secret: w.secret ? "***" : undefined,
+        endpoint: `POST http://localhost:8080/webhooks/${w.id}`,
+      })), null, 2);
+
+    case "webhook_log": {
+      const id = args.id as string;
+      if (!id) throw new Error("webhook_log requires id");
+      return JSON.stringify(getWebhookLog(id, (args.limit as number) ?? 20), null, 2);
+    }
+
     default: {
       // Plugin skills (hot-loaded from src/plugins/)
       const pluginSkill = pluginSkills.get(skillId);
@@ -899,7 +1012,7 @@ const factoryWorkflowSkill = {
     type: "object" as const,
     properties: {
       idea: { type: "string", description: "Project idea or concept (e.g. 'a meditation timer app with streak tracking')" },
-      pipeline: { type: "string", description: "Pipeline type: app (Expo), website (Next.js), mcp-server (MCP + Bun), agent (AI agent), api (REST API)", enum: ["app", "website", "mcp-server", "agent", "api"] },
+      pipeline: { type: "string", description: "Pipeline type: app (Expo), website (Next.js), mcp-server (MCP + Bun), agent (AI agent), api (REST API), cli (CLI tool)", enum: ["app", "website", "mcp-server", "agent", "api", "cli"] },
       outputDir: { type: "string", description: "Custom output directory (default: /tmp/factory/<name>-<ts>)" },
     },
     required: ["idea"],
@@ -1085,8 +1198,57 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
     // Factory workflow (high-level orchestration)
     {
       name: "factory_workflow",
-      description: "Full project generation pipeline. Returns taskId.",
+      description: "Full project generation pipeline. Returns taskId. Pipelines: app, website, mcp-server, agent, api, cli.",
       inputSchema: factoryWorkflowSkill.inputSchema,
+    },
+    // Workflow engine — multi-step DAG execution
+    {
+      name: "workflow_execute",
+      description: "Execute a multi-step workflow as a DAG. Steps run in parallel where possible. Supports template refs {{stepId.result}}, retry/skip error handling, and conditional execution. Returns taskId.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workflow: {
+            type: "object",
+            description: "Workflow definition: { id, name?, steps: [{ id, skillId, args?, dependsOn?, onError?: 'fail'|'skip'|'retry', when? }], maxConcurrency? }",
+            properties: {
+              id: { type: "string" },
+              name: { type: "string" },
+              steps: { type: "array", items: { type: "object" } },
+              maxConcurrency: { type: "number" },
+            },
+            required: ["id", "steps"],
+          },
+        },
+        required: ["workflow"],
+      },
+    },
+    // Metrics and observability
+    {
+      name: "get_metrics",
+      description: "Get execution metrics: skill call counts, latencies (p50/p95/p99), error rates, and worker utilization.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    // Webhook management
+    {
+      name: "register_webhook",
+      description: "Register a webhook endpoint. Returns the URL to POST to. Supports HMAC signature verification and payload field mapping. Note: privileged skills that execute code or modify the filesystem (e.g. run_shell, write_file, codex_exec, sandbox_execute) are not permitted as webhook targets.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          name: { type: "string", description: "Human-readable webhook name" },
+          skillId: { type: "string", description: "Skill to invoke when webhook fires (default: delegate). Privileged system skills are blocked." },
+          secret: { type: "string", description: "HMAC-SHA256 secret for signature verification (optional)" },
+          staticArgs: { type: "object", description: "Static args merged with transformed payload" },
+          fieldMappings: { type: "object", description: "Map webhook payload fields to skill args: { argName: 'payload.path' }" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "list_webhooks",
+      description: "List all registered webhooks and their endpoints.",
+      inputSchema: { type: "object" as const, properties: {} },
     },
   ];
 
@@ -1104,6 +1266,9 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
     { uri: "a2a://context", name: "Project Context", description: "Current project context (summary, goals, stack, notes)", mimeType: "application/json" },
     { uri: "a2a://health", name: "Worker Health", description: "Health status of all worker agents", mimeType: "application/json" },
     { uri: "a2a://tasks", name: "Task List", description: "List of all active and recent tasks", mimeType: "application/json" },
+    { uri: "a2a://metrics", name: "Metrics", description: "Skill execution metrics: call counts, latencies, error rates", mimeType: "application/json" },
+    { uri: "a2a://circuit-breakers", name: "Circuit Breakers", description: "Circuit breaker states for all workers", mimeType: "application/json" },
+    { uri: "a2a://webhooks", name: "Webhooks", description: "Registered webhook endpoints", mimeType: "application/json" },
   ];
   for (const card of workerCards) {
     resources.push({
@@ -1133,6 +1298,18 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
   if (uri === "a2a://tasks") {
     return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listTasks(), null, 2) }] };
+  }
+
+  if (uri === "a2a://metrics") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(getMetricsSnapshot(), null, 2) }] };
+  }
+
+  if (uri === "a2a://circuit-breakers") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(getAllBreakerStats(), null, 2) }] };
+  }
+
+  if (uri === "a2a://webhooks") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listWebhooks().map(w => ({ ...w, secret: w.secret ? "***" : undefined })), null, 2) }] };
   }
 
   const workerMatch = uri.match(/^a2a:\/\/workers\/([^/]+)\/card$/);
@@ -1472,6 +1649,103 @@ async function startHttpServer() {
     request.raw.on("close", () => taskEvents.off(`task:${taskId}`, onEvent));
   });
 
+  // ── Webhook ingestion endpoint ──────────────────────────────
+  async function webhookAuthGuard(request: any, reply: any) {
+    // If no A2A API key is configured, allow all requests (existing behavior)
+    const apiKey = (CONFIG as any).A2A_API_KEY;
+    if (!apiKey) {
+      return;
+    }
+
+    // Allow loopback callers without API key
+    const ip = request.ip as string | undefined;
+    if (
+      ip === "127.0.0.1" ||
+      ip === "::1" ||
+      ip === "::ffff:127.0.0.1" ||
+      (ip && ip.startsWith("127.0.0."))
+    ) {
+      return;
+    }
+
+    const headerKey = request.headers["x-api-key"];
+    if (headerKey !== apiKey) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+  }
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/webhooks/:id", { onRequest: webhookAuthGuard }, async (request, reply) => {
+    const webhookId = request.params.id;
+    const webhook = getWebhook(webhookId);
+    if (!webhook) {
+      reply.code(404);
+      return { error: "Webhook not found" };
+    }
+    if (!webhook.enabled) {
+      reply.code(403);
+      return { error: "Webhook is disabled" };
+    }
+
+    // Verify HMAC signature if secret is configured
+    if (webhook.secret) {
+      const signature = request.headers["x-hub-signature-256"] as string | undefined;
+      if (!signature) {
+        logWebhookCall(webhookId, "rejected", undefined, "Missing signature");
+        reply.code(401);
+        return { error: "Missing X-Hub-Signature-256 header" };
+      }
+      const rawBody = JSON.stringify(request.body);
+      if (!verifySignature(rawBody, signature, webhook.secret)) {
+        logWebhookCall(webhookId, "rejected", undefined, "Invalid signature");
+        reply.code(401);
+        return { error: "Invalid signature" };
+      }
+    }
+
+    // Transform payload
+    const args = transformPayload(
+      request.body,
+      webhook.fieldMappings ?? {},
+      webhook.staticArgs ?? {},
+    );
+
+    const payloadSize = JSON.stringify(request.body).length;
+
+    // Defense-in-depth: block privileged skills even if they were registered before the denylist was introduced
+    if (WEBHOOK_BLOCKED_SKILLS.has(webhook.skillId)) {
+      logWebhookCall(webhookId, "rejected", undefined, `Skill "${webhook.skillId}" is not permitted as a webhook target`, payloadSize);
+      reply.code(403);
+      return { error: `Skill "${webhook.skillId}" is not permitted as a webhook target` };
+    }
+
+    try {
+      if (webhook.async !== false) {
+        const task = createTask({ skillId: webhook.skillId });
+        markWorking(task.id);
+        dispatchSkill(webhook.skillId, args, JSON.stringify(request.body))
+          .then(result => markCompleted(task.id, result))
+          .catch(err => {
+            try { markFailed(task.id, { code: "WEBHOOK_ERROR", message: String(err) }); } catch {}
+          });
+        logWebhookCall(webhookId, "success", task.id, undefined, payloadSize);
+        return { status: "accepted", taskId: task.id };
+      } else {
+        const result = await dispatchSkill(webhook.skillId, args, JSON.stringify(request.body));
+        logWebhookCall(webhookId, "success", undefined, undefined, payloadSize);
+        return { status: "completed", result };
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logWebhookCall(webhookId, "error", undefined, errMsg, payloadSize);
+      reply.code(500);
+      return { error: errMsg };
+    }
+  });
+
+  // ── Metrics HTTP endpoint ─────────────────────────────────────
+  app.get("/metrics", async () => getMetricsSnapshot());
+
   app.get("/healthz", async () => {
     const health: Record<string, unknown> = {};
     for (const w of WORKERS) {
@@ -1507,6 +1781,11 @@ async function main() {
   process.stderr.write(`[orchestrator] discovered ${workerCards.length} workers\n`);
   for (const card of workerCards) {
     process.stderr.write(`  - ${card.name}: ${card.skills.map(s => s.id).join(", ")}\n`);
+  }
+
+  // Register workers for metrics tracking
+  for (const card of workerCards) {
+    registerWorkerMetric(card.name, card.url);
   }
 
   // Clean up old sandbox vars and populate adapter list
