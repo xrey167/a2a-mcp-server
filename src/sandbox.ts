@@ -5,8 +5,12 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { buildPrelude, buildEpilogue } from "./sandbox-prelude.js";
 import { sandboxStore } from "./sandbox-store.js";
+import { smartTruncate } from "./truncate.js";
+import { safeStringify } from "./safe-json.js";
+import { filterEnvForSandbox } from "./env-filter.js";
 
 const DEFAULT_TIMEOUT = 30_000;
+const MAX_RESULT_SIZE = 25_000; // cap sandbox output at 25KB
 const INDEX_THRESHOLD = 4096;
 
 // ── Adapter discovery helpers ─────────────────────────────
@@ -75,6 +79,7 @@ async function runSubprocess(
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
+      env: filterEnvForSandbox(),
     });
 
     let settled = false;
@@ -142,15 +147,21 @@ async function runSubprocess(
 
         if (msg.vars && typeof msg.vars === "object") {
           for (const [name, value] of Object.entries(msg.vars)) {
-            const json = JSON.stringify(value);
+            const json = safeStringify(value);
             sandboxStore.setVar(sessionId, name, json);
             newVars.push(name);
             if (json.length > INDEX_THRESHOLD) indexed.push(name);
           }
         }
 
+        // Cap the result to prevent context window blow-up
+        let resultStr = msg.result != null ? safeStringify(msg.result) : null;
+        if (resultStr && resultStr.length > MAX_RESULT_SIZE) {
+          resultStr = smartTruncate(resultStr, { maxLength: MAX_RESULT_SIZE });
+        }
+
         finish({
-          result: msg.result ?? null,
+          result: resultStr != null ? (typeof msg.result === "string" ? resultStr : JSON.parse(resultStr)) : null,
           error: msg.error,
           vars: newVars,
           indexed,
@@ -159,43 +170,43 @@ async function runSubprocess(
         // Skill call — dispatch and respond
         try {
           const result = await dispatch(msg.id, msg.args ?? {});
-          const response = JSON.stringify({ seq: msg.seq, result }) + "\n";
+          const response = safeStringify({ seq: msg.seq, result }) + "\n";
           proc.stdin.write(response);
         } catch (err) {
-          const response = JSON.stringify({ seq: msg.seq, error: String(err) }) + "\n";
+          const response = safeStringify({ seq: msg.seq, error: String(err) }) + "\n";
           proc.stdin.write(response);
         }
       } else if (msg.rpc === "search") {
-        // FTS5 search call
+        // FTS5 search call (now with 3-layer fallback)
         try {
           const results = sandboxStore.search(msg.session, msg.varName, msg.query);
           const parsed = results.map(r => {
             try { return JSON.parse(r.value); } catch { return r.value; }
           });
-          const response = JSON.stringify({ seq: msg.seq, result: parsed }) + "\n";
+          const response = safeStringify({ seq: msg.seq, result: parsed }) + "\n";
           proc.stdin.write(response);
         } catch (err) {
-          const response = JSON.stringify({ seq: msg.seq, error: String(err) }) + "\n";
+          const response = safeStringify({ seq: msg.seq, error: String(err) }) + "\n";
           proc.stdin.write(response);
         }
       } else if (msg.rpc === "adapters") {
         // List available skill adapters (lightweight: id + description only)
         try {
           const list = getAdapterList();
-          const response = JSON.stringify({ seq: msg.seq, result: list }) + "\n";
+          const response = safeStringify({ seq: msg.seq, result: list }) + "\n";
           proc.stdin.write(response);
         } catch (err) {
-          const response = JSON.stringify({ seq: msg.seq, error: String(err) }) + "\n";
+          const response = safeStringify({ seq: msg.seq, error: String(err) }) + "\n";
           proc.stdin.write(response);
         }
       } else if (msg.rpc === "describe") {
         // Get full input schema for a specific skill
         try {
           const schema = getAdapterSchema(msg.id);
-          const response = JSON.stringify({ seq: msg.seq, result: schema }) + "\n";
+          const response = safeStringify({ seq: msg.seq, result: schema }) + "\n";
           proc.stdin.write(response);
         } catch (err) {
-          const response = JSON.stringify({ seq: msg.seq, error: String(err) }) + "\n";
+          const response = safeStringify({ seq: msg.seq, error: String(err) }) + "\n";
           proc.stdin.write(response);
         }
       }

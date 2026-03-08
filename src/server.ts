@@ -25,6 +25,8 @@ import { randomUUID } from "crypto";
 import { executeSandbox, setAdapters } from "./sandbox.js";
 import { sandboxStore } from "./sandbox-store.js";
 import { sanitizeForPrompt } from "./prompt-sanitizer.js";
+import { smartTruncate as smartTruncateStr, capResponse, truncateArray } from "./truncate.js";
+import { safeStringify } from "./safe-json.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -479,6 +481,8 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     case "memory_search": {
       const query = String(args?.query ?? "");
       if (!query) throw new Error("memory_search requires query");
+      const throttle = isSearchThrottled("global");
+      if (!throttle.allowed) throw new Error("Search rate limit exceeded. Try again in a minute.");
       return JSON.stringify(memory.search(query, args?.agent ? String(args.agent) : undefined), null, 2);
     }
 
@@ -867,21 +871,57 @@ const server = new Server(
 
 // ── Result truncation (MCX-inspired token reduction) ──────────
 const CHAR_LIMIT = 25_000;
-const TRUNCATE_ITEMS = 10;
+const TRUNCATE_ITEMS = 100;
 
 function smartTruncate(value: unknown, maxItems = TRUNCATE_ITEMS): string {
-  const raw = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  // Handle circular references gracefully
+  const raw = typeof value === "string" ? value : safeStringify(value, 2);
   if (raw.length <= CHAR_LIMIT) return raw;
 
-  // Try array truncation first
+  // Try array truncation first — keep first + last items with marker
   if (Array.isArray(value) && value.length > maxItems) {
-    const sliced = value.slice(0, maxItems);
-    const summary = JSON.stringify(sliced, null, 2);
-    return `${summary}\n\n... +${value.length - maxItems} more items (total: ${value.length}). Use sandbox_execute to filter/transform in-process.`;
+    const truncated = truncateArray(value, maxItems);
+    const summary = safeStringify(truncated, 2);
+    return capResponse(summary, CHAR_LIMIT);
   }
 
-  // Hard truncation as last resort
-  return raw.slice(0, CHAR_LIMIT) + `\n\n... [truncated at ${CHAR_LIMIT} chars, original ${raw.length}. Use sandbox_execute to filter data in-process.]`;
+  // Smart head/tail truncation preserving context from both ends
+  return smartTruncateStr(raw, { maxLength: CHAR_LIMIT });
+}
+
+// ── Search throttling ─────────────────────────────────────────
+const SEARCH_WINDOW_MS = 60_000;
+const SEARCH_MAX_NORMAL = 3;
+const SEARCH_MAX_BURST = 8;
+
+interface ThrottleState {
+  timestamps: number[];
+  blocked: number;
+}
+
+const searchThrottle = new Map<string, ThrottleState>();
+
+function isSearchThrottled(sessionId: string): { allowed: boolean; remaining: number } {
+  const now = Date.now();
+  let state = searchThrottle.get(sessionId);
+  if (!state) {
+    state = { timestamps: [], blocked: 0 };
+    searchThrottle.set(sessionId, state);
+  }
+
+  // Prune timestamps outside the window
+  state.timestamps = state.timestamps.filter(t => now - t < SEARCH_WINDOW_MS);
+
+  const total = state.timestamps.length;
+  const max = total >= SEARCH_MAX_NORMAL ? SEARCH_MAX_BURST : SEARCH_MAX_NORMAL;
+
+  if (total >= max) {
+    state.blocked++;
+    return { allowed: false, remaining: 0 };
+  }
+
+  state.timestamps.push(now);
+  return { allowed: true, remaining: max - total - 1 };
 }
 
 /** Build a concise skill summary string for tool descriptions (progressive disclosure). */
@@ -1168,7 +1208,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       clearTimeout(timer);
     }
 
-    return { content: [{ type: "text", text: accumulated || "(no output)" }] };
+    return { content: [{ type: "text", text: capResponse(accumulated || "(no output)", CHAR_LIMIT) }] };
   }
 
   const text = String((args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "");
@@ -1177,7 +1217,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { parsed = raw; }
   const truncated = smartTruncate(parsed);
-  return { content: [{ type: "text", text: truncated }] };
+  return { content: [{ type: "text", text: capResponse(truncated, CHAR_LIMIT) }] };
 });
 
 // ── A2A HTTP auth ────────────────────────────────────────────────
