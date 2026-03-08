@@ -457,12 +457,22 @@ async function createProject(
   let matchResult: MatchResult;
   if (forceVariant) {
     const spec = await loadVariantSpec(pipelineId, forceVariant);
-    matchResult = {
-      variantId: forceVariant,
-      variantSpec: spec,
-      confidence: "high",
-      reason: `Forced variant: ${forceVariant}`,
-    };
+    if (spec) {
+      matchResult = {
+        variantId: forceVariant,
+        variantSpec: spec,
+        confidence: "high",
+        reason: `Forced variant: ${forceVariant}`,
+      };
+    } else {
+      // Treat unknown forced variant as "no variant" to keep behavior consistent.
+      matchResult = {
+        variantId: undefined,
+        variantSpec: undefined,
+        confidence: "none",
+        reason: `Unknown forced variant: ${forceVariant}, using base template`,
+      };
+    }
   } else {
     matchResult = await matchTemplate(idea, pipelineId);
   }
