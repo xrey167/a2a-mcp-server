@@ -6,11 +6,12 @@
  *   - Worker-level utilization and uptime
  *   - System-wide throughput and error budgets
  *
- * Storage: in-memory with periodic decay (sliding window).
+ * Storage: in-memory; retains a bounded latency history per skill (last ~1000 samples)
+ * and unbounded aggregate counters.
  * Exposed via MCP resource a2a://metrics.
  */
 
-const WINDOW_MS = 5 * 60_000; // 5-minute sliding window
+const WINDOW_MS = 5 * 60_000; // reserved for potential future time-windowed decay
 
 interface SkillMetric {
   skillId: string;
