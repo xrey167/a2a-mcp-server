@@ -8,15 +8,15 @@ import { AgentError } from "../errors.js";
 
 describe("URL validation (SSRF prevention)", () => {
   // Re-implement the validation logic for testing (same logic as in server.ts)
-  const WORKER_PORTS = [8081, 8082, 8083, 8084, 8085];
+  // Note: port 8080 (orchestrator) is excluded to prevent infinite recursion
+  const ALLOWED_PORTS = new Set([8081, 8082, 8083, 8084, 8085, 8086]);
   function isAllowedUrl(url: string): boolean {
     try {
       const parsed = new URL(url);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
       if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") return false;
       const port = parseInt(parsed.port || "80", 10);
-      const allowedPorts = new Set([8080, ...WORKER_PORTS]);
-      return allowedPorts.has(port);
+      return ALLOWED_PORTS.has(port);
     } catch {
       return false;
     }
@@ -28,8 +28,12 @@ describe("URL validation (SSRF prevention)", () => {
     expect(isAllowedUrl("http://localhost:8083")).toBe(true);
     expect(isAllowedUrl("http://localhost:8084")).toBe(true);
     expect(isAllowedUrl("http://localhost:8085")).toBe(true);
-    expect(isAllowedUrl("http://localhost:8080")).toBe(true);
+    expect(isAllowedUrl("http://localhost:8086")).toBe(true);
     expect(isAllowedUrl("http://127.0.0.1:8081")).toBe(true);
+  });
+
+  test("blocks orchestrator port 8080 (prevents infinite recursion)", () => {
+    expect(isAllowedUrl("http://localhost:8080")).toBe(false);
   });
 
   test("blocks external URLs", () => {

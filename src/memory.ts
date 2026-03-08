@@ -6,7 +6,8 @@ import { writeFileSync, mkdirSync, unlinkSync } from "fs";
 const VAULT = process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/a2a-knowledge");
 const MEMORY_DIR = join(VAULT, "_memory");
 
-const db = new Database(join(homedir(), ".a2a-memory.db"));
+const dbPath = process.env.A2A_MEMORY_DB ?? join(homedir(), ".a2a-memory.db");
+const db = new Database(dbPath);
 // WAL journal mode: 6 processes share this file; without WAL, concurrent writes
 // produce SQLITE_BUSY errors that silently drop data.
 db.run("PRAGMA journal_mode=WAL");
