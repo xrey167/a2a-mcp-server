@@ -285,9 +285,9 @@ All inter-agent calls are wrapped in circuit breakers that prevent cascading fai
 
 ```
 # View all breaker states
-get_metrics   # includes circuit breaker status
+get_circuit_breakers
 
-# Or via MCP resource
+# Or via A2A resource
 # a2a://circuit-breakers
 ```
 
@@ -317,7 +317,7 @@ workflow_execute {
     id: "analyze-and-report",
     steps: [
       { id: "fetch", skillId: "fetch_url", args: { url: "https://api.example.com/data" } },
-      { id: "parse", skillId: "parse_json", args: { data: "{{fetch.result}}" }, dependsOn: ["fetch"] },
+      { id: "parse", skillId: "parse_json", args: { json: "{{fetch.result}}" }, dependsOn: ["fetch"] },
       { id: "analyze", skillId: "analyze_data", args: { data: "{{parse.result}}" }, dependsOn: ["parse"] }
     ]
   }
@@ -508,11 +508,11 @@ All skills below are accessible through `sandbox_execute` using `skill(id, args)
 
 |Function        |Parameters                                          |Description                                       |
 |:---------------|:---------------------------------------------------|:-------------------------------------------------|
-|`parse_csv`     |`data`, `delimiter?`, `headers?`                    |Parse CSV text to array of objects                |
-|`parse_json`    |`data`                                              |Parse JSON string with error handling             |
+|`parse_csv`     |`csv`, `delimiter?`, `hasHeader?`                   |Parse CSV text to array of objects                |
+|`parse_json`    |`json`                                              |Parse JSON string with error handling             |
 |`transform_data`|`data`, `operations`                                |Chain transforms: filter, sort, group, aggregate, flatten, unique, take, skip, pick, omit, rename|
 |`analyze_data`  |`data`, `fields?`                                   |Statistical analysis: mean, median, stddev, percentiles, distributions|
-|`pivot_table`   |`data`, `rowField`, `valueField`, `columnField?`, `aggregation?`|Pivot with sum/count/avg/min/max aggregation|
+|`pivot_table`   |`data`, `rowField`, `valueField`, `colField?`, `aggregation?`|Pivot with sum/count/avg/min/max aggregation|
 
 </details>
 
@@ -721,9 +721,9 @@ GitHub Actions runs on every push/PR to `main`:
 ### Add a new worker agent
 
 1. Create `src/workers/<n>.ts` — Fastify server with `AGENT_CARD` and skill handlers
-1. Add to `WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
-1. Add port to `ALLOWED_PORTS` in `src/server.ts`
-1. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
+2. Add to `WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
+3. Add port to `ALLOWED_PORTS` in `src/server.ts`
+4. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
 
 ### Add a plugin (hot-reloaded)
 

@@ -89,7 +89,7 @@ function resolveTemplates(
   stepResults: Map<string, StepResult>,
 ): unknown {
   if (typeof value === "string") {
-    return value.replace(/\{\{(\w+)\.result\}\}/g, (_, stepId) => {
+    return value.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
       const result = stepResults.get(stepId);
       return result?.result ?? `<step ${stepId} not found>`;
     });
@@ -243,7 +243,7 @@ export async function executeWorkflow(
         lastError = err instanceof Error ? err.message : String(err);
         if (attempt < maxRetries) {
           onProgress?.(`↻ "${label}" retry ${attempt + 1}/${maxRetries}`);
-          await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); // backoff
+          await new Promise(r => setTimeout(r, 1000 * (2 ** attempt))); // exponential backoff
         }
       }
     }
