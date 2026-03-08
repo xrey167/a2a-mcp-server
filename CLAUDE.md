@@ -59,6 +59,47 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 - HMAC-SHA256 signature verification, payload field mapping, async task creation
 - Endpoints: `POST /webhooks/:id` on the A2A HTTP server
 
+**Agent Event Bus:**
+- `src/event-bus.ts` — Real-time pub/sub between agents with topic-based routing
+- Topic patterns with wildcards: `*` (one segment), `#` (multi-segment) — e.g. `agent.*.completed`, `workflow.#`
+- Event history with configurable retention, replay from timestamp, dead letter queue for failed deliveries
+- MCP tools: `event_publish`, `event_subscribe`, `event_replay`; resource: `a2a://event-bus`
+- Events auto-published on agent completion/failure (integrated into delegate flow)
+
+**Skill Composition (Pipeline Engine):**
+- `src/skill-composer.ts` — Declarative skill chaining with pipe() semantics
+- Each step's output feeds the next; template refs: `{{prev.result}}`, `{{input.*}}`, `{{steps.alias.result}}`
+- Error strategies per step: abort (default), skip, or fallback value
+- Conditional execution with `when` expressions
+- MCP tools: `compose_pipeline`, `execute_pipeline`, `list_pipelines`; resource: `a2a://pipelines`
+
+**Agent Collaboration:**
+- `src/agent-collaboration.ts` — Multi-agent consensus and negotiation protocols
+- Strategies: `fan_out` (parallel query + merge), `consensus` (AI-scored voting), `debate` (iterative critique/refinement), `map_reduce` (distribute + aggregate)
+- Configurable merge strategies: concat, best_score, majority_vote, custom (with LLM merge prompt)
+- MCP tool: `collaborate` (returns taskId for async polling)
+
+**Distributed Tracing:**
+- `src/tracing.ts` — OpenTelemetry-style trace/span observability across agent calls
+- Trace → Span hierarchy with automatic context propagation
+- Span tags, events, status tracking, waterfall visualization data
+- Integrated into delegate flow: every delegation creates a trace with child spans per worker call
+- MCP tools: `list_traces`, `get_trace` (waterfall view), `search_traces`; resource: `a2a://traces`
+
+**Smart Skill Cache:**
+- `src/skill-cache.ts` — LRU cache with TTL for idempotent skill results
+- Content-addressable keys (deterministic hashing of skillId + args)
+- Per-skill TTL configuration; auto-excludes side-effect skills (run_shell, write_file, etc.)
+- Integrated into delegate flow: cache check before worker call, auto-cache on success
+- MCP tools: `cache_stats`, `cache_invalidate`, `cache_configure`; resource: `a2a://cache`
+
+**Capability Negotiation:**
+- `src/capability-negotiation.ts` — Version-aware skill routing with SemVer matching
+- Multi-dimensional scoring: version, required/preferred features, health, load, priority
+- Auto-populated from worker discovery; health synced from health polling
+- Active call tracking for load-aware routing
+- MCP tools: `negotiate_capability`, `list_capabilities`, `capability_stats`; resource: `a2a://capabilities`
+
 **Shared modules:**
 - `src/a2a.ts` — `sendTask(url, params)` and `discoverAgent(url)` helpers
 - `src/memory.ts` — dual-write: SQLite (`~/.a2a-memory.db`) + Obsidian markdown (`~/Documents/Obsidian/a2a-knowledge/_memory/`)
@@ -70,6 +111,12 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 - `src/metrics.ts` — execution metrics collection
 - `src/workflow-engine.ts` — DAG-based multi-agent workflow orchestration
 - `src/webhooks.ts` — webhook registration, verification, and payload transformation
+- `src/event-bus.ts` — agent event bus (pub/sub with topic wildcards)
+- `src/skill-composer.ts` — declarative skill pipeline composition
+- `src/agent-collaboration.ts` — multi-agent collaboration protocols
+- `src/tracing.ts` — distributed tracing with waterfall visualization
+- `src/skill-cache.ts` — LRU skill result cache with per-skill TTL
+- `src/capability-negotiation.ts` — version-aware capability negotiation for skill routing
 
 **Routing in `delegate` skill (server.ts):**
 1. `agentUrl` provided → send directly (through circuit breaker)
