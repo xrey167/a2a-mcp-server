@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "start": "bun src/server.ts",
+    "start:acp": "bun src/acp-server.ts",
     "test": "bun test"
   },
   "devDependencies": {
