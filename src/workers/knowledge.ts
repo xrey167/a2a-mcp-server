@@ -1,7 +1,8 @@
 import Fastify from "fastify";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, watch } from "fs";
 import { join, dirname, basename, resolve } from "path";
 import { homedir } from "os";
+import { Database } from "bun:sqlite";
 import { Glob } from "bun";
 import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
@@ -22,6 +23,95 @@ const KnowledgeSchemas = {
 const PORT = 8085;
 const NAME = "knowledge-agent";
 const VAULT = resolve(process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/a2a-knowledge"));
+
+// ── FTS5 Index for fast full-text search ─────────────────────────
+const INDEX_DB_PATH = join(homedir(), ".a2a-knowledge-index.db");
+const indexDb = new Database(INDEX_DB_PATH);
+indexDb.exec("PRAGMA journal_mode=WAL");
+indexDb.exec(`
+  CREATE TABLE IF NOT EXISTS notes (
+    path TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  )
+`);
+indexDb.exec(`
+  CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+    title, content, content=notes, content_rowid=rowid,
+    tokenize='porter unicode61'
+  )
+`);
+// Keep FTS in sync via triggers
+indexDb.exec(`
+  CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
+    INSERT INTO notes_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content);
+  END
+`);
+indexDb.exec(`
+  CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
+    INSERT INTO notes_fts(notes_fts, rowid, title, content) VALUES('delete', old.rowid, old.title, old.content);
+  END
+`);
+indexDb.exec(`
+  CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
+    INSERT INTO notes_fts(notes_fts, rowid, title, content) VALUES('delete', old.rowid, old.title, old.content);
+    INSERT INTO notes_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content);
+  END
+`);
+
+const upsertNote = indexDb.prepare(`INSERT OR REPLACE INTO notes (path, title, content, updated_at) VALUES (?, ?, ?, ?)`);
+const searchNotesFts = indexDb.prepare(`
+  SELECT n.path, highlight(notes_fts, 0, '**', '**') AS title_hl
+  FROM notes_fts f JOIN notes n ON n.rowid = f.rowid
+  WHERE notes_fts MATCH ? ORDER BY rank LIMIT 50
+`);
+const deleteNote = indexDb.prepare(`DELETE FROM notes WHERE path = ?`);
+
+/** Index all vault notes on startup */
+async function buildIndex() {
+  const glob = new Glob("**/*.md");
+  let count = 0;
+  const tx = indexDb.transaction(() => {
+    for (const file of glob.scanSync(VAULT)) {
+      try {
+        const fullPath = join(VAULT, file);
+        const content = readFileSync(fullPath, "utf-8");
+        const title = file.replace(/\.md$/, "");
+        upsertNote.run(file, title, content, Date.now());
+        count++;
+      } catch { /* skip unreadable files */ }
+    }
+  });
+  tx();
+  process.stderr.write(`[${NAME}] indexed ${count} notes\n`);
+}
+
+/** Update index for a single note */
+function indexNote(relativePath: string, content: string) {
+  const title = relativePath.replace(/\.md$/, "");
+  upsertNote.run(relativePath, title, content, Date.now());
+}
+
+/** Watch vault for changes and update index */
+function watchVault() {
+  try {
+    watch(VAULT, { recursive: true }, (event, filename) => {
+      if (!filename || !filename.endsWith(".md")) return;
+      const fullPath = join(VAULT, filename);
+      if (existsSync(fullPath)) {
+        try {
+          const content = readFileSync(fullPath, "utf-8");
+          indexNote(filename, content);
+        } catch { /* ignore read errors during writes */ }
+      } else {
+        deleteNote.run(filename);
+      }
+    });
+  } catch {
+    process.stderr.write(`[${NAME}] vault file watching not available — index updates on write only\n`);
+  }
+}
 
 const AGENT_CARD = {
   name: NAME,
@@ -66,7 +156,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { title, content, tags } = KnowledgeSchemas.create_note.parse(args);
       const path = notePath(title);
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, `${buildFrontmatter(tags)}# ${title}\n\n${content}\n`, "utf-8");
+      const fullContent = `${buildFrontmatter(tags)}# ${title}\n\n${content}\n`;
+      writeFileSync(path, fullContent, "utf-8");
+      indexNote(`${title}.md`, fullContent);
       return `Created note: ${title}`;
     }
     case "read_note": {
@@ -80,19 +172,30 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const path = notePath(title);
       if (!existsSync(path)) return `Note not found: ${title}`;
       writeFileSync(path, content, "utf-8");
+      indexNote(`${title}.md`, content);
       return `Updated note: ${title}`;
     }
     case "search_notes": {
       const { query: rawQuery } = KnowledgeSchemas.search_notes.parse({ query: args.query ?? text, ...args });
+      // Try FTS5 first, fall back to brute-force scan
+      try {
+        const ftsResults = searchNotesFts.all(rawQuery) as Array<{ path: string; title_hl: string }>;
+        if (ftsResults.length > 0) {
+          return ftsResults.map(r => r.path).join("\n");
+        }
+      } catch { /* FTS query syntax error — fall through to brute force */ }
+      // Fallback: scan vault for substring match
       const query = rawQuery.toLowerCase();
       const glob = new Glob("**/*.md");
       const results: string[] = [];
       for await (const file of glob.scan(VAULT)) {
         const fullPath = join(VAULT, file);
-        const content = readFileSync(fullPath, "utf-8");
-        if (content.toLowerCase().includes(query)) {
-          results.push(file);
-        }
+        try {
+          const content = readFileSync(fullPath, "utf-8");
+          if (content.toLowerCase().includes(query)) {
+            results.push(file);
+          }
+        } catch { /* skip unreadable files */ }
       }
       return results.length > 0 ? results.join("\n") : "No matching notes found";
     }
@@ -170,6 +273,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
 
 getPersona(NAME);
 watchPersonas();
+
+// Build FTS5 index on startup, then watch for changes
+buildIndex().then(() => watchVault());
 
 app.listen({ port: PORT, host: "localhost" }).then(() => {
   process.stderr.write(`[${NAME}] listening on http://localhost:${PORT}\n`);

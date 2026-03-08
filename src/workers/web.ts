@@ -13,6 +13,26 @@ const WebSchemas = {
 const PORT = 8082;
 const NAME = "web-agent";
 
+// Configurable timeouts (env vars set by orchestrator, or sensible defaults)
+const FETCH_TIMEOUT_MS = parseInt(process.env.A2A_FETCH_TIMEOUT ?? "30000", 10);
+const MAX_RESPONSE_BYTES = parseInt(process.env.A2A_MAX_RESPONSE_BYTES ?? String(10 * 1024 * 1024), 10); // 10MB
+const RATE_LIMIT_RPM = parseInt(process.env.A2A_WEB_RATE_LIMIT ?? "0", 10); // 0 = unlimited
+
+// Simple token-bucket rate limiter (per-minute)
+const rateBucket = { tokens: RATE_LIMIT_RPM, lastRefill: Date.now() };
+function checkRateLimit(): boolean {
+  if (RATE_LIMIT_RPM <= 0) return true; // unlimited
+  const now = Date.now();
+  const elapsed = now - rateBucket.lastRefill;
+  if (elapsed >= 60_000) {
+    rateBucket.tokens = RATE_LIMIT_RPM;
+    rateBucket.lastRefill = now;
+  }
+  if (rateBucket.tokens <= 0) return false;
+  rateBucket.tokens--;
+  return true;
+}
+
 const AGENT_CARD = {
   name: NAME,
   description: "Web/HTTP agent — fetch URLs, call APIs, persistent memory",
@@ -30,11 +50,14 @@ const AGENT_CARD = {
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
   if (memResult !== null) return memResult;
+  if (!checkRateLimit()) return "Rate limit exceeded — try again in a moment";
   switch (skillId) {
     case "fetch_url": {
       const { url, format } = WebSchemas.fetch_url.parse({ url: args.url ?? text, ...args });
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+      const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
+      if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
       return format === "json"
         ? safeStringify(await res.json(), 2)
         : await res.text();
@@ -45,6 +68,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         method,
         headers: { "Content-Type": "application/json", ...headers },
         body: body ? safeStringify(body) : undefined,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
       return `HTTP ${res.status}\n${await res.text()}`;
     }

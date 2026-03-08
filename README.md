@@ -428,13 +428,36 @@ Events: `data: {"type":"stdout","text":"..."}` → `data: {"type":"done","exitCo
 
 ### Environment variables
 
-|Variable           |Purpose                          |Default                             |
-|:------------------|:--------------------------------|:-----------------------------------|
-|`ANTHROPIC_API_KEY`|Claude SDK auth                  |Falls back to Claude Code OAuth     |
-|`A2A_API_KEY`      |Bearer token for remote access   |Open mode (no auth)                 |
-|`OBSIDIAN_VAULT`   |Override vault path              |`~/Documents/Obsidian/a2a-knowledge`|
-|`SYNC_SERVER_URL`  |Remote server for credential sync|`http://localhost:8080`             |
-|`SYNC_PASSPHRASE`  |Encryption passphrase            |—                                   |
+|Variable                    |Purpose                          |Default                             |
+|:---------------------------|:--------------------------------|:-----------------------------------|
+|`ANTHROPIC_API_KEY`         |Claude SDK auth                  |Falls back to Claude Code OAuth     |
+|`GOOGLE_API_KEY`            |Gemini SDK auth (design-agent)   |Falls back to gemini CLI            |
+|`A2A_API_KEY`               |Bearer token for remote access   |Open mode (no auth)                 |
+|`OBSIDIAN_VAULT`            |Override vault path              |`~/Documents/Obsidian/a2a-knowledge`|
+|`A2A_PORT`                  |Orchestrator HTTP port           |`8080`                              |
+|`A2A_FETCH_TIMEOUT`         |HTTP fetch timeout (ms)          |`30000`                             |
+|`A2A_CODEX_TIMEOUT`         |Codex CLI timeout (ms)           |`120000`                            |
+|`A2A_SANDBOX_TIMEOUT`       |Sandbox execution timeout (ms)   |`30000`                             |
+|`A2A_MAX_RESPONSE_SIZE`     |Max response size (chars)        |`25000`                             |
+|`A2A_WEB_RATE_LIMIT`        |Outbound fetch rate limit (RPM)  |`0` (unlimited)                     |
+|`A2A_ASK_CLAUDE_MAX_TOKENS` |Default max tokens for ask_claude|`4096`                              |
+|`A2A_LOG_LEVEL`             |Structured log level             |`info`                              |
+|`SYNC_SERVER_URL`           |Remote server for credential sync|`http://localhost:8080`             |
+|`SYNC_PASSPHRASE`           |Encryption passphrase            |—                                   |
+
+### Config file (`~/.a2a-mcp/config.json`)
+
+Fine-grained control via JSON (see `.env.example` for quick setup):
+
+```json
+{
+  "server": { "port": 8080, "healthPollInterval": 30000 },
+  "timeouts": { "shell": 15000, "fetch": 30000, "codex": 120000, "peer": 60000 },
+  "web": { "rateLimit": 60, "maxResponseBytes": 10485760 },
+  "sandbox": { "timeout": 30000, "maxResultSize": 25000 },
+  "truncation": { "maxResponseSize": 25000, "maxArrayItems": 100 }
+}
+```
 
 ### Auth methods
 
@@ -464,6 +487,24 @@ Events: `data: {"type":"stdout","text":"..."}` → `data: {"type":"done","exitCo
 ```
 
 </details>
+
+-----
+
+## Docker
+
+```bash
+docker build -t a2a-mcp-server .
+docker run -p 8080-8087:8080-8087 \
+  -e ANTHROPIC_API_KEY=sk-... \
+  -e GOOGLE_API_KEY=... \
+  a2a-mcp-server
+```
+
+## CI
+
+GitHub Actions runs on every push/PR to `main`:
+- **Type check** via `bun build`
+- **Tests** via `bun test`
 
 -----
 
