@@ -231,7 +231,7 @@ git commit -m "feat: sandbox variable store with FTS5 auto-indexing"
 
 ### Task 2: Sandbox Prelude Template
 
-Create the TypeScript prelude that gets injected into every sandbox subprocess — defines `skill()`, `search()`, data helpers, and `$vars`.
+Create the TypeScript prelude that gets injected into every sandbox subprocess — defines `skill()`, `search()`, `adapters()`, `describe()`, `batch()`, data helpers, and `$vars`.
 
 **Files:**
 - Create: `src/sandbox-prelude.ts`
@@ -256,6 +256,9 @@ describe("Sandbox prelude", () => {
     expect(code).toContain("function last(");
     expect(code).toContain("function table(");
     expect(code).toContain("async function search(");
+    expect(code).toContain("async function adapters(");
+    expect(code).toContain("async function describe(");
+    expect(code).toContain("async function batch(");
     expect(code).toContain("const $vars");
   });
 
@@ -336,6 +339,49 @@ async function search(varName: string, query: string): Promise<any[]> {
     __pending.set(seq, { resolve, reject });
     __send({ rpc: "search", varName, query, session: __sessionId, seq });
   });
+}
+
+// ── adapters() — list available skill adapters ────────────
+async function adapters(): Promise<Array<{ id: string; description: string }>> {
+  const seq = ++__seq;
+  return new Promise((resolve, reject) => {
+    __pending.set(seq, { resolve, reject });
+    __send({ rpc: "adapters", seq });
+  });
+}
+
+// ── describe() — get full input schema for a skill ────────
+async function describe(skillId: string): Promise<any> {
+  const seq = ++__seq;
+  return new Promise((resolve, reject) => {
+    __pending.set(seq, { resolve, reject });
+    __send({ rpc: "describe", id: skillId, seq });
+  });
+}
+
+// ── batch() — process array with concurrency control ──────
+async function batch<T, R>(
+  items: T[],
+  fn: (item: T) => Promise<R>,
+  opts?: { concurrency?: number; onProgress?: (done: number, total: number) => void }
+): Promise<R[]> {
+  const concurrency = opts?.concurrency ?? 5;
+  const results: R[] = new Array(items.length);
+  let idx = 0;
+  let done = 0;
+
+  async function worker() {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fn(items[i]);
+      done++;
+      if (opts?.onProgress) opts.onProgress(done, items.length);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
 }
 
 // ── Data helpers ─────────────────────────────────────────
@@ -537,6 +583,29 @@ import { sandboxStore } from "./sandbox-store.js";
 const DEFAULT_TIMEOUT = 30_000;
 const INDEX_THRESHOLD = 4096;
 
+// ── Adapter discovery helpers ─────────────────────────────
+// These are injected by the orchestrator at wire-up time (Task 4)
+let __adapterList: Array<{ id: string; description: string }> = [];
+let __adapterSchemas: Map<string, any> = new Map();
+
+export function setAdapters(
+  list: Array<{ id: string; description: string }>,
+  schemas: Map<string, any>,
+): void {
+  __adapterList = list;
+  __adapterSchemas = schemas;
+}
+
+function getAdapterList(): Array<{ id: string; description: string }> {
+  return __adapterList;
+}
+
+function getAdapterSchema(skillId: string): any {
+  const schema = __adapterSchemas.get(skillId);
+  if (!schema) throw new Error(`Unknown skill: ${skillId}`);
+  return schema;
+}
+
 interface SandboxOptions {
   code: string;
   sessionId: string;
@@ -683,6 +752,26 @@ async function runSubprocess(
           const response = JSON.stringify({ seq: msg.seq, error: String(err) }) + "\n";
           proc.stdin.write(response);
         }
+      } else if (msg.rpc === "adapters") {
+        // List available skill adapters (lightweight: id + description only)
+        try {
+          const adapters = getAdapterList();
+          const response = JSON.stringify({ seq: msg.seq, result: adapters }) + "\n";
+          proc.stdin.write(response);
+        } catch (err) {
+          const response = JSON.stringify({ seq: msg.seq, error: String(err) }) + "\n";
+          proc.stdin.write(response);
+        }
+      } else if (msg.rpc === "describe") {
+        // Get full input schema for a specific skill
+        try {
+          const schema = getAdapterSchema(msg.id);
+          const response = JSON.stringify({ seq: msg.seq, result: schema }) + "\n";
+          proc.stdin.write(response);
+        } catch (err) {
+          const response = JSON.stringify({ seq: msg.seq, error: String(err) }) + "\n";
+          proc.stdin.write(response);
+        }
       }
     }
 
@@ -729,7 +818,7 @@ Add `sandbox_execute` and `sandbox_vars` to `server.ts` — skill definitions, d
 Add after line ~23 (after the `AgentError` import):
 
 ```ts
-import { executeSandbox } from "./sandbox.js";
+import { executeSandbox, setAdapters } from "./sandbox.js";
 import { sandboxStore } from "./sandbox-store.js";
 ```
 
@@ -803,7 +892,7 @@ const sandboxExecuteSkill = {
   inputSchema: {
     type: "object" as const,
     properties: {
-      code: { type: "string", description: "TypeScript code to run. Has access to: skill(id, args), search(varName, query), $vars, pick(), sum(), count(), first(), last(), table(). The return value is sent back." },
+      code: { type: "string", description: "TypeScript code to run. Has access to: skill(id, args), search(varName, query), adapters(), describe(skillId), batch(items, fn, opts?), $vars, pick(), sum(), count(), first(), last(), table(). The return value is sent back." },
       sessionId: { type: "string", description: "Session ID for variable persistence (auto-generated if omitted)" },
       timeout: { type: "number", description: "Timeout in ms (default 30000)" },
     },
@@ -850,6 +939,17 @@ In the main startup section (near the end of server.ts where workers are spawned
 
 ```ts
 sandboxStore.prune(7); // Clean up sandbox vars older than 7 days
+
+// Populate adapter list from all worker agent cards for progressive discovery
+const adapterList: Array<{ id: string; description: string }> = [];
+const adapterSchemas = new Map<string, any>();
+for (const card of workerCards.values()) {
+  for (const skill of card.skills ?? []) {
+    adapterList.push({ id: skill.id, description: skill.description ?? skill.name });
+    if (skill.inputSchema) adapterSchemas.set(skill.id, skill.inputSchema);
+  }
+}
+setAdapters(adapterList, adapterSchemas);
 ```
 
 **Step 7: Run full test suite**
@@ -982,6 +1082,84 @@ describe("Sandbox integration", () => {
     });
 
     expect(r.error).toBeDefined();
+  });
+
+  test("adapters() returns list of available skills", async () => {
+    const r = await executeSandbox({
+      code: `
+        const skills = await adapters();
+        return { count: skills.length, hasIds: skills.every(s => s.id && s.description) };
+      `,
+      sessionId: SESSION,
+      dispatch: mockDispatch,
+    });
+
+    expect(r.error).toBeUndefined();
+    expect(r.result.count).toBeGreaterThan(0);
+    expect(r.result.hasIds).toBe(true);
+  });
+
+  test("describe() returns schema for a specific skill", async () => {
+    const r = await executeSandbox({
+      code: `
+        const schema = await describe("fetch_url");
+        return { hasProperties: !!schema.properties, hasRequired: Array.isArray(schema.required) };
+      `,
+      sessionId: SESSION,
+      dispatch: mockDispatch,
+    });
+
+    expect(r.error).toBeUndefined();
+    expect(r.result.hasProperties).toBe(true);
+  });
+
+  test("batch() processes items with concurrency", async () => {
+    const r = await executeSandbox({
+      code: `
+        const urls = Array.from({ length: 10 }, (_, i) => "https://example.com/" + i);
+        const results = await batch(urls, async (url) => {
+          const data = await skill('fetch_url', { url });
+          return JSON.parse(data).items.length;
+        }, { concurrency: 3 });
+        return { total: results.length, allEqual: results.every(r => r === 2) };
+      `,
+      sessionId: SESSION,
+      dispatch: mockDispatch,
+    });
+
+    expect(r.error).toBeUndefined();
+    expect(r.result.total).toBe(10);
+    expect(r.result.allEqual).toBe(true);
+  });
+
+  test("progressive discovery: adapters → describe → skill", async () => {
+    const r = await executeSandbox({
+      code: `
+        // Step 1: Discover available skills
+        const skills = await adapters();
+        const fetchSkill = skills.find(s => s.id === "fetch_url");
+        if (!fetchSkill) return { error: "fetch_url not found" };
+
+        // Step 2: Get schema for the skill we want
+        const schema = await describe(fetchSkill.id);
+
+        // Step 3: Call it with knowledge of the schema
+        const data = await skill(fetchSkill.id, { url: "https://example.com" });
+        const items = JSON.parse(data).items;
+
+        return {
+          discovered: fetchSkill.id,
+          schemaKeys: Object.keys(schema.properties || {}),
+          itemCount: items.length,
+        };
+      `,
+      sessionId: SESSION,
+      dispatch: mockDispatch,
+    });
+
+    expect(r.error).toBeUndefined();
+    expect(r.result.discovered).toBe("fetch_url");
+    expect(r.result.itemCount).toBe(2);
   });
 });
 ```

@@ -47,12 +47,55 @@ Available inside sandbox code (injected via prelude):
 |---|---|
 | `skill(id, args)` | Call any worker skill (fetch_url, query_sqlite, run_shell, etc.) |
 | `search(varName, query)` | FTS5 search over an auto-indexed variable |
+| `adapters()` | List available skill adapters (ids + descriptions). Progressive — not loaded into context until requested. |
+| `describe(skillId)` | Get full input schema for a specific skill. Lets agent discover parameters on-demand. |
+| `batch(items, fn, opts?)` | Process array items through an async function with configurable concurrency. `opts.concurrency` (default 5), `opts.onProgress` callback. |
 | `pick(arr, ...keys)` | Pluck fields from array of objects |
 | `sum(arr, key)` | Sum a numeric field |
 | `count(arr, key)` | Group-by count |
 | `first(arr, n)` / `last(arr, n)` | Slice helpers |
 | `table(arr)` | Format as ASCII table |
 | `$vars` | Map of all persisted variables from previous calls in this session |
+
+## Progressive Adapter Loading
+
+Instead of dumping all skill schemas into the sandbox context upfront, adapters are discoverable on-demand:
+
+```ts
+// Agent discovers what's available (lightweight — just ids + descriptions)
+const skills = await adapters();
+// → [{ id: "fetch_url", description: "Fetch content from a URL" }, ...]
+
+// Agent inspects a specific skill's full schema only when needed
+const schema = await describe("query_sqlite");
+// → { properties: { database: { type: "string" }, sql: { type: "string" } }, required: [...] }
+
+// Then calls it with knowledge of the schema
+const rows = await skill("query_sqlite", { database: "/tmp/app.db", sql: "SELECT * FROM users" });
+```
+
+This keeps the initial sandbox context minimal. The model only pays context tokens for skills it actually inspects.
+
+## Batch Operations
+
+Built-in `batch()` function for processing arrays of items with controlled concurrency:
+
+```ts
+// Process 100 URLs with concurrency of 10
+const urls = [...]; // 100 URLs
+const results = await batch(urls, async (url) => {
+  const data = await skill('fetch_url', { url });
+  return JSON.parse(data);
+}, { concurrency: 10 });
+
+// With progress tracking
+const results = await batch(items, processFn, {
+  concurrency: 5,
+  onProgress: (done, total) => { /* logged to stderr */ }
+});
+```
+
+The orchestrator handles concurrent IPC — multiple in-flight `seq` numbers are supported.
 
 ## Execution Model: Subprocess with stdin/stdout IPC
 
@@ -90,13 +133,15 @@ spawn(["bun", tmpFile])               boots up, reads prelude
 
 **Sandbox → Orchestrator (stdout):**
 - Skill call: `{"rpc":"skill", "id":"...", "args":{...}, "seq": N}\n`
+- Adapter list: `{"rpc":"adapters", "seq": N}\n`
+- Adapter describe: `{"rpc":"describe", "id":"...", "seq": N}\n`
 - Completion: `{"done":true, "result":..., "vars":{...}}\n`
 
 **Orchestrator → Sandbox (stdin):**
 - Skill response: `{"seq": N, "result":...}\n`
 - Skill error: `{"seq": N, "error":"..."}\n`
 
-Sequential calls (one `seq` at a time) for v1.
+Multiple in-flight `seq` numbers supported for batch concurrency.
 
 ### Subprocess Lifecycle
 
@@ -191,7 +236,5 @@ With sandbox:
 ## Out of Scope (YAGNI)
 
 - No adapter generation CLI (skills are already defined)
-- No progressive adapter loading (skill list is small)
 - No network isolation (agent already has run_shell)
-- No batch operations skill (agent can loop in sandbox)
 - No file processing skill (use skill('read_file', ...) from sandbox)
