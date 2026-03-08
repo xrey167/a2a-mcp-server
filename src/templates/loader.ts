@@ -86,11 +86,24 @@ async function collectFiles(dir: string, base: string = dir): Promise<Array<{ ab
 
 /**
  * Sanitize a template variable value to prevent injection.
- * Strips characters that could break out of string contexts in generated code.
+ * Strips characters that could break out of string contexts in generated code,
+ * path traversal sequences, and shell metacharacters.
+ *
+ * Exported for testing.
  */
-function sanitizeVar(value: string): string {
-  // Remove backticks, template literal markers, and other dangerous chars
-  return value.replace(/[`$\\]/g, "");
+export function sanitizeVar(value: string): string {
+  return value
+    // Strip null bytes and all ASCII control characters (newlines, tabs, etc.)
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    // Strip string delimiters and template/escape chars (JS, TS, shell, Python, etc.)
+    .replace(/[`$\\"']/g, "")
+    // Strip path separators to prevent directory traversal
+    .replace(/\//g, "")
+    // Strip double-dot sequences that remain after stripping slashes
+    .replace(/\.\./g, "")
+    // Strip shell metacharacters
+    .replace(/[;&|<>(){}[\]!#*?]/g, "")
+    .trim();
 }
 
 function substitute(text: string, vars: TemplateVars): string {
@@ -126,7 +139,7 @@ export async function loadTemplate(pipelineId: string, vars: TemplateVars): Prom
 
     const content = await readFile(abs, "utf-8");
     let resolvedPath = substitute(rel, vars);
-    resolvedPath = resolvedPath.replace(/__name__/g, vars.name);
+    resolvedPath = resolvedPath.replace(/__name__/g, sanitizeVar(vars.name));
 
     // Substitute {{vars}} and __name__ in content too (for consistency with paths)
     let resolvedContent = substitute(content, vars);
