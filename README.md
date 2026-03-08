@@ -3,7 +3,7 @@
   <img src="https://img.shields.io/badge/lang-TypeScript-3178c6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/protocol-MCP_(Anthropic)-6366f1" alt="MCP" />
   <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
-  <img src="https://img.shields.io/badge/agents-6_workers-f59e0b" alt="Agents" />
+  <img src="https://img.shields.io/badge/agents-7_workers-f59e0b" alt="Agents" />
   <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
 </p>
 
@@ -30,7 +30,7 @@ Most [A2A-MCP integrations](https://github.com/modelcontextprotocol/servers) are
 
 |                 |Thin bridge             |**a2a-mcp-server**                           |
 |:----------------|:-----------------------|:--------------------------------------------|
-|**Agents**       |Proxy to external agents|6 built-in workers with real logic           |
+|**Agents**       |Proxy to external agents|7 built-in workers with real logic           |
 |**Memory**       |None                    |Dual-write: SQLite (FTS5) + Obsidian markdown|
 |**Routing**      |Manual                  |Smart auto-routing via AI agent              |
 |**Extensibility**|Code changes            |Hot-reload plugins + personas, no restart    |
@@ -46,17 +46,17 @@ Claude Code
     │
     │  MCP (stdio)
     ▼
-┌──────────────────────────────────────────────────────────────┐
-│                    ORCHESTRATOR · :8080                       │
-│         smart routing · project context · sessions           │
-│            async tasks · memory · agent registry             │
-└──┬──────────┬──────────┬──────────┬──────────┬──────────┬────┘
-   │          │          │          │          │          │
-   │          │    A2A (HTTP + JSON-RPC 2.0)  │          │
-   ▼          ▼          ▼          ▼          ▼          ▼
- :8081      :8082      :8083      :8084      :8085      :8086
- Shell       Web        AI        Code     Knowledge   Design
- Agent      Agent      Agent      Agent      Agent      Agent
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         ORCHESTRATOR · :8080                            │
+│          smart routing · project context · sessions · sandbox           │
+│             async tasks · memory · agent registry · plugins             │
+└──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────┘
+   │          │          │          │          │          │          │
+   │          │       A2A (HTTP + JSON-RPC 2.0)         │          │
+   ▼          ▼          ▼          ▼          ▼          ▼          ▼
+ :8081      :8082      :8083      :8084      :8085      :8086      :8087
+ Shell       Web        AI        Code     Knowledge   Design    Factory
+ Agent      Agent      Agent      Agent      Agent      Agent      Agent
 ```
 
 |Agent        |Port|What it does                                                   |
@@ -67,6 +67,7 @@ Claude Code
 |**Code**     |8084|Autonomous coding via OpenAI Codex CLI                         |
 |**Knowledge**|8085|Full CRUD on an Obsidian vault — notes, search, tags           |
 |**Design**   |8086|End-to-end UI design pipeline (Gemini + Stitch MCP)            |
+|**Factory**  |8087|Turn ideas into production-ready projects via multi-agent pipelines|
 
 Every agent shares `remember` / `recall` / `memory_search` — backed by **SQLite** for fast FTS5 queries and **Obsidian** for human-readable persistence.
 
@@ -210,6 +211,68 @@ get_task_result { taskId: "abc-123" }
 # → { "status": "completed", "result": "..." }
 ```
 
+### 🧪 Sandbox execution
+
+Run TypeScript in isolated Bun subprocesses with full access to all worker skills. Variables persist per session in SQLite, and large results (>4KB) are auto-indexed for FTS5 search.
+
+```
+# Execute code that calls worker skills directly
+sandbox_execute {
+  code: "const files = await skill('search_files', { pattern: '**/*.ts' }); return files.length;",
+  sessionId: "my-session"
+}
+
+# Search over auto-indexed results
+sandbox_execute {
+  code: "const matches = await search('files', 'server'); return matches;",
+  sessionId: "my-session"
+}
+
+# Manage persisted variables
+sandbox_vars { action: "list_vars", sessionId: "my-session" }
+```
+
+**Sandbox API** (available inside `sandbox_execute` code):
+
+|Function                    |Description                                                |
+|:---------------------------|:----------------------------------------------------------|
+|`skill(id, args)`           |Call any worker skill                                      |
+|`search(varName, query)`    |FTS5 full-text search over stored variables                |
+|`adapters()`                |List all available skill IDs + descriptions                |
+|`describe(skillId)`         |Get full input schema for a skill                          |
+|`batch(items, fn, opts?)`   |Process array with concurrency control (default 5)         |
+|`$vars`                     |Persistent key-value store (survives across calls)         |
+|`pick(arr, ...keys)`        |Project array of objects to selected keys                  |
+|`sum(arr, key)`             |Sum numeric field across array                             |
+|`count(arr, key)`           |Count occurrences by field value                           |
+|`first(arr, n?)` / `last()` |Take first/last N items                                    |
+|`table(arr)`                |Format array of objects as ASCII table                     |
+
+### 🏭 Project Factory
+
+Generate complete, production-ready projects from a vague idea. The Factory Agent orchestrates multiple workers through a multi-phase pipeline: intent normalization, template scaffolding, AI code generation, and quality gate review ("Ralph Mode").
+
+```
+# Generate a project end-to-end
+factory_workflow { idea: "habit tracker with streaks", pipeline: "app" }
+
+# Or use individual skills
+delegate { skillId: "normalize_intent", message: "expand this idea", args: { idea: "recipe app", pipeline: "website" } }
+delegate { skillId: "list_pipelines", message: "show available pipelines" }
+```
+
+**Available pipelines:**
+
+|Pipeline      |Stack                              |Description                          |
+|:-------------|:----------------------------------|:------------------------------------|
+|`app`         |Expo + React Native + TypeScript   |Mobile app with navigation and state |
+|`website`     |Next.js + React + Tailwind CSS     |Website with pages, SEO, and styling |
+|`mcp-server`  |TypeScript + Bun + MCP SDK         |MCP server with tool definitions     |
+|`agent`       |TypeScript + Claude SDK            |AI agent with tool-calling           |
+|`api`         |Fastify + SQLite + TypeScript      |REST/GraphQL API with data layer     |
+
+Each pipeline supports **template variants** (e.g., `saas-starter`, `e-commerce`) and a **quality gate** that scores generated code across multiple dimensions (code quality, type safety, accessibility, etc.) with automatic fix loops.
+
 -----
 
 ## Function reference
@@ -312,6 +375,19 @@ All functions are exposed as MCP tools to Claude Code and are also callable via 
 </details>
 
 <details>
+<summary><strong>Factory Agent · :8087</strong></summary>
+
+|Function          |Parameters                                  |Description                                              |
+|:-----------------|:-------------------------------------------|:--------------------------------------------------------|
+|`normalize_intent`|`idea`, `pipeline?`                         |Expand vague idea into detailed JSON spec                |
+|`create_project`  |`idea`, `pipeline?`, `outputDir?`, `variant?`|Full pipeline: match → normalize → scaffold → generate → QA|
+|`quality_gate`    |`code`, `spec?`, `pipeline?`, `variant?`    |"Ralph Mode" multi-dimension code review with scoring    |
+|`list_pipelines`  |—                                           |Available pipeline types (app, website, mcp-server, etc.)|
+|`list_templates`  |`pipeline?`                                 |Template variants per pipeline                           |
+
+</details>
+
+<details>
 <summary><strong>Project context</strong></summary>
 
 |Function             |Parameters                              |Description                                 |
@@ -362,7 +438,7 @@ All functions are exposed as MCP tools to Claude Code and are also callable via 
 |`persona-{name}`|System prompt for any agent                |
 |`delegate-task` |Delegate with auto-injected project context|
 
-Available personas: `orchestrator`, `shell-agent`, `web-agent`, `ai-agent`, `code-agent`, `knowledge-agent`.
+Available personas: `orchestrator`, `shell-agent`, `web-agent`, `ai-agent`, `code-agent`, `knowledge-agent`, `factory-agent`.
 
 -----
 
@@ -536,13 +612,20 @@ Discovers the agent card via `GET /.well-known/agent.json` and persists to `~/.a
 a2a-mcp-server/
 ├── src/
 │   ├── server.ts              # MCP entry + orchestrator (port 8080)
-│   ├── workers/               # Worker agent implementations
+│   ├── workers/               # Worker agent implementations (7 agents)
+│   ├── pipelines/             # Project generation pipeline definitions
+│   ├── templates/             # Scaffolding templates per pipeline
 │   ├── personas/              # Agent persona .md files (hot-reload)
 │   ├── plugins/               # Skill plugins (hot-reload)
+│   ├── sandbox.ts             # Isolated Bun subprocess executor
+│   ├── sandbox-store.ts       # Variable persistence + FTS5 indexing
+│   ├── sandbox-prelude.ts     # TypeScript prelude injected into sandbox
+│   ├── a2a.ts                 # sendTask / discoverAgent helpers
+│   ├── memory.ts              # Dual-write: SQLite + Obsidian
+│   ├── skills.ts              # Built-in skill registry
 │   └── ...
 ├── scripts/                   # Utility scripts
 ├── CLAUDE.md                  # Claude Code project context
-├── workspace_manager_app.md   # Workspace manager spec
 └── package.json
 ```
 
