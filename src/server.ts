@@ -1650,7 +1650,32 @@ async function startHttpServer() {
   });
 
   // ── Webhook ingestion endpoint ──────────────────────────────
-  app.post<{ Params: { id: string }; Body: unknown }>("/webhooks/:id", async (request, reply) => {
+  async function webhookAuthGuard(request: any, reply: any) {
+    // If no A2A API key is configured, allow all requests (existing behavior)
+    const apiKey = (CONFIG as any).A2A_API_KEY;
+    if (!apiKey) {
+      return;
+    }
+
+    // Allow loopback callers without API key
+    const ip = request.ip as string | undefined;
+    if (
+      ip === "127.0.0.1" ||
+      ip === "::1" ||
+      ip === "::ffff:127.0.0.1" ||
+      (ip && ip.startsWith("127.0.0."))
+    ) {
+      return;
+    }
+
+    const headerKey = request.headers["x-api-key"];
+    if (headerKey !== apiKey) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+  }
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/webhooks/:id", { onRequest: webhookAuthGuard }, async (request, reply) => {
     const webhookId = request.params.id;
     const webhook = getWebhook(webhookId);
     if (!webhook) {
