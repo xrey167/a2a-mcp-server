@@ -21,6 +21,9 @@ import { memory } from "./memory.js";
 import { createTask, markWorking, markCompleted, markFailed, markCanceled, emitProgress, getTask, listTasks, pruneTasks, toA2AResult, taskEvents } from "./task-store.js";
 import { initAgentRegistry, registerAgent, unregisterAgent, getExternalCards, getRegistryEntries, getAgentApiKey } from "./agent-registry.js";
 import { AgentError } from "./errors.js";
+import { randomUUID } from "crypto";
+import { executeSandbox, setAdapters } from "./sandbox.js";
+import { sandboxStore } from "./sandbox-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -418,6 +421,60 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     case "design_workflow":
       return startDesignWorkflow(args);
 
+    case "sandbox_execute": {
+      const code = args.code as string;
+      if (!code) throw new Error("sandbox_execute requires code");
+      const sessionId = (args.sessionId as string) ?? `sandbox-${randomUUID()}`;
+      const timeout = (args.timeout as number) ?? 30_000;
+
+      const result = await executeSandbox({
+        code,
+        sessionId,
+        dispatch: (sid, a) => dispatchSkill(sid, a, ""),
+        timeout,
+      });
+
+      // Build compact response
+      const summary: Record<string, unknown> = {
+        sessionId,
+        result: result.result,
+      };
+      if (result.error) summary.error = result.error;
+      if (result.vars.length > 0) summary.vars = result.vars;
+      if (result.indexed.length > 0) {
+        summary.indexed = result.indexed.map(name => {
+          const raw = sandboxStore.getVar(sessionId, name);
+          return `${name} (${raw ? raw.length : 0} bytes, FTS5 indexed)`;
+        });
+      }
+      return JSON.stringify(summary, null, 2);
+    }
+
+    case "sandbox_vars": {
+      const sessionId = args.sessionId as string;
+      if (!sessionId) throw new Error("sandbox_vars requires sessionId");
+      const action = (args.action as string) ?? "list";
+
+      switch (action) {
+        case "list":
+          return JSON.stringify(sandboxStore.listVars(sessionId), null, 2);
+        case "get": {
+          const varName = args.varName as string;
+          if (!varName) throw new Error("sandbox_vars get requires varName");
+          const val = sandboxStore.getVar(sessionId, varName);
+          return val ?? `Variable not found: ${varName}`;
+        }
+        case "delete": {
+          const varName = args.varName as string;
+          if (!varName) throw new Error("sandbox_vars delete requires varName");
+          sandboxStore.deleteVar(sessionId, varName);
+          return `Deleted ${varName} from session ${sessionId}`;
+        }
+        default:
+          throw new Error(`Unknown sandbox_vars action: ${action}`);
+      }
+    }
+
     default: {
       // Plugin skills (hot-loaded from src/plugins/)
       const pluginSkill = pluginSkills.get(skillId);
@@ -660,6 +717,36 @@ const designWorkflowSkill = {
   },
 };
 
+const sandboxExecuteSkill = {
+  id: "sandbox_execute",
+  name: "Sandbox Execute",
+  description: "Run TypeScript code in an isolated sandbox with access to all worker skills via skill(). Variables persist across calls per session. Large results auto-indexed for FTS5 search. Use this instead of delegate when you need to process/filter data locally to reduce token usage.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      code: { type: "string", description: "TypeScript code to run. Has access to: skill(id, args), search(varName, query), adapters(), describe(skillId), batch(items, fn, opts?), $vars, pick(), sum(), count(), first(), last(), table(). The return value is sent back." },
+      sessionId: { type: "string", description: "Session ID for variable persistence (auto-generated if omitted)" },
+      timeout: { type: "number", description: "Timeout in ms (default 30000)" },
+    },
+    required: ["code"],
+  },
+};
+
+const sandboxVarsSkill = {
+  id: "sandbox_vars",
+  name: "Sandbox Variables",
+  description: "List, inspect, or delete persisted sandbox variables for a session",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      sessionId: { type: "string", description: "Session ID" },
+      action: { type: "string", description: "list (default), get, or delete", enum: ["list", "get", "delete"] },
+      varName: { type: "string", description: "Variable name (required for get/delete)" },
+    },
+    required: ["sessionId"],
+  },
+};
+
 // ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
   { name: "a2a-mcp-bridge", version: "3.0.0" },
@@ -685,6 +772,8 @@ function getAllToolDefs() {
     { name: getProjectContextSkill.id, description: getProjectContextSkill.description, inputSchema: getProjectContextSkill.inputSchema },
     { name: setProjectContextSkill.id, description: setProjectContextSkill.description, inputSchema: setProjectContextSkill.inputSchema },
     { name: designWorkflowSkill.id, description: designWorkflowSkill.description, inputSchema: designWorkflowSkill.inputSchema },
+    { name: sandboxExecuteSkill.id, description: sandboxExecuteSkill.description, inputSchema: sandboxExecuteSkill.inputSchema },
+    { name: sandboxVarsSkill.id, description: sandboxVarsSkill.description, inputSchema: sandboxVarsSkill.inputSchema },
     // local skills from skills.ts (backwards compat)
     ...SKILLS.map(s => ({ name: s.id, description: s.description, inputSchema: s.inputSchema })),
   ];
@@ -1115,6 +1204,18 @@ async function main() {
   for (const card of workerCards) {
     process.stderr.write(`  - ${card.name}: ${card.skills.map(s => s.id).join(", ")}\n`);
   }
+
+  // Clean up old sandbox vars and populate adapter list
+  sandboxStore.prune(7);
+  const adapterList: Array<{ id: string; description: string }> = [];
+  const adapterSchemas = new Map<string, any>();
+  for (const card of workerCards) {
+    for (const skill of card.skills) {
+      adapterList.push({ id: skill.id, description: skill.description ?? skill.name });
+    }
+  }
+  setAdapters(adapterList, adapterSchemas);
+  process.stderr.write(`[orchestrator] sandbox adapters: ${adapterList.length} skills registered\n`);
 
   // Start HTTP + MCP
   await startHttpServer();
