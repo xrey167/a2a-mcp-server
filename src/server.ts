@@ -39,6 +39,41 @@ function isAllowedUrl(url: string): boolean {
   }
 }
 
+// Blocked hostname/IP patterns for external agent registration.
+// Prevents SSRF via cloud metadata endpoints and RFC-1918 private ranges.
+const BLOCKED_HOSTNAME_PATTERNS: RegExp[] = [
+  /^localhost$/i,                         // loopback by name
+  /^127\./,                               // IPv4 loopback
+  /^0\./,                                 // reserved / unspecified (0.0.0.0)
+  /^10\./,                                // RFC 1918 – Class A private
+  /^172\.(1[6-9]|2\d|3[01])\./,          // RFC 1918 – Class B private (172.16-31.x)
+  /^192\.168\./,                          // RFC 1918 – Class C private
+  /^169\.254\./,                          // link-local / cloud metadata (AWS, GCP, Azure)
+  /^100\.100\.100\./,                     // Alibaba Cloud metadata
+  /^::1$/,                                // IPv6 loopback
+  /^fc[0-9a-f]{2}:/i,                     // IPv6 ULA (fc00::/7)
+  /^fe[89ab][0-9a-f]:/i,                  // IPv6 link-local (fe80::/10)
+];
+
+/**
+ * Validates a URL for external agent registration (SSRF prevention).
+ * Blocks all private/internal address ranges and cloud-metadata endpoints
+ * while allowing legitimate public URLs.
+ */
+function isAllowedExternalAgentUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    for (const pattern of BLOCKED_HOSTNAME_PATTERNS) {
+      if (pattern.test(host)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Worker definitions ──────────────────────────────────────────
 const WORKERS = [
   { name: "shell",     path: join(__dirname, "workers/shell.ts"),     port: 8081 },
@@ -694,6 +729,9 @@ async function dispatchSkill(
     case "register_agent": {
       const url = args?.url as string;
       if (!url) throw new Error("register_agent requires url");
+      if (!isAllowedExternalAgentUrl(url)) {
+        throw new AgentError("INVALID_ARGS", `Blocked URL: SSRF check failed — internal, private, or disallowed address: ${url}`);
+      }
       const apiKey = args?.apiKey as string | undefined;
       const card = await registerAgent(url, apiKey);
       invalidateSkillRouter();
