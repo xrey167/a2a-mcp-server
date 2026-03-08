@@ -652,8 +652,8 @@ async function dispatchSkill(
       return delegate({ ...args, message: text });
 
     case "delegate_async": {
-      const skillIdArg = args?.skillId as string | undefined;
-      const agentUrl = args?.agentUrl as string | undefined;
+      const skillIdArg = args?.skillId != null ? String(args.skillId) : undefined;
+      const agentUrl = args?.agentUrl != null ? String(args.agentUrl) : undefined;
       const task = createTask({ skillId: skillIdArg, workerUrl: agentUrl });
       markWorking(task.id);
       delegate({ ...args, message: text })
@@ -667,7 +667,7 @@ async function dispatchSkill(
 
     case "get_task_result": {
       pruneTasks(7 * 24 * 60 * 60 * 1000);
-      const taskId = args?.taskId as string;
+      const taskId = String(args?.taskId ?? "");
       if (!taskId) throw new Error("get_task_result requires taskId");
       const task = getTask(taskId);
       if (!task) return JSON.stringify({ status: "not_found" });
@@ -679,29 +679,29 @@ async function dispatchSkill(
 
     case "get_session_history": {
       pruneStaleSessionsImpl();
-      const sessionId = args?.sessionId as string;
+      const sessionId = String(args?.sessionId ?? "");
       if (!sessionId) throw new Error("get_session_history requires sessionId");
       return JSON.stringify(loadSessionHistory(sessionId), null, 2);
     }
 
     case "clear_session": {
-      const sessionId = args?.sessionId as string;
+      const sessionId = String(args?.sessionId ?? "");
       if (!sessionId) throw new Error("clear_session requires sessionId");
       memory.forget(SESSION_AGENT, sessionId);
       return `Session ${sessionId} cleared`;
     }
 
     case "register_agent": {
-      const url = args?.url as string;
+      const url = String(args?.url ?? "");
       if (!url) throw new Error("register_agent requires url");
-      const apiKey = args?.apiKey as string | undefined;
+      const apiKey = args?.apiKey != null ? String(args.apiKey) : undefined;
       const card = await registerAgent(url, apiKey);
       invalidateSkillRouter();
       return JSON.stringify(card, null, 2);
     }
 
     case "unregister_agent": {
-      const url = args?.url as string;
+      const url = String(args?.url ?? "");
       if (!url) throw new Error("unregister_agent requires url");
       const existed = unregisterAgent(url);
       invalidateSkillRouter();
@@ -715,21 +715,21 @@ async function dispatchSkill(
     }
 
     case "memory_search": {
-      const query = args?.query as string;
+      const query = String(args?.query ?? "");
       if (!query) throw new Error("memory_search requires query");
-      const agent = args?.agent as string | undefined;
+      const agent = args?.agent != null ? String(args.agent) : undefined;
       return JSON.stringify(memory.search(query, agent), null, 2);
     }
 
     case "memory_list": {
-      const agent = args?.agent as string;
+      const agent = String(args?.agent ?? "");
       if (!agent) throw new Error("memory_list requires agent");
-      const prefix = args?.prefix as string | undefined;
+      const prefix = args?.prefix != null ? String(args.prefix) : undefined;
       return JSON.stringify(memory.listKeys(agent, prefix), null, 2);
     }
 
     case "memory_cleanup": {
-      const maxAgeDays = args?.maxAgeDays as number;
+      const maxAgeDays = Number(args?.maxAgeDays ?? 0);
       if (!maxAgeDays || maxAgeDays <= 0) throw new Error("memory_cleanup requires maxAgeDays > 0");
       const count = memory.cleanup(maxAgeDays);
       return `Deleted ${count} memories older than ${maxAgeDays} days`;
@@ -740,7 +740,7 @@ async function dispatchSkill(
     }
 
     case "use_mcp_tool": {
-      const toolName = args?.toolName as string;
+      const toolName = String(args?.toolName ?? "");
       if (!toolName) throw new Error("use_mcp_tool requires toolName");
       const toolArgs = (args?.args ?? {}) as Record<string, unknown>;
       return await callMcpTool(toolName, toolArgs);
