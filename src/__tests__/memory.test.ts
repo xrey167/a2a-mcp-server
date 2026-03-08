@@ -1,15 +1,22 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { memory } from "../memory.js";
+import { join } from "path";
+import { tmpdir } from "os";
+import { unlinkSync } from "fs";
+
+// Use an isolated temp DB so tests never touch the user's real ~/.a2a-memory.db
+const testDbPath = join(tmpdir(), `a2a-memory-test-${Date.now()}.db`);
+process.env.A2A_MEMORY_DB = testDbPath;
+
+// Dynamic import AFTER env is set so module picks up the test DB path
+const { memory } = await import("../memory.js");
 
 const TEST_AGENT = "__test_agent__";
 
-// Clean up after tests
+// Clean up temp DB after tests
 afterAll(() => {
-  // Remove all test keys
-  const keys = memory.listKeys(TEST_AGENT);
-  for (const key of keys) {
-    memory.forget(TEST_AGENT, key);
-  }
+  try { unlinkSync(testDbPath); } catch {}
+  try { unlinkSync(testDbPath + "-wal"); } catch {}
+  try { unlinkSync(testDbPath + "-shm"); } catch {}
 });
 
 describe("Memory - basic CRUD", () => {
