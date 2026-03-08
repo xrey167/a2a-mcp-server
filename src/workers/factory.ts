@@ -658,14 +658,22 @@ async function handleSkill(
 
       // Match template variant first
       const match = await matchTemplate(idea, pipelineId);
-      const result = await normalizeIntent(idea, pipelineId, match.variantSpec);
+      const specJsonString = await normalizeIntent(idea, pipelineId, match.variantSpec);
+      const spec = JSON.parse(specJsonString);
+
+      // Add match info to the spec object
+      spec.templateMatch = {
+        variantId: match.variantId,
+        confidence: match.confidence,
+        reason: match.reason,
+      };
 
       // Include match info in response
       const matchInfo = match.variantId
         ? `\n\n--- Template Match ---\nVariant: ${match.variantId} (${match.confidence} confidence)\nReason: ${match.reason}`
         : "\n\n--- Template Match ---\nNo variant matched — using base template.";
 
-      return result + matchInfo;
+      return JSON.stringify(spec, null, 2) + matchInfo;
     }
 
     case "create_project": {
