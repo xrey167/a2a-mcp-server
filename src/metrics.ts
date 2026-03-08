@@ -51,10 +51,11 @@ export function startSkillTimer(skillId: string, worker: string): (error?: strin
 
 /** Record a completed skill call with latency. */
 export function recordSkillCall(skillId: string, worker: string, latencyMs: number, error?: string): void {
-  let metric = skillMetrics.get(skillId);
+  const key = `${worker}:${skillId}`;
+  let metric = skillMetrics.get(key);
   if (!metric) {
     metric = { skillId, worker, calls: 0, errors: 0, latencies: [], lastCalled: 0 };
-    skillMetrics.set(skillId, metric);
+    skillMetrics.set(key, metric);
   }
 
   metric.calls++;
