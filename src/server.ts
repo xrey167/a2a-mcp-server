@@ -80,9 +80,22 @@ function isAllowedUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-    if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") return false;
-    const port = parseInt(parsed.port || "80", 10);
-    return ALLOWED_PORTS.has(port);
+
+    // Local workers: localhost on allowed ports
+    if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+      const port = parseInt(parsed.port || "80", 10);
+      return ALLOWED_PORTS.has(port);
+    }
+
+    // Remote workers: exact URL match against configured remoteWorkers
+    const origin = parsed.origin;
+    for (const allowed of ALLOWED_REMOTE_URLS) {
+      try {
+        if (new URL(allowed).origin === origin) return true;
+      } catch {}
+    }
+
+    return false;
   } catch {
     return false;
   }
@@ -115,6 +128,11 @@ const WORKERS = (() => {
 })();
 
 const ALLOWED_PORTS = new Set(WORKERS.map(w => w.port));
+
+// Remote workers configured via config (not spawned locally)
+const REMOTE_WORKERS = CONFIG.remoteWorkers ?? [];
+// Build set of allowed remote URLs for SSRF validation
+const ALLOWED_REMOTE_URLS = new Set(REMOTE_WORKERS.map(rw => rw.url));
 
 const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 const workerFailures = new Map<string, number>();
@@ -153,7 +171,8 @@ function spawnWorkers() {
 }
 
 async function discoverWorkers(): Promise<AgentCard[]> {
-  const results = await Promise.allSettled(
+  // Discover local workers
+  const localResults = await Promise.allSettled(
     WORKERS.map(async (w) => {
       for (let attempt = 0; attempt < 5; attempt++) {
         try {
@@ -168,7 +187,28 @@ async function discoverWorkers(): Promise<AgentCard[]> {
       return null;
     })
   );
-  return results.flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+
+  // Discover remote workers (configured via remoteWorkers)
+  const remoteResults = await Promise.allSettled(
+    REMOTE_WORKERS.map(async (rw) => {
+      try {
+        const card = await discoverAgent(rw.url);
+        process.stderr.write(`[orchestrator] discovered remote worker: ${rw.name} at ${rw.url}\n`);
+        // Store API key in agent registry for auth during task routing
+        if (rw.apiKey) {
+          const { registerAgent: regAgent } = await import("./agent-registry.js");
+          await regAgent(rw.url, rw.apiKey).catch(() => {});
+        }
+        return card;
+      } catch (err) {
+        process.stderr.write(`[orchestrator] failed to discover remote worker ${rw.name} at ${rw.url}: ${err}\n`);
+        return null;
+      }
+    })
+  );
+
+  const all = [...localResults, ...remoteResults];
+  return all.flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 }
 
 // ── Build skill-to-worker map ───────────────────────────────────
@@ -1912,6 +1952,29 @@ async function pollWorkerHealth() {
       }
     }
   }
+
+  // Poll remote workers
+  for (const rw of REMOTE_WORKERS) {
+    try {
+      const res = await fetchWithTimeout(`${rw.url}/healthz`, {}, 5_000);
+      const body = await res.json() as { uptime?: number };
+      const prev = workerHealth.get(rw.name);
+      workerHealth.set(rw.name, { healthy: true, failCount: 0, lastCheck: Date.now(), uptime: body.uptime });
+      updateAgentHealth(rw.name, true);
+      if (prev && !prev.healthy) {
+        process.stderr.write(`[orchestrator] remote worker ${rw.name} recovered\n`);
+      }
+    } catch {
+      const prev = workerHealth.get(rw.name);
+      const failCount = (prev?.failCount ?? 0) + 1;
+      const healthy = failCount < 3;
+      workerHealth.set(rw.name, { healthy, failCount, lastCheck: Date.now() });
+      updateAgentHealth(rw.name, healthy);
+      if (failCount === 3) {
+        process.stderr.write(`[orchestrator] remote worker ${rw.name} marked unhealthy after ${failCount} failures\n`);
+      }
+    }
+  }
 }
 
 // ── A2A HTTP Server ─────────────────────────────────────────────
@@ -2151,10 +2214,87 @@ async function startHttpServer() {
   // ── Metrics HTTP endpoint ─────────────────────────────────────
   app.get("/metrics", async () => getMetricsSnapshot());
 
+  // ── Dashboard ─────────────────────────────────────────────────
+  app.get("/dashboard", async (_req, reply) => {
+    const health: Record<string, unknown> = {};
+    for (const w of WORKERS) {
+      health[w.name] = workerHealth.get(w.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+    }
+    for (const rw of REMOTE_WORKERS) {
+      health[`remote:${rw.name}`] = workerHealth.get(rw.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+    }
+    const metrics = getMetricsSnapshot();
+    const breakers = getAllBreakerStats();
+    const tracingStats = getTracingStats();
+    const cacheStats = getCacheStats();
+
+    reply.type("text/html");
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>a2a-mcp-server dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px}
+h1{font-size:1.5rem;margin-bottom:8px;color:#f8fafc}
+.sub{color:#94a3b8;margin-bottom:24px;font-size:.875rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:32px}
+.card{background:#1e293b;border-radius:12px;padding:16px;border:1px solid #334155}
+.card h3{font-size:.875rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+.worker{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:.875rem}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.dot.ok{background:#22c55e}.dot.fail{background:#ef4444}.dot.warn{background:#f59e0b}
+.stat{display:flex;justify-content:space-between;margin-bottom:4px;font-size:.8rem}
+.stat .label{color:#94a3b8}.stat .val{color:#f8fafc;font-variant-numeric:tabular-nums}
+.section{margin-bottom:32px}
+.section h2{font-size:1.1rem;margin-bottom:12px;color:#f8fafc}
+table{width:100%;border-collapse:collapse;font-size:.8rem}
+th{text-align:left;color:#94a3b8;padding:8px;border-bottom:1px solid #334155}
+td{padding:8px;border-bottom:1px solid #1e293b}
+.mono{font-family:ui-monospace,monospace}
+</style></head><body>
+<h1>a2a-mcp-server</h1>
+<p class="sub">Uptime: ${Math.floor(process.uptime())}s &middot; Workers: ${Object.keys(health).length} &middot; Profile: ${CONFIG.profile ?? "full"}</p>
+<div class="section"><h2>Workers</h2><div class="grid">
+${Object.entries(health).map(([name, h]: [string, any]) => `
+<div class="card">
+  <div class="worker"><span class="dot ${h.healthy ? "ok" : h.failCount > 0 ? "fail" : "warn"}"></span><strong>${name}</strong></div>
+  <div class="stat"><span class="label">Status</span><span class="val">${h.healthy ? "healthy" : "unhealthy"}</span></div>
+  <div class="stat"><span class="label">Fail count</span><span class="val">${h.failCount ?? 0}</span></div>
+  ${h.uptime ? `<div class="stat"><span class="label">Uptime</span><span class="val">${Math.floor(h.uptime)}s</span></div>` : ""}
+</div>`).join("")}
+</div></div>
+<div class="section"><h2>Skill Metrics</h2>
+<table><thead><tr><th>Skill</th><th>Calls</th><th>Errors</th><th>p50</th><th>p95</th><th>p99</th></tr></thead><tbody>
+${Object.entries((metrics as any).skills ?? {}).map(([id, m]: [string, any]) => `
+<tr><td class="mono">${id}</td><td>${m.calls}</td><td>${m.errors}</td><td>${m.p50?.toFixed(0) ?? "-"}ms</td><td>${m.p95?.toFixed(0) ?? "-"}ms</td><td>${m.p99?.toFixed(0) ?? "-"}ms</td></tr>`).join("")}
+</tbody></table></div>
+<div class="grid">
+<div class="card"><h3>Circuit Breakers</h3>
+${Object.entries(breakers).map(([name, b]: [string, any]) => `
+<div class="stat"><span class="label">${name}</span><span class="val">${b.state}</span></div>`).join("")}
+</div>
+<div class="card"><h3>Cache</h3>
+<div class="stat"><span class="label">Entries</span><span class="val">${(cacheStats as any).size ?? 0}</span></div>
+<div class="stat"><span class="label">Hits</span><span class="val">${(cacheStats as any).hits ?? 0}</span></div>
+<div class="stat"><span class="label">Misses</span><span class="val">${(cacheStats as any).misses ?? 0}</span></div>
+</div>
+<div class="card"><h3>Traces</h3>
+<div class="stat"><span class="label">Total</span><span class="val">${(tracingStats as any).totalTraces ?? 0}</span></div>
+<div class="stat"><span class="label">Active</span><span class="val">${(tracingStats as any).activeTraces ?? 0}</span></div>
+</div>
+</div>
+<script>setTimeout(()=>location.reload(),10000)</script>
+</body></html>`;
+  });
+
   app.get("/healthz", async () => {
     const health: Record<string, unknown> = {};
     for (const w of WORKERS) {
       health[w.name] = workerHealth.get(w.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+    }
+    for (const rw of REMOTE_WORKERS) {
+      const h = workerHealth.get(rw.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+      health[`remote:${rw.name}`] = { ...h, url: rw.url };
     }
     return { status: "ok", agent: "orchestrator", uptime: process.uptime(), workers: health };
   });

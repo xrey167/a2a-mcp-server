@@ -28,7 +28,11 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 
 ## Architecture
 
-**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns all 8 worker processes via `Bun.spawn`, then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker).
+**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns local worker processes via `Bun.spawn` (filtered by config `workers.enabled` and `profile`), then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker). Also discovers `remoteWorkers` configured in `~/.a2a-mcp/config.json` (no local process spawned).
+
+**Profiles:** `full` (all 8 workers), `lite` (shell+web+ai), `data` (shell+web+ai+data). Set via `{ "profile": "lite" }` in config or `bun src/cli.ts init --lite`.
+
+**Remote workers:** Any A2A agent running elsewhere can be added via `remoteWorkers` config. The orchestrator discovers it, health-polls it, and routes skills to it. The URL is whitelisted in SSRF validation automatically.
 
 **Worker agents** (standalone Fastify HTTP servers, each a separate process):
 | File | Port | Skills |

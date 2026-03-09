@@ -98,8 +98,10 @@ git clone https://github.com/xrey167/a2a-mcp-server
 cd a2a-mcp-server
 bun install
 
-# Create default config + .env.example
-bun src/cli.ts init
+# Create default config (choose a profile)
+bun src/cli.ts init             # all 8 workers (full)
+bun src/cli.ts init --lite      # shell + web + ai only (fastest)
+bun src/cli.ts init --data      # shell + web + ai + data
 
 # See available workers
 bun src/cli.ts workers
@@ -107,16 +109,35 @@ bun src/cli.ts workers
 
 ### Configure workers (optional)
 
-Disable workers you don't need in `~/.a2a-mcp/config.json`:
+Use a **profile** for quick setup, or fine-tune individual workers:
 
 ```json
+// ~/.a2a-mcp/config.json
+
+// Option 1: Use a preset profile
+{ "profile": "lite" }
+
+// Option 2: Disable specific workers
 {
   "workers": [
     { "name": "design", "port": 8086, "enabled": false },
     { "name": "code", "port": 8084, "enabled": false }
   ]
 }
+
+// Option 3: Add remote A2A agents
+{
+  "remoteWorkers": [
+    { "name": "my-agent", "url": "https://agent.example.com", "apiKey": "secret" }
+  ]
+}
 ```
+
+| Profile | Workers | Best for |
+|---------|---------|----------|
+| `full` | All 8 | Full-stack development |
+| `lite` | shell, web, ai | Quick tasks, low resource usage |
+| `data` | shell, web, ai, data | Data processing + analysis |
 
 ### Register with Claude Code (MCP)
 
@@ -714,6 +735,12 @@ Fine-grained control via JSON (see `.env.example` for quick setup):
 ```
 
 </details>
+
+-----
+
+## Dashboard
+
+While the server is running, open **http://localhost:8080/dashboard** for a live monitoring view showing worker health, skill metrics (latency p50/p95/p99, error rates), circuit breaker states, cache stats, and tracing info. Auto-refreshes every 10 seconds.
 
 -----
 

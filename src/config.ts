@@ -24,6 +24,15 @@ const WorkerConfigSchema = z.object({
   enabled: z.boolean().optional().default(true),
 });
 
+const RemoteWorkerSchema = z.object({
+  /** Display name for the remote worker */
+  name: z.string(),
+  /** Full URL of the remote A2A agent (e.g. "https://my-agent.example.com:9090") */
+  url: z.string().url(),
+  /** API key for authenticating with the remote agent */
+  apiKey: z.string().optional(),
+});
+
 const SearchConfigSchema = z.object({
   /** Max results per search query */
   maxResults: z.number().int().positive().optional().default(50),
@@ -81,11 +90,15 @@ const ServerConfigSchema = z.object({
 const ConfigSchema = z.object({
   server: ServerConfigSchema.optional(),
   workers: z.array(WorkerConfigSchema).optional(),
+  /** Remote A2A agents to discover and route to (no local process spawned) */
+  remoteWorkers: z.array(RemoteWorkerSchema).optional(),
   search: SearchConfigSchema.optional(),
   sandbox: SandboxConfigSchema.optional(),
   truncation: TruncationConfigSchema.optional(),
   timeouts: TimeoutsConfigSchema.optional(),
   web: WebConfigSchema.optional(),
+  /** Worker profile preset: "full" (all), "lite" (shell+web+ai), "data" (shell+web+ai+data) */
+  profile: z.enum(["full", "lite", "data"]).optional(),
   /** Extra environment variables to pass to workers */
   env: z.record(z.string()).optional(),
 }).strict();
@@ -103,9 +116,18 @@ const DEFAULTS = {
 };
 
 function applyDefaults(raw: z.infer<typeof ConfigSchema>): Config {
+  // Apply profile presets — these set workers.enabled based on the profile name.
+  // Explicit workers config always takes priority over profile.
+  let workers = raw.workers;
+  if (!workers && raw.profile) {
+    workers = applyProfile(raw.profile);
+  }
+
   return {
     server: { ...DEFAULTS.server, ...raw.server },
-    workers: raw.workers,
+    workers,
+    remoteWorkers: raw.remoteWorkers,
+    profile: raw.profile,
     search: { ...DEFAULTS.search, ...raw.search },
     sandbox: { ...DEFAULTS.sandbox, ...raw.sandbox },
     truncation: { ...DEFAULTS.truncation, ...raw.truncation },
@@ -115,9 +137,40 @@ function applyDefaults(raw: z.infer<typeof ConfigSchema>): Config {
   };
 }
 
+/** Map profile names to worker enabled/disabled configs */
+function applyProfile(profile: string): z.infer<typeof WorkerConfigSchema>[] {
+  const all = ["shell", "web", "ai", "code", "knowledge", "design", "factory", "data"];
+  const ports: Record<string, number> = { shell: 8081, web: 8082, ai: 8083, code: 8084, knowledge: 8085, design: 8086, factory: 8087, data: 8088 };
+
+  let enabled: Set<string>;
+  switch (profile) {
+    case "lite":
+      enabled = new Set(["shell", "web", "ai"]);
+      break;
+    case "data":
+      enabled = new Set(["shell", "web", "ai", "data"]);
+      break;
+    case "full":
+    default:
+      enabled = new Set(all);
+      break;
+  }
+
+  return all.map(name => ({
+    name,
+    path: `workers/${name}.ts`,
+    port: ports[name],
+    enabled: enabled.has(name),
+  }));
+}
+
+export type RemoteWorkerConfig = z.infer<typeof RemoteWorkerSchema>;
+
 export type Config = {
   server: z.infer<typeof ServerConfigSchema>;
   workers?: z.infer<typeof WorkerConfigSchema>[];
+  remoteWorkers?: RemoteWorkerConfig[];
+  profile?: string;
   search: z.infer<typeof SearchConfigSchema>;
   sandbox: z.infer<typeof SandboxConfigSchema>;
   truncation: z.infer<typeof TruncationConfigSchema>;
