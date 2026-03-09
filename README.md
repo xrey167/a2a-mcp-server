@@ -5,13 +5,13 @@
   <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
   <img src="https://img.shields.io/badge/protocol-ACP_(Zed)-ef4444" alt="ACP" />
   <img src="https://img.shields.io/badge/agents-8_workers-f59e0b" alt="Agents" />
-  <img src="https://img.shields.io/badge/MCP_tools-10_consolidated-8b5cf6" alt="Tools" />
+  <img src="https://img.shields.io/badge/MCP_tools-21-8b5cf6" alt="Tools" />
   <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
 </p>
 
 # a2a-mcp-server
 
-A **full multi-agent system** — not just a bridge — that connects Anthropic’s [MCP](https://modelcontextprotocol.io) and Google’s [A2A](https://a2a-protocol.org) protocols. One orchestrator manages eight specialized worker agents, routes tasks intelligently, and maintains shared memory across all agents. Includes circuit breakers for resilience, a DAG workflow engine, webhook ingestion, per-skill metrics, and a data processing pipeline.
+A **full multi-agent system** — not just a bridge — that connects Anthropic’s [MCP](https://modelcontextprotocol.io) and Google’s [A2A](https://a2a-protocol.org) protocols. One orchestrator manages eight specialized worker agents, routes tasks intelligently, and maintains shared memory across all agents. Includes circuit breakers, a DAG workflow engine, webhook ingestion, per-skill metrics, an event bus, skill pipelines, multi-agent collaboration, distributed tracing, skill caching, and capability negotiation.
 
 Claude Code connects via MCP (stdio), Zed connects via ACP (stdin/stdout NDJSON). Agents talk to each other via A2A (HTTP + JSON-RPC 2.0). Three protocols, each doing what it’s best at.
 
@@ -35,12 +35,18 @@ Most [A2A-MCP integrations](https://github.com/modelcontextprotocol/servers) are
 |**Agents**       |Proxy to external agents|8 built-in workers with real logic           |
 |**Memory**       |None                    |Dual-write: SQLite (FTS5) + Obsidian markdown|
 |**Routing**      |Manual                  |Smart auto-routing via AI agent              |
-|**MCP surface**  |One tool per skill      |10 consolidated tools (MCX-inspired)         |
+|**MCP surface**  |One tool per skill      |21 tools (MCX-inspired consolidation)        |
 |**Extensibility**|Code changes            |Hot-reload plugins + personas, no restart    |
 |**Resilience**   |None                    |Circuit breakers, retry with backoff, cascading failure isolation|
 |**Observability**|None                    |Per-skill latency percentiles (p50/p95/p99), error rates, worker utilization|
 |**Workflows**    |None                    |DAG workflow engine with parallel steps, template refs, retry/skip/fail policies|
 |**Webhooks**     |None                    |HMAC-SHA256 verified webhook ingestion with payload mapping|
+|**Event bus**    |None                    |Pub/sub with topic wildcards, replay, dead letter queue|
+|**Collaboration**|None                    |Fan-out, consensus, debate, and map-reduce multi-agent protocols|
+|**Tracing**      |None                    |OpenTelemetry-style distributed traces with waterfall view|
+|**Caching**      |None                    |LRU skill cache with per-skill TTL and content-addressable keys|
+|**Negotiation**  |None                    |SemVer-aware capability routing with health + load scoring|
+|**Pipelines**    |None                    |Declarative skill composition with pipe() chaining|
 |**Security**     |Basic tokens            |Prompt injection prevention, SSRF guards, path traversal protection, OAuth2, AES-256-GCM credential sync|
 |**Protocols**    |MCP only                |MCP + ACP (Zed) + A2A                        |
 |**Runtime**      |Python (most)           |TypeScript / Bun                             |
@@ -56,8 +62,8 @@ Claude Code                Zed Editor
     ▼                          ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │                              ORCHESTRATOR · :8080                                │
-│     smart routing · project context · sessions · sandbox · workflow engine        │
-│   circuit breakers · metrics · webhooks · memory · plugins · security            │
+│  smart routing · sandbox · workflow engine · event bus · skill pipelines          │
+│  circuit breakers · metrics · webhooks · tracing · cache · collaboration         │
 └──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬───┘
    │          │          │          │          │          │          │          │
    │          │          │    A2A (HTTP + JSON-RPC 2.0)  │          │          │
@@ -382,26 +388,142 @@ delegate { skillId: "list_pipelines", message: "show available pipelines" }
 
 Each pipeline supports **template variants** and a **quality gate** ("Ralph Mode") that scores generated code across multiple dimensions (code quality, type safety, accessibility, etc.) with automatic fix loops.
 
+### 📡 Event bus
+
+Real-time pub/sub between agents with topic-based routing, wildcard matching, event replay, and dead letter queue.
+
+```
+# Publish an event
+event_publish { topic: "agent.shell.completed", data: { exitCode: 0 } }
+
+# Subscribe with wildcards
+event_subscribe { pattern: "agent.*", name: "my-listener" }
+
+# Replay missed events
+event_replay { pattern: "workflow.#", since: "2025-01-01T00:00:00Z", limit: 100 }
+```
+
+Topic patterns: `*` matches one segment, `#` matches multiple. Events auto-published on agent completion/failure. Available as MCP resource at `a2a://event-bus`.
+
+### 🔗 Skill composition
+
+Declarative skill pipelines with pipe() semantics — each step's output feeds the next.
+
+```
+# Create a reusable pipeline
+compose_pipeline {
+  name: "fetch-and-analyze",
+  steps: [
+    { skillId: "fetch_url", args: { url: "{{input.url}}", format: "json" } },
+    { skillId: "analyze_data", args: { data: "{{prev.result}}" } }
+  ]
+}
+
+# Execute it
+execute_pipeline { pipeline: "fetch-and-analyze", input: { url: "https://api.example.com/data" } }
+```
+
+Template refs: `{{prev.result}}`, `{{input.*}}`, `{{steps.alias.result}}`. Error strategies: `abort`, `skip`, or `fallback`. Available as MCP resource at `a2a://pipelines`.
+
+### 🤝 Agent collaboration
+
+Multi-agent consensus, debate, and parallel query protocols.
+
+```
+# Fan out to multiple agents and merge results
+collaborate {
+  strategy: "fan_out",
+  query: "What are the security risks in this codebase?",
+  agents: ["ai", "code"],
+  mergeStrategy: "concat"
+}
+
+# Debate: iterative critique and refinement
+collaborate {
+  strategy: "debate",
+  query: "Best database for this use case?",
+  agents: ["ai", "web"],
+  maxRounds: 3
+}
+```
+
+Strategies: `fan_out` (parallel + merge), `consensus` (score + vote), `debate` (iterative refinement), `map_reduce` (distribute + aggregate). Merge options: `concat`, `best_score`, `majority_vote`, `custom` (with LLM merge prompt).
+
+### 🔍 Distributed tracing
+
+OpenTelemetry-style trace/span observability across agent calls with waterfall visualization.
+
+```
+# List recent traces
+list_traces { limit: 20 }
+
+# Get waterfall view of a specific trace
+get_trace { traceId: "abc-123" }
+```
+
+Every delegation auto-creates a trace with child spans per worker call. Tracks timing, status, tags, and events. Available as MCP resource at `a2a://traces`.
+
+### 💾 Skill cache
+
+LRU cache with TTL for idempotent skill results — content-addressable keys via deterministic hashing.
+
+```
+# View cache stats (hit rate, size, top skills)
+cache_stats
+
+# Invalidate a specific skill's cache
+cache_invalidate { skillId: "fetch_url" }
+```
+
+Auto-excludes side-effect skills (`run_shell`, `write_file`, etc.). Per-skill TTL configuration. Available as MCP resource at `a2a://cache`.
+
+### 🎯 Capability negotiation
+
+Version-aware skill routing with multi-dimensional scoring.
+
+```
+# Find the best agent for a skill
+negotiate_capability {
+  skillId: "ask_claude",
+  minVersion: "1.0.0",
+  requiredFeatures: ["streaming"],
+  preferredFeatures: ["function-calling"]
+}
+```
+
+Scores by: version match, required/preferred features, health status, and current load. Auto-populated from worker discovery. Available as MCP resource at `a2a://capabilities`.
+
 -----
 
 ## Function reference
 
-The MCP surface is consolidated into **10 core tools** (MCX-inspired: minimal tool count, maximum capability). All underlying worker skills remain callable via `sandbox_execute` with `skill(id, args)` or `delegate` with `skillId`.
+The MCP surface exposes **21 tools** (MCX-inspired: consolidated where possible, dedicated where needed). All underlying worker skills remain callable via `sandbox_execute` with `skill(id, args)` or `delegate` with `skillId`.
 
 ### MCP tools (exposed to Claude Code / ACP)
 
-|Tool               |Description                                                                      |
-|:-------------------|:--------------------------------------------------------------------------------|
-|`sandbox_execute`   |Execute TypeScript in an isolated sandbox with access to all skills via `skill(id, args)`. Supports var management (`list_vars`, `get_var`, `delete_var`).|
-|`delegate`          |Route a task to a worker agent (sync by default). Set `async: true` for fire-and-forget (returns `taskId`). Pass `taskId` to poll result.|
-|`list_agents`       |List all worker agents, external agents, and their skills.                       |
-|`run_shell_stream`  |Execute shell command with real-time streaming output.                           |
-|`design_workflow`   |Full design pipeline: suggest screens, generate each. Returns `taskId`.          |
-|`factory_workflow`  |Full project generation pipeline. Returns `taskId`.                              |
-|`workflow_execute`  |Execute a DAG workflow with parallel steps, template refs, and error policies.   |
-|`get_metrics`       |Snapshot of per-skill latency percentiles, error rates, and worker utilization.  |
-|`register_webhook`  |Register HMAC-SHA256 verified webhook that dispatches to a skill.               |
-|`list_webhooks`     |List all registered webhooks with activity stats.                                |
+|Tool                    |Description                                                                      |
+|:-----------------------|:--------------------------------------------------------------------------------|
+|`sandbox_execute`       |Execute TypeScript in an isolated sandbox with access to all skills via `skill(id, args)`. Supports var management (`list_vars`, `get_var`, `delete_var`).|
+|`delegate`              |Route a task to a worker agent (sync by default). Set `async: true` for fire-and-forget (returns `taskId`). Pass `taskId` to poll result.|
+|`list_agents`           |List all worker agents, external agents, and their skills.                       |
+|`run_shell_stream`      |Execute shell command with real-time streaming output.                           |
+|`design_workflow`       |Full design pipeline: suggest screens, generate each. Returns `taskId`.          |
+|`factory_workflow`      |Full project generation pipeline. Returns `taskId`.                              |
+|`workflow_execute`      |Execute a DAG workflow with parallel steps, template refs, and error policies.   |
+|`get_metrics`           |Snapshot of per-skill latency percentiles, error rates, and worker utilization.  |
+|`register_webhook`      |Register HMAC-SHA256 verified webhook that dispatches to a skill.               |
+|`list_webhooks`         |List all registered webhooks with activity stats.                                |
+|`event_publish`         |Publish an event to the agent event bus.                                         |
+|`event_subscribe`       |Subscribe to events matching a topic pattern (supports `*` and `#` wildcards).  |
+|`event_replay`          |Replay events from history by topic pattern and timestamp.                       |
+|`compose_pipeline`      |Create a reusable skill pipeline with step chaining and template refs.           |
+|`execute_pipeline`      |Execute a composed pipeline. Returns `taskId`.                                   |
+|`collaborate`           |Multi-agent collaboration: fan-out, consensus, debate, or map-reduce.           |
+|`list_traces`           |List recent distributed traces across agent calls.                               |
+|`get_trace`             |Get the waterfall visualization of a specific trace.                             |
+|`cache_stats`           |Skill cache statistics: hit rate, entries, size.                                  |
+|`cache_invalidate`      |Invalidate cached skill results (by skill or all).                               |
+|`negotiate_capability`  |Find the best agent for a skill based on version, features, health, and load.   |
 
 ### Skills (callable via sandbox or delegate)
 
@@ -562,6 +684,11 @@ All skills below are accessible through `sandbox_execute` using `skill(id, args)
 |`a2a://metrics`            |Per-skill latency percentiles and error rates|
 |`a2a://circuit-breakers`   |Circuit breaker states for all workers   |
 |`a2a://webhooks`           |Registered webhooks and activity stats   |
+|`a2a://event-bus`          |Event bus stats, subscriptions, dead letters|
+|`a2a://traces`             |Recent distributed traces                |
+|`a2a://cache`              |Skill cache statistics                   |
+|`a2a://capabilities`       |Agent capability registry and stats      |
+|`a2a://pipelines`          |Registered skill composition pipelines   |
 
 ### Prompt templates
 
@@ -763,14 +890,33 @@ a2a-mcp-server/
 │   ├── metrics.ts             # Per-skill latency percentiles + error tracking
 │   ├── workflow-engine.ts     # DAG workflow executor with parallel steps
 │   ├── webhooks.ts            # HMAC-SHA256 webhook ingestion + dispatch
+│   ├── event-bus.ts           # Agent event bus (pub/sub with topic wildcards)
+│   ├── skill-composer.ts      # Declarative skill pipeline composition
+│   ├── agent-collaboration.ts # Multi-agent consensus + negotiation protocols
+│   ├── tracing.ts             # Distributed tracing with waterfall visualization
+│   ├── skill-cache.ts         # LRU skill result cache with per-skill TTL
+│   ├── capability-negotiation.ts # Version-aware capability routing
 │   ├── config.ts              # Unified config loader (~/.a2a-mcp/config.json + env)
+│   ├── agent-registry.ts      # External agent registration + persistence
+│   ├── task-store.ts          # Task state management
+│   ├── mcp-registry.ts        # External MCP server discovery + lazy connect
+│   ├── persona-loader.ts      # Hot-reload persona markdown files
+│   ├── skill-loader.ts        # Hot-reload plugin skill modules
+│   ├── worker-harness.ts      # Worker process lifecycle management
+│   ├── worker-memory.ts       # Per-worker memory helpers
+│   ├── peer.ts                # Peer-to-peer agent communication
+│   ├── claude-cli.ts          # Claude CLI subprocess wrapper
+│   ├── context.ts             # Project context management
+│   ├── search.ts              # FTS5 search helpers
 │   ├── prompt-sanitizer.ts    # Prompt injection prevention
 │   ├── path-utils.ts          # Path traversal prevention
 │   ├── env-filter.ts          # Safe environment variable filtering
 │   ├── truncate.ts            # Smart response truncation
 │   ├── safe-json.ts           # Circular-reference-safe JSON serialization
 │   ├── logger.ts              # Structured logging (stderr only)
-│   └── ...
+│   ├── errors.ts              # Typed error classes
+│   ├── types.ts               # Shared TypeScript types
+│   └── mcp-auth.ts            # External MCP auth (bearer, header, OAuth2)
 ├── scripts/                   # Utility scripts
 ├── CLAUDE.md                  # Claude Code project context
 ├── SECURITY.md                # Security architecture documentation
