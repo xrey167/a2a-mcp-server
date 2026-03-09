@@ -1,8 +1,10 @@
 /**
- * MCP Registry — lazy-connect MCP servers from ~/.claude.json
+ * MCP Registry — discover and lazy-connect MCP servers from multiple IDEs.
  *
- * On startup: reads mcpServers from config, builds tool manifest (no connection).
- * On first tool call: opens transport (stdio or HTTP), fetches tools, caches the client.
+ * Scans config files from Claude, Cursor, Windsurf, and Codex (in priority
+ * order — first-seen server name wins). On startup: reads mcpServers from
+ * all configs, builds a unified tool manifest (no connection). On first tool
+ * call: opens transport (stdio or HTTP), fetches tools, caches the client.
  * Manifest cached to ~/.a2a-mcp-manifest.json for fast restarts.
  */
 
@@ -14,9 +16,26 @@ import { homedir } from "os";
 import { join } from "path";
 import { getAuthHeaders } from "./mcp-auth.js";
 
-const CLAUDE_JSON = join(homedir(), ".claude.json");
 const MANIFEST_PATH = join(homedir(), ".a2a-mcp-manifest.json");
 const OWN_NAME = "a2a-mcp-bridge"; // skip ourselves
+
+// ── Multi-IDE config sources ────────────────────────────────────
+// Discover MCP servers from all major IDE/tool configurations.
+// Each source is tried in order; duplicate server names are skipped
+// (first-seen wins), so Claude's config takes priority.
+
+interface ConfigSource {
+  ide: string;
+  path: string;
+  key: string;            // JSON key holding the servers map
+}
+
+const CONFIG_SOURCES: ConfigSource[] = [
+  { ide: "claude",   path: join(homedir(), ".claude.json"),            key: "mcpServers" },
+  { ide: "cursor",   path: join(homedir(), ".cursor", "mcp.json"),     key: "mcpServers" },
+  { ide: "windsurf", path: join(homedir(), ".windsurf", "mcp.json"),   key: "mcpServers" },
+  { ide: "codex",    path: join(homedir(), ".codex", "mcp.json"),      key: "mcpServers" },
+];
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -53,22 +72,33 @@ const configs = new Map<string, McpServerConfig>();           // name → config
 const clients = new Map<string, Client>();                    // name → connected client
 const toolManifest: ToolDef[] = [];                           // flat list of all tools
 
-// ── Load config ──────────────────────────────────────────────────
+// ── Load config (multi-IDE) ──────────────────────────────────────
 
 function loadConfig(): Map<string, McpServerConfig> {
-  try {
-    const raw = readFileSync(CLAUDE_JSON, "utf-8");
-    const json = JSON.parse(raw);
-    const servers: Record<string, McpServerConfig> = json?.mcpServers ?? {};
-    const result = new Map<string, McpServerConfig>();
-    for (const [name, cfg] of Object.entries(servers)) {
-      if (name === OWN_NAME) continue;
-      result.set(name, cfg);
+  const result = new Map<string, McpServerConfig>();
+
+  for (const source of CONFIG_SOURCES) {
+    try {
+      if (!existsSync(source.path)) continue;
+      const raw = readFileSync(source.path, "utf-8");
+      const json = JSON.parse(raw);
+      const servers: Record<string, McpServerConfig> = json?.[source.key] ?? {};
+      let added = 0;
+      for (const [name, cfg] of Object.entries(servers)) {
+        if (name === OWN_NAME) continue;
+        if (result.has(name)) continue; // first-seen wins (Claude takes priority)
+        result.set(name, cfg);
+        added++;
+      }
+      if (added > 0) {
+        process.stderr.write(`[mcp-registry] discovered ${added} server(s) from ${source.ide} (${source.path})\n`);
+      }
+    } catch {
+      // Config file unreadable or malformed — skip silently
     }
-    return result;
-  } catch {
-    return new Map();
   }
+
+  return result;
 }
 
 // ── Manifest cache ───────────────────────────────────────────────
@@ -216,12 +246,12 @@ export async function callMcpTool(
     if (!serverName) return `Tool not found in MCP registry: ${toolName}`;
 
     const client = await connectServer(serverName);
-    const result = await client.callTool({ name: toolName, arguments: args });
+    const result = await client.callTool({ name: toolName, arguments: args }, undefined, { timeout: 120_000 });
     return extractText(result);
   }
 
   const client = await connectServer(toolDef.server);
-  const result = await client.callTool({ name: toolName, arguments: args });
+  const result = await client.callTool({ name: toolName, arguments: args }, undefined, { timeout: 120_000 });
   return extractText(result);
 }
 

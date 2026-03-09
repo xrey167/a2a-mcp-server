@@ -1,38 +1,12 @@
 import { spawnSync } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
-import { randomUUID } from "crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
-
-// ── Auth helper ───────────────────────────────────────────────────
-// Prefer ANTHROPIC_API_KEY if set (CI / non-macOS).
-// Otherwise use the SDK directly — the MCP subprocess inherits
-// Claude Code's env which already has auth configured.
-function getAnthropicClient(): Anthropic {
-  if (process.env.ANTHROPIC_API_KEY) {
-    return new Anthropic();
-  }
-  // When spawned by Claude Code the auth env is forwarded automatically
-  return new Anthropic();
-}
-
-// Fallback: run `claude -p` as subprocess (handles OAuth refresh).
-// Used when SDK auth fails or as an explicit sub-agent call.
-function runClaudeCLI(prompt: string, model: string): string {
-  const result = spawnSync(
-    "claude",
-    ["-p", prompt, "--model", model, "--output-format", "text"],
-    {
-      encoding: "utf-8",
-      timeout: 30_000,
-      env: { ...process.env, CLAUDECODE: undefined } as NodeJS.ProcessEnv,
-    }
-  );
-  if (result.error) throw new Error(result.error.message);
-  if (result.status !== 0) throw new Error(result.stderr || "claude CLI failed");
-  return result.stdout.trim();
-}
+import { z } from "zod";
+import { sendTask } from "./a2a.js";
+import { runClaudeCLI } from "./claude-cli.js";
+import { sanitizePath } from "./path-utils.js";
 
 export interface SkillArgs {
   [key: string]: unknown;
@@ -44,6 +18,61 @@ export interface Skill {
   description: string;
   inputSchema: object;
   run: (args: SkillArgs) => Promise<string>;
+}
+
+// ── Zod Schemas ─────────────────────────────────────────────────
+
+const RunShellSchema = z.object({
+  command: z.string().min(1, "command is required"),
+}).strict();
+
+const ReadFileSchema = z.object({
+  path: z.string().min(1, "path is required"),
+}).strict();
+
+const WriteFileSchema = z.object({
+  path: z.string().min(1, "path is required"),
+  content: z.string(),
+}).strict();
+
+const FetchUrlSchema = z.object({
+  url: z.string().url("invalid URL"),
+  format: z.enum(["text", "json"]).optional().default("text"),
+}).strict();
+
+const CallApiSchema = z.object({
+  url: z.string().url("invalid URL"),
+  method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]),
+  headers: z.record(z.string()).optional().default({}),
+  body: z.record(z.unknown()).optional(),
+}).strict();
+
+const AskClaudeSchema = z.object({
+  prompt: z.string().min(1, "prompt is required"),
+  model: z.string().optional().default("claude-sonnet-4-6"),
+}).strict();
+
+const SearchFilesSchema = z.object({
+  pattern: z.string().min(1, "pattern is required"),
+  directory: z.string().optional().default("."),
+}).strict();
+
+const QuerySqliteSchema = z.object({
+  database: z.string().min(1, "database path is required"),
+  sql: z.string().min(1, "sql is required"),
+}).strict();
+
+const CallA2aAgentSchema = z.object({
+  agent_url: z.string().url("invalid agent URL"),
+  message: z.string().min(1, "message is required"),
+  skill_id: z.string().optional(),
+  args: z.record(z.unknown()).optional(),
+}).strict();
+
+// ── Helper: validate args with Zod schema ────────────────────────
+
+function validate<T>(schema: z.ZodType<T>, args: SkillArgs): T {
+  return schema.parse(args);
 }
 
 // ── System Tools ─────────────────────────────────────────────────
@@ -61,8 +90,9 @@ const runShell: Skill = {
   },
   // intentional: run_shell exists to execute arbitrary shell commands,
   // so the shell flag is required (pipes, redirects, etc.)
-  run: async ({ command }) => {
-    const result = spawnSync(command as string, {
+  run: async (raw) => {
+    const { command } = validate(RunShellSchema, raw);
+    const result = spawnSync(command, {
       shell: true,
       timeout: 15_000,
       encoding: "utf-8",
@@ -86,9 +116,10 @@ const readFile: Skill = {
     },
     required: ["path"],
   },
-  run: async ({ path }) => {
-    if (!existsSync(path as string)) return `File not found: ${path}`;
-    return readFileSync(path as string, "utf-8");
+  run: async (raw) => {
+    const { path } = validate(ReadFileSchema, raw);
+    if (!existsSync(path)) return `File not found: ${path}`;
+    return readFileSync(path, "utf-8");
   },
 };
 
@@ -104,9 +135,11 @@ const writeFile: Skill = {
     },
     required: ["path", "content"],
   },
-  run: async ({ path, content }) => {
-    writeFileSync(path as string, content as string, "utf-8");
-    return `Written ${(content as string).length} bytes to ${path}`;
+  run: async (raw) => {
+    const { path, content } = validate(WriteFileSchema, raw);
+    const safePath = sanitizePath(path);
+    writeFileSync(safePath, content, "utf-8");
+    return `Written ${content.length} bytes to ${safePath}`;
   },
 };
 
@@ -124,8 +157,9 @@ const fetchUrl: Skill = {
     },
     required: ["url"],
   },
-  run: async ({ url, format = "text" }) => {
-    const res = await fetch(url as string);
+  run: async (raw) => {
+    const { url, format } = validate(FetchUrlSchema, raw);
+    const res = await fetch(url);
     if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
     return format === "json"
       ? JSON.stringify(await res.json(), null, 2)
@@ -141,16 +175,17 @@ const callApi: Skill = {
     type: "object",
     properties: {
       url: { type: "string", description: "API endpoint URL" },
-      method: { type: "string", description: "HTTP method: GET, POST, PUT, DELETE" },
+      method: { type: "string", description: "HTTP method: GET, POST, PUT, DELETE, PATCH" },
       headers: { type: "object", description: "Optional request headers" },
       body: { type: "object", description: "Optional JSON request body" },
     },
     required: ["url", "method"],
   },
-  run: async ({ url, method, headers = {}, body }) => {
-    const res = await fetch(url as string, {
-      method: method as string,
-      headers: { "Content-Type": "application/json", ...(headers as object) },
+  run: async (raw) => {
+    const { url, method, headers, body } = validate(CallApiSchema, raw);
+    const res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json", ...headers },
       body: body ? JSON.stringify(body) : undefined,
     });
     return `HTTP ${res.status}\n${await res.text()}`;
@@ -174,20 +209,19 @@ const askClaude: Skill = {
     },
     required: ["prompt"],
   },
-  run: async ({ prompt, model = "claude-sonnet-4-6" }) => {
+  run: async (raw) => {
+    const { prompt, model } = validate(AskClaudeSchema, raw);
     try {
-      // Try SDK first (works when ANTHROPIC_API_KEY is set)
-      const client = getAnthropicClient();
+      const client = new Anthropic();
       const message = await client.messages.create({
-        model: model as string,
+        model,
         max_tokens: 1024,
-        messages: [{ role: "user", content: prompt as string }],
+        messages: [{ role: "user", content: prompt }],
       });
       const block = message.content[0];
       return block.type === "text" ? block.text : JSON.stringify(block);
     } catch {
-      // Fallback: claude CLI (uses OAuth via Claude Code, handles refresh)
-      return runClaudeCLI(prompt as string, model as string);
+      return await runClaudeCLI(prompt, model);
     }
   },
 };
@@ -206,10 +240,11 @@ const searchFiles: Skill = {
     },
     required: ["pattern"],
   },
-  run: async ({ pattern, directory = "." }) => {
-    const glob = new Glob(pattern as string);
+  run: async (raw) => {
+    const { pattern, directory } = validate(SearchFilesSchema, raw);
+    const glob = new Glob(pattern);
     const matches: string[] = [];
-    for await (const file of glob.scan(directory as string)) {
+    for await (const file of glob.scan(directory)) {
       matches.push(file);
     }
     return matches.length > 0 ? matches.join("\n") : "No files found";
@@ -228,10 +263,14 @@ const querySqlite: Skill = {
     },
     required: ["database", "sql"],
   },
-  run: async ({ database, sql }) => {
-    const db = new Database(database as string, { readonly: true });
+  run: async (raw) => {
+    const { database, sql } = validate(QuerySqliteSchema, raw);
+    if (!sql.trim().toUpperCase().startsWith("SELECT")) {
+      return "Only SELECT queries are allowed";
+    }
+    const db = new Database(database, { readonly: true });
     try {
-      const rows = db.query(sql as string).all();
+      const rows = db.query(sql).all();
       return JSON.stringify(rows, null, 2);
     } finally {
       db.close();
@@ -255,23 +294,13 @@ const callA2aAgent: Skill = {
     },
     required: ["agent_url", "message"],
   },
-  run: async ({ agent_url, message, skill_id, args }) => {
-    const res = await fetch(agent_url as string, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        method: "tasks/send",
-        id: randomUUID(),
-        params: {
-          id: randomUUID(),
-          skillId: skill_id,
-          args,
-          message: { role: "user", parts: [{ text: message as string }] },
-        },
-      }),
+  run: async (raw) => {
+    const { agent_url, message, skill_id, args } = validate(CallA2aAgentSchema, raw);
+    return sendTask(agent_url, {
+      skillId: skill_id,
+      args: args as Record<string, unknown> | undefined,
+      message: { role: "user", parts: [{ kind: "text" as const, text: message }] },
     });
-    return JSON.stringify(await res.json(), null, 2);
   },
 };
 

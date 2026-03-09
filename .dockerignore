@@ -1,0 +1,8 @@
+node_modules
+.git
+*.md
+!README.md
+PRODUCT_MARKET_FIT.md
+.env
+.env.*
+*.db
