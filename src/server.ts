@@ -599,7 +599,9 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
   // ── License gate ───────────────────────────────────────────────
   if (!isSkillLicensed(skillId)) {
     const tier = getSkillTier(skillId);
-    throw new Error(`Skill '${skillId}' requires a ${tier} license (current: ${getLicenseInfo().tier})`);
+    const license = getLicenseInfo();
+    const currentTierDescription = license?.expired ? `${license.tier} (expired)` : license?.tier;
+    throw new Error(`Skill '${skillId}' requires a ${tier} license (current: ${currentTierDescription ?? "none"})`);
   }
   // ── RBAC gate (when a validated caller key is provided) ────────
   if (caller && !isSkillAllowed(caller, skillId)) {
