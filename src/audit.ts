@@ -50,7 +50,7 @@ function getDb(): Database {
   db.run(`
     CREATE TABLE IF NOT EXISTS audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+      timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
       actor TEXT NOT NULL,
       role TEXT NOT NULL DEFAULT 'unknown',
       workspace TEXT,
@@ -62,6 +62,13 @@ function getDb(): Database {
       args TEXT,
       client_ip TEXT
     )
+  `);
+  // Migrate existing rows stored with SQLite's datetime() format ("YYYY-MM-DD HH:MM:SS")
+  // to ISO-8601 UTC ("YYYY-MM-DDTHH:MM:SS.sssZ") so lexicographic comparisons are consistent.
+  db.run(`
+    UPDATE audit_log
+    SET timestamp = strftime('%Y-%m-%dT%H:%M:%fZ', timestamp)
+    WHERE timestamp NOT LIKE '%T%'
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor)`);
@@ -80,10 +87,14 @@ export function auditLog(entry: Omit<AuditEntry, "id" | "timestamp">): void {
     const d = getDb();
     // Truncate args to 2KB
     const args = entry.args ? entry.args.slice(0, 2048) : null;
+    // Always insert an explicit ISO-8601 UTC timestamp so that lexicographic
+    // comparisons in auditQuery/auditStats/auditPrune work correctly.
+    const timestamp = new Date().toISOString();
     d.run(
-      `INSERT INTO audit_log (actor, role, workspace, skill_id, agent_url, success, duration_ms, error, args, client_ip)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO audit_log (timestamp, actor, role, workspace, skill_id, agent_url, success, duration_ms, error, args, client_ip)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        timestamp,
         entry.actor,
         entry.role,
         entry.workspace ?? null,
