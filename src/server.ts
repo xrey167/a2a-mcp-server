@@ -2105,7 +2105,14 @@ function checkAuth(request: { ip: string; headers: Record<string, string | strin
   if (isLoopback(request.ip)) return true; // loopback always trusted
   const auth = request.headers["authorization"];
   const token = Array.isArray(auth) ? auth[0] : auth;
-  return token === `Bearer ${A2A_API_KEY}`;
+  if (!token) return false;
+  // Accept the configured static A2A_API_KEY
+  if (token === `Bearer ${A2A_API_KEY}`) return true;
+  // Also accept valid a2a_k_... RBAC keys so callers registered via createApiKey()
+  // can authenticate without a separately shared A2A_API_KEY.
+  const bearerValue = token.replace(/^Bearer\s+/i, "");
+  if (bearerValue.startsWith("a2a_k_") && validateApiKey(bearerValue) !== null) return true;
+  return false;
 }
 
 // ── Worker health polling ────────────────────────────────────────
@@ -2232,11 +2239,13 @@ async function startHttpServer() {
     const { skillId, args, message, id: taskId } = data.params ?? {};
     const text: string = message?.parts?.[0]?.text ?? "";
 
-    // Extract RBAC caller entry if the Authorization header contains an a2a_k_... key
+    // Extract RBAC caller entry if the Authorization header contains an a2a_k_... key.
+    // Skip when the token is the plain A2A_API_KEY itself (it may coincidentally start
+    // with "a2a_k_" but is not a key registered via createApiKey()).
     const rawAuth = request.headers["authorization"];
     const bearerToken = (Array.isArray(rawAuth) ? rawAuth[0] : rawAuth)?.replace(/^Bearer\s+/i, "");
     let callerEntry: ApiKeyEntry | undefined;
-    if (bearerToken?.startsWith("a2a_k_")) {
+    if (bearerToken?.startsWith("a2a_k_") && bearerToken !== A2A_API_KEY) {
       const validated = validateApiKey(bearerToken);
       if (!validated) {
         process.stderr.write(`[orchestrator] A2A auth: invalid or expired a2a_k_ key\n`);
