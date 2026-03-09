@@ -167,7 +167,10 @@ export function updateWorkspace(
     const row = d.query(`SELECT * FROM workspaces WHERE id = ?`).get(id) as Record<string, unknown> | null;
     if (!row) return null;
     const ws = rowToWorkspace(row);
-    Object.assign(ws, updates);
+    const definedUpdates = Object.fromEntries(
+      Object.entries(updates).filter(([, v]) => v !== undefined),
+    );
+    Object.assign(ws, definedUpdates);
     d.run(
       `UPDATE workspaces SET name = ?, description = ?, env = ?, allowed_skills = ?, knowledge_tags = ? WHERE id = ?`,
       [
