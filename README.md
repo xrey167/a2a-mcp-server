@@ -685,10 +685,10 @@ All skills below are accessible through `sandbox_execute` using `skill(id, args)
 |`a2a://circuit-breakers`   |Circuit breaker states for all workers   |
 |`a2a://webhooks`           |Registered webhooks and activity stats   |
 |`a2a://event-bus`          |Event bus stats, subscriptions, dead letters|
-|`a2a://traces`             |Recent distributed traces                |
-|`a2a://cache`              |Skill cache statistics                   |
-|`a2a://capabilities`       |Agent capability registry and stats      |
-|`a2a://pipelines`          |Registered skill composition pipelines   |
+|`a2a://traces`             |Recent distributed traces|
+|`a2a://cache`              |Skill cache statistics|
+|`a2a://capabilities`       |Agent capability registry and stats|
+|`a2a://pipelines`          |Registered skill composition pipelines|
 
 ### Prompt templates
 
