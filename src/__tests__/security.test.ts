@@ -1,5 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { AgentError } from "../errors.js";
+import { isAllowedUrl } from "../server.js";
+import { safeName } from "../memory.js";
 
 /**
  * Security-focused tests for review findings.
@@ -7,21 +9,6 @@ import { AgentError } from "../errors.js";
  */
 
 describe("URL validation (SSRF prevention)", () => {
-  // Re-implement the validation logic for testing (same logic as in server.ts)
-  const WORKER_PORTS = [8081, 8082, 8083, 8084, 8085];
-  function isAllowedUrl(url: string): boolean {
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-      if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") return false;
-      const port = parseInt(parsed.port || "80", 10);
-      const allowedPorts = new Set([8080, ...WORKER_PORTS]);
-      return allowedPorts.has(port);
-    } catch {
-      return false;
-    }
-  }
-
   test("allows localhost worker URLs", () => {
     expect(isAllowedUrl("http://localhost:8081")).toBe(true);
     expect(isAllowedUrl("http://localhost:8082")).toBe(true);
@@ -76,11 +63,6 @@ describe("Persona name validation (path traversal prevention)", () => {
 });
 
 describe("Memory path sanitization", () => {
-  // Re-implement safeName for testing (same logic as in memory.ts)
-  function safeName(name: string): string {
-    return name.replace(/[\/\\\.]+/g, "_").replace(/^_+|_+$/g, "") || "unnamed";
-  }
-
   test("strips directory traversal sequences", () => {
     expect(safeName("../../../etc")).toBe("etc");
     expect(safeName("../../passwd")).toBe("passwd");

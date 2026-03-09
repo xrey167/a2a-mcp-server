@@ -116,6 +116,10 @@ async function discoverWorkers(): Promise<AgentCard[]> {
     try {
       const card = await discoverAgent(`http://localhost:${w.port}`);
       cards.push(card);
+      // Update health status on successful discovery
+      workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
+      // Invalidate skill router cache since worker availability changed
+      skillRouterCache = null;
     } catch (err) {
       process.stderr.write(`[orchestrator] failed to discover ${w.name}: ${err}\n`);
     }
@@ -173,7 +177,7 @@ function buildSkillRouter(cards: AgentCard[]): Map<string, string> {
 
 // ── URL validation (SSRF prevention) ────────────────────────────
 /** Only allow HTTP URLs pointing to known localhost worker ports or the orchestrator. */
-function isAllowedUrl(url: string): boolean {
+export function isAllowedUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
@@ -320,7 +324,13 @@ async function dispatchSkill(skillId: string | undefined, args: Record<string, u
 
     // Try local skill (backwards compat)
     const localSkill = SKILL_MAP.get(skillId);
-    if (localSkill) return localSkill.run(args ?? { prompt: text, command: text, url: text });
+    if (localSkill) {
+      // Merge defaults when args is empty to support message-only invocations
+      const mergedArgs = Object.keys(args).length === 0
+        ? { prompt: text, command: text, url: text }
+        : args;
+      return localSkill.run(mergedArgs);
+    }
 
     // Route to worker
     const router = buildSkillRouter(workerCards);
@@ -340,7 +350,12 @@ async function executeTask(
   args: Record<string, unknown>,
   text: string,
 ): Promise<void> {
-  markWorking(task.id);
+  // Check if task was canceled before we started working
+  const workingTask = markWorking(task.id);
+  if (!workingTask) {
+    // Task is in terminal state (e.g., canceled) — don't execute
+    return;
+  }
 
   try {
     const resultText = await dispatchSkill(skillId, args, text);
@@ -726,7 +741,11 @@ async function startHttpServer() {
   });
 
   // Health check for orchestrator itself
-  app.get("/healthz", async () => {
+  app.get("/healthz", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized — set Authorization: Bearer <A2A_API_KEY>" };
+    }
     const workerStatus: Record<string, boolean> = {};
     for (const w of WORKERS) {
       workerStatus[w.name] = workerHealth.get(w.name)?.healthy ?? false;
@@ -739,7 +758,7 @@ async function startHttpServer() {
     };
   });
 
-  // tasks/send — create task, execute async, return immediately with status
+  // tasks/send — create task, execute, and return result (sync by default for backwards compat)
   app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
@@ -774,26 +793,45 @@ async function startHttpServer() {
       return { jsonrpc: "2.0", error: { code: -32601, message: "Method not found" } };
     }
 
-    const { skillId, args, message, id: taskId } = data.params ?? {};
+    const { skillId, args, message, id: taskId, async: isAsync } = data.params ?? {};
     const text: string = message?.parts?.[0]?.text ?? "";
 
     // Create task in store
     const task = createTask({ id: taskId, skillId });
 
-    // Execute asynchronously (task lifecycle managed by executeTask)
-    executeTask(task, skillId, args ?? {}, text).catch((err) => {
-      process.stderr.write(`[orchestrator] unhandled executeTask error taskId=${task.id}: ${err}\n`);
-    });
+    // If async flag is true, execute in background and return immediately
+    if (isAsync) {
+      executeTask(task, skillId, args ?? {}, text).catch((err) => {
+        process.stderr.write(`[orchestrator] unhandled executeTask error taskId=${task.id}: ${err}\n`);
+      });
+      return {
+        jsonrpc: "2.0", id: data.id,
+        result: toA2AResult(task),
+      };
+    }
 
-    // Return submitted status immediately
-    return {
-      jsonrpc: "2.0", id: data.id,
-      result: toA2AResult(task),
-    };
+    // Otherwise, wait for completion (backwards compatible with existing callers)
+    try {
+      await executeTask(task, skillId, args ?? {}, text);
+      return {
+        jsonrpc: "2.0", id: data.id,
+        result: toA2AResult(getTask(task.id)!),
+      };
+    } catch (err) {
+      // Error already logged and task marked failed in executeTask
+      return {
+        jsonrpc: "2.0", id: data.id,
+        result: toA2AResult(getTask(task.id)!),
+      };
+    }
   });
 
   // SSE streaming endpoint — subscribe to task events
   app.get<{ Params: { taskId: string } }>("/stream/:taskId", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized — set Authorization: Bearer <A2A_API_KEY>" };
+    }
     const { taskId } = request.params;
     const task = getTask(taskId);
 
@@ -855,6 +893,10 @@ async function startHttpServer() {
 
   // SSE streaming endpoint — subscribe to all task events
   app.get("/stream", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized — set Authorization: Bearer <A2A_API_KEY>" };
+    }
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -912,12 +954,19 @@ async function main() {
   startHealthMonitor();
 
   // Prune old tasks periodically (configurable via TASK_RETENTION_HOURS, default: 1 hour)
-  const retentionHours = parseFloat(process.env.TASK_RETENTION_HOURS ?? "1");
+  const rawRetentionHours = process.env.TASK_RETENTION_HOURS;
+  let retentionHours = Number.parseFloat(rawRetentionHours ?? "1");
+  if (!Number.isFinite(retentionHours) || retentionHours <= 0) {
+    process.stderr.write(`[orchestrator] invalid TASK_RETENTION_HOURS=${rawRetentionHours}, using default 1h\n`);
+    retentionHours = 1;
+  }
   const retentionMs = retentionHours * 60 * 60 * 1000;
+  const minIntervalMs = 60 * 1000; // enforce a minimum interval of 1 minute
+  const intervalMs = Math.max(retentionMs, minIntervalMs);
   setInterval(() => {
     const pruned = pruneTasks(retentionMs);
     if (pruned > 0) process.stderr.write(`[orchestrator] pruned ${pruned} old tasks (retention: ${retentionHours}h)\n`);
-  }, retentionMs);
+  }, intervalMs);
 
   // Start HTTP + MCP
   await startHttpServer();

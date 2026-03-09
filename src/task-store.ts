@@ -46,7 +46,7 @@ const tasks = new Map<string, Task>();
 export const taskEvents = new EventEmitter();
 
 // Don't limit listeners — SSE clients can be many
-taskEvents.setMaxListeners(100);
+taskEvents.setMaxListeners(0);
 
 // ── Public API ────────────────────────────────────────────────────
 
