@@ -131,18 +131,19 @@ Option B gets users fast (developers). The workflow engine, tracing, and resilie
 
 ### Phase 3: Make It Collaborative (Weeks 13-24)
 
-- [ ] **Cloud deployment** — hosted workers, shared agent registries
-- [ ] **Team features** — shared workflows, knowledge bases, permissions
+- [x] **Cloud deployment** — Fly.io + Railway configs, health endpoints (`/healthz`, `/readyz`, `/health`), graceful shutdown, readiness probes
+- [x] **Team features** — workspace system with members, roles, shared env, knowledge directories, skill allowlists
 - [x] **A2A federation** — discover and connect to external A2A agents
 - [x] SDK for building workers in Python, Go (not just TypeScript)
 - [x] Integration with LangGraph/CrewAI agents as workers via A2A
 
 ### Phase 4: Make It a Business (Ongoing)
 
-- [ ] Open-core model: core orchestrator is OSS, premium features gated
+- [x] Open-core model: free/pro/enterprise skill tiers with license key gating (`src/skill-tier.ts`)
 - [ ] Hosted platform (SaaS) for teams that don't want to self-host
-- [ ] Enterprise tier: SSO, audit logs, compliance, SLAs
+- [x] Enterprise tier: RBAC (`src/auth.ts`), audit logs (`src/audit.ts`), compliance-ready SQLite audit trail
 - [ ] Marketplace revenue share for community worker authors
+- [ ] SSO integration (placeholder — needs OAuth2/OIDC provider)
 
 ---
 

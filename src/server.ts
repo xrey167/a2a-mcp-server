@@ -40,6 +40,11 @@ import { collaborate, type CollaborationRequest } from "./agent-collaboration.js
 import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracingStats } from "./tracing.js";
 import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats, configureCacheSkill } from "./skill-cache.js";
 import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
+import { auditLog, auditQuery, auditStats, closeAuditDb } from "./audit.js";
+import { validateApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, type ApiKeyEntry } from "./auth.js";
+import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace } from "./workspace.js";
+import { isSkillLicensed, getSkillTier, getSkillsByTier, getLicenseInfo } from "./skill-tier.js";
+import { registerHealthRoutes, markReady, updateWorkerHealth as updateCloudWorkerHealth, installShutdownHandlers, onShutdown } from "./cloud.js";
 
 // Extend Fastify's request interface with rawBody for HMAC verification
 declare module "fastify" {
@@ -1055,6 +1060,81 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
       return JSON.stringify(getWebhookLog(id, (args.limit as number) ?? 20), null, 2);
     }
 
+    // ── Audit Log ────────────────────────────────────────────────
+    case "audit_query":
+      return JSON.stringify(auditQuery({
+        actor: args.actor as string | undefined,
+        skillId: args.skillId as string | undefined,
+        workspace: args.workspace as string | undefined,
+        since: args.since as string | undefined,
+        until: args.until as string | undefined,
+        success: args.success as boolean | undefined,
+        limit: args.limit as number | undefined,
+      }), null, 2);
+
+    case "audit_stats":
+      return JSON.stringify(auditStats(args.since as string | undefined), null, 2);
+
+    // ── License / Tier Info ───────────────────────────────────────
+    case "license_info":
+      return JSON.stringify({
+        license: getLicenseInfo(),
+        tiers: getSkillsByTier(),
+        roles: getRolePermissions(),
+      }, null, 2);
+
+    // ── Workspace Management ──────────────────────────────────────
+    case "workspace_manage": {
+      const action = args.action as string;
+      switch (action) {
+        case "create": {
+          const name = args.name as string;
+          if (!name) throw new Error("workspace_manage(create) requires name");
+          return JSON.stringify(createWorkspace(name, args.keyPrefix as string ?? "local", args.description as string ?? name, { description: args.description as string, env: args.env as Record<string, string> }), null, 2);
+        }
+        case "list":
+          return JSON.stringify(listWorkspaces(), null, 2);
+        case "get": {
+          const id = args.id as string;
+          if (!id) throw new Error("workspace_manage(get) requires id");
+          const ws = getWorkspace(id);
+          if (!ws) throw new Error(`Workspace not found: ${id}`);
+          return JSON.stringify(ws, null, 2);
+        }
+        case "add_member": {
+          const id = args.id as string;
+          const keyPrefix = args.keyPrefix as string;
+          const name = args.name as string;
+          if (!id || !keyPrefix || !name) throw new Error("workspace_manage(add_member) requires id, keyPrefix, name");
+          const ws = addMember(id, keyPrefix, name, (args.role as "member" | "readonly") ?? "member");
+          if (!ws) throw new Error(`Workspace not found: ${id}`);
+          return JSON.stringify(ws, null, 2);
+        }
+        case "remove_member": {
+          const id = args.id as string;
+          const keyPrefix = args.keyPrefix as string;
+          if (!id || !keyPrefix) throw new Error("workspace_manage(remove_member) requires id, keyPrefix");
+          const ws = removeMember(id, keyPrefix);
+          if (!ws) throw new Error(`Workspace not found: ${id}`);
+          return JSON.stringify(ws, null, 2);
+        }
+        case "update": {
+          const id = args.id as string;
+          if (!id) throw new Error("workspace_manage(update) requires id");
+          const ws = updateWorkspace(id, {
+            name: args.name as string | undefined,
+            description: args.description as string | undefined,
+            env: args.env as Record<string, string> | undefined,
+            allowedSkills: args.allowedSkills as string[] | undefined,
+          });
+          if (!ws) throw new Error(`Workspace not found: ${id}`);
+          return JSON.stringify(ws, null, 2);
+        }
+        default:
+          throw new Error(`Unknown workspace action: ${action}`);
+      }
+    }
+
     default: {
       // Plugin skills (hot-loaded from src/plugins/)
       const pluginSkill = pluginSkills.get(skillId);
@@ -1685,6 +1765,58 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         required: ["skillId"],
       },
     },
+    // ── Audit Log (Enterprise) ────────────────────────────────────
+    {
+      name: "audit_query",
+      description: "Query the audit log. Filter by actor, skill, workspace, time range, and success/failure.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          actor: { type: "string", description: "API key prefix or 'local'" },
+          skillId: { type: "string", description: "Filter by skill ID" },
+          workspace: { type: "string", description: "Filter by workspace ID" },
+          since: { type: "string", description: "ISO timestamp start" },
+          until: { type: "string", description: "ISO timestamp end" },
+          success: { type: "boolean", description: "Filter by success/failure" },
+          limit: { type: "number", description: "Max results (default 100, max 1000)" },
+        },
+      },
+    },
+    {
+      name: "audit_stats",
+      description: "Get audit statistics: total calls, success rate, top skills, top actors.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string", description: "ISO timestamp to filter from" },
+        },
+      },
+    },
+    // ── License / Tier Info ───────────────────────────────────────
+    {
+      name: "license_info",
+      description: "Show current license tier (free/pro/enterprise), skill tier requirements, and upgrade info.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    // ── Workspace Management ──────────────────────────────────────
+    {
+      name: "workspace_manage",
+      description: "Manage team workspaces: create, list, add/remove members, update settings.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          action: { type: "string", description: "Action to perform", enum: ["create", "list", "get", "add_member", "remove_member", "update"] },
+          id: { type: "string", description: "Workspace ID (for get/update/add_member/remove_member)" },
+          name: { type: "string", description: "Workspace or member name (for create/add_member)" },
+          description: { type: "string", description: "Workspace description" },
+          keyPrefix: { type: "string", description: "API key prefix (for add_member/remove_member)" },
+          role: { type: "string", description: "Member role: member or readonly", enum: ["member", "readonly"] },
+          env: { type: "object", description: "Shared environment variables" },
+          allowedSkills: { type: "array", items: { type: "string" }, description: "Skill allowlist" },
+        },
+        required: ["action"],
+      },
+    },
   ];
 
   return tools;
@@ -1709,6 +1841,9 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
     { uri: "a2a://cache", name: "Skill Cache", description: "Skill result cache statistics", mimeType: "application/json" },
     { uri: "a2a://capabilities", name: "Capabilities", description: "Agent capability registry and negotiation stats", mimeType: "application/json" },
     { uri: "a2a://pipelines", name: "Pipelines", description: "Registered skill composition pipelines", mimeType: "application/json" },
+    { uri: "a2a://audit", name: "Audit Log", description: "Recent audit log entries (enterprise)", mimeType: "application/json" },
+    { uri: "a2a://license", name: "License", description: "Current license tier and skill gates", mimeType: "application/json" },
+    { uri: "a2a://workspaces", name: "Workspaces", description: "Team workspaces and members", mimeType: "application/json" },
   ];
   for (const card of workerCards) {
     resources.push({
@@ -1770,6 +1905,18 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
   if (uri === "a2a://pipelines") {
     return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listComposerPipelines(), null, 2) }] };
+  }
+
+  if (uri === "a2a://audit") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ stats: auditStats(), recent: auditQuery({ limit: 20 }) }, null, 2) }] };
+  }
+
+  if (uri === "a2a://license") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ license: getLicenseInfo(), tiers: getSkillsByTier() }, null, 2) }] };
+  }
+
+  if (uri === "a2a://workspaces") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listWorkspaces(), null, 2) }] };
   }
 
   const workerMatch = uri.match(/^a2a:\/\/workers\/([^/]+)\/card$/);
@@ -2325,6 +2472,9 @@ ${Object.entries(breakers).map(([name, b]: [string, any]) => `
 </body></html>`;
   });
 
+  // Register cloud health routes (/healthz, /readyz, /health)
+  registerHealthRoutes(app, "3.1.0");
+
   app.get("/healthz", async () => {
     const health: Record<string, unknown> = {};
     for (const w of WORKERS) {
@@ -2393,6 +2543,13 @@ async function main() {
 
   // Start HTTP + MCP
   await startHttpServer();
+
+  // Mark cloud readiness after HTTP is up
+  markReady();
+
+  // Register graceful shutdown handlers
+  installShutdownHandlers();
+  onShutdown(async () => { closeAuditDb(); shutdownWorkers(); });
 
   // Start periodic health checks (every 30s)
   pollWorkerHealth().catch(() => {});
