@@ -191,7 +191,7 @@ export function auditStats(since?: string): {
 export function auditPrune(olderThanDays: number = 90): number {
   const d = getDb();
   const result = d.run(
-    `DELETE FROM audit_log WHERE timestamp < datetime('now', ?)`,
+    `DELETE FROM audit_log WHERE timestamp < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)`,
     [`-${olderThanDays} days`]
   );
   return result.changes;

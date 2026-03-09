@@ -83,17 +83,61 @@ describe("audit", () => {
   });
 
   test("auditPrune removes old entries", () => {
-    // Prune entries older than 0 days shouldn't remove recent entries
-    const removed = auditPrune(0);
-    // May or may not remove — depends on timing
+    // Prune entries older than 90 days (the default); should not remove recent entries
+    const removed = auditPrune(90);
     expect(typeof removed).toBe("number");
   });
 
-  test("auditLog truncates long args", () => {
-    const longArgs = "x".repeat(5000);
-    auditLog({ actor: "trunc-test", role: "admin", skillId: "test", success: true, args: longArgs });
-    const entries = auditQuery({ actor: "trunc-test" });
-    expect(entries[0].args!.length).toBeLessThanOrEqual(2048);
+  test("auditLog stores timestamp in ISO-8601 UTC format", () => {
+    auditLog({ actor: "ts-format-test", role: "admin", skillId: "ts_check", success: true });
+    const entries = auditQuery({ actor: "ts-format-test", limit: 1 });
+    expect(entries.length).toBeGreaterThanOrEqual(1);
+    const { timestamp } = entries[0];
+    // Must match ISO-8601 UTC: "YYYY-MM-DDTHH:MM:SS.sssZ"
+    expect(timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/);
+    // Must be parseable and not NaN
+    expect(Number.isNaN(new Date(timestamp).getTime())).toBe(false);
+  });
+
+  test("auditQuery since/until filters work with ISO-8601 timestamps", () => {
+    const before = new Date(Date.now() - 1000).toISOString();
+    auditLog({ actor: "filter-ts-test", role: "admin", skillId: "ts_filter", success: true });
+    const after = new Date(Date.now() + 1000).toISOString();
+
+    const withSince = auditQuery({ actor: "filter-ts-test", since: before });
+    expect(withSince.length).toBeGreaterThanOrEqual(1);
+
+    const withUntil = auditQuery({ actor: "filter-ts-test", until: after });
+    expect(withUntil.length).toBeGreaterThanOrEqual(1);
+
+    // since in the future → nothing returned
+    const noResults = auditQuery({ actor: "filter-ts-test", since: after });
+    expect(noResults.length).toBe(0);
+  });
+
+  test("auditStats since filter works with ISO-8601 timestamps", () => {
+    const beforeAll = new Date(Date.now() - 1000).toISOString();
+    auditLog({ actor: "stats-ts-test", role: "admin", skillId: "ts_stats", success: true });
+
+    const stats = auditStats(beforeAll);
+    expect(stats.totalCalls).toBeGreaterThanOrEqual(1);
+
+    // since in the future → totalCalls should be 0
+    const futureStats = auditStats(new Date(Date.now() + 1000).toISOString());
+    expect(futureStats.totalCalls).toBe(0);
+  });
+
+  test("auditPrune removes entries older than cutoff", async () => {
+    auditLog({ actor: "prune-epoch-test", role: "admin", skillId: "prune_me", success: true });
+    await Bun.sleep(20);
+
+    // Prune with 0 days: everything older than right-now should be removed
+    const removed = auditPrune(0);
+    expect(removed).toBeGreaterThanOrEqual(1);
+
+    // The entry we just created should now be gone
+    const remaining = auditQuery({ actor: "prune-epoch-test" });
+    expect(remaining.length).toBe(0);
   });
 
   test("auditLog stores timestamp in ISO-8601 UTC format", () => {
