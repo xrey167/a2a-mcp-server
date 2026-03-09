@@ -13,7 +13,7 @@
  */
 
 import { readFileSync, existsSync, watch } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, resolve, relative, sep } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -62,7 +62,13 @@ function parsePersonaFile(content: string): PersonaConfig {
 }
 
 function loadFromDisk(agentName: string): PersonaConfig {
-  const filePath = join(PERSONAS_DIR, `${agentName}.md`);
+  const filePath = resolve(PERSONAS_DIR, `${agentName}.md`);
+  // Bounds check: use path.relative to handle symlinks correctly across platforms
+  const rel = relative(resolve(PERSONAS_DIR), filePath);
+  if (rel.startsWith("..") || rel.startsWith(sep)) {
+    process.stderr.write(`[persona-loader] blocked path traversal attempt: ${agentName}\n`);
+    return { ...DEFAULT_PERSONA };
+  }
   if (!existsSync(filePath)) return { ...DEFAULT_PERSONA };
   try {
     return parsePersonaFile(readFileSync(filePath, "utf-8"));
