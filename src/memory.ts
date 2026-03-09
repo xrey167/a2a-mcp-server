@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import { homedir } from "os";
 import { writeFileSync, mkdirSync, unlinkSync } from "fs";
 
@@ -35,7 +35,7 @@ try {
 } catch {}
 
 /** Sanitize a path component to prevent directory traversal. */
-function safeName(name: string): string {
+export function safeName(name: string): string {
   return name.replace(/[\/\\\.]+/g, "_").replace(/^_+|_+$/g, "") || "unnamed";
 }
 
@@ -46,7 +46,9 @@ function noteFile(agent: string, key: string) {
   mkdirSync(dir, { recursive: true });
   const filePath = join(dir, `${safeKey}.md`);
   // Ensure the resolved path is still within MEMORY_DIR
-  if (!filePath.startsWith(MEMORY_DIR)) {
+  const resolvedFile = resolve(filePath);
+  const resolvedBase = resolve(MEMORY_DIR);
+  if (!resolvedFile.startsWith(resolvedBase + sep) && resolvedFile !== resolvedBase) {
     throw new Error(`Invalid memory path: ${filePath}`);
   }
   return filePath;
@@ -77,17 +79,17 @@ export const memory = {
   search(query: string, agent?: string): Array<{ agent: string; key: string; value: string; rank: number }> {
     if (agent) {
       return db.query<{agent:string;key:string;value:string;rank:number},[string,string]>(
-        `SELECT m.agent, m.key, m.value, f.rank
+        `SELECT m.agent, m.key, m.value, bm25(memory_fts) AS rank
          FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
          WHERE memory_fts MATCH ? AND m.agent = ?
-         ORDER BY f.rank`
+         ORDER BY rank`
       ).all(query, agent);
     }
     return db.query<{agent:string;key:string;value:string;rank:number},[string]>(
-      `SELECT m.agent, m.key, m.value, f.rank
+      `SELECT m.agent, m.key, m.value, bm25(memory_fts) AS rank
        FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
        WHERE memory_fts MATCH ?
-       ORDER BY f.rank`
+       ORDER BY rank`
     ).all(query);
   },
 

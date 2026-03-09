@@ -15,13 +15,28 @@ export async function sendTask(agentUrl: string, params: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", method: "tasks/send", id: randomUUID(),
       params: { id: randomUUID(), ...params } }),
+    redirect: "manual", // Prevent following redirects to bypass SSRF checks
   });
+
+  // Reject redirects
+  if (res.status >= 300 && res.status < 400) {
+    throw new Error(`Redirect detected (${res.status}) — rejected to prevent SSRF bypass`);
+  }
+
   const json = await res.json() as any;
   if (json.error) throw new Error(json.error.message ?? JSON.stringify(json.error));
   return json.result?.artifacts?.[0]?.parts?.[0]?.text ?? JSON.stringify(json.result);
 }
 
 export async function discoverAgent(agentUrl: string): Promise<AgentCard> {
-  const res = await fetch(`${agentUrl}/.well-known/agent.json`);
+  const res = await fetch(`${agentUrl}/.well-known/agent.json`, {
+    redirect: "manual", // Prevent following redirects to bypass SSRF checks
+  });
+
+  // Reject redirects
+  if (res.status >= 300 && res.status < 400) {
+    throw new Error(`Redirect detected (${res.status}) — rejected to prevent SSRF bypass`);
+  }
+
   return res.json();
 }
