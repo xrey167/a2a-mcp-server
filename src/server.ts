@@ -56,6 +56,10 @@ declare module "fastify" {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 
+// Single source of truth for the orchestrator version, used in the MCP server
+// identity, the /.well-known/agent.json card, and the cloud health routes.
+const ORCHESTRATOR_VERSION = "3.0.0";
+
 // ── URL validation (SSRF prevention) ─────────────────────────────
 // Only worker ports allowed — orchestrator port excluded to prevent infinite recursion.
 // Populated dynamically after WORKERS is resolved (below).
@@ -595,19 +599,62 @@ function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
   return (OrchestratorSchemas[skill] as z.ZodType).parse(args);
 }
 
-async function dispatchSkill(skillId: string, args: Record<string, unknown>, text: string, caller?: ApiKeyEntry): Promise<string> {
+/** Max bytes stored for `args` in the audit trail (truncated to 2 KB). */
+const AUDIT_ARGS_MAX_LENGTH = 2048;
+
+/** Build the common fields for an audit log entry from a caller context. */
+function makeAuditBase(
+  caller: ApiKeyEntry | undefined,
+  skillId: string,
+  args: Record<string, unknown>,
+  clientIp: string | undefined,
+): Omit<Parameters<typeof auditLog>[0], "success" | "durationMs" | "error"> {
+  return {
+    actor: caller ? caller.prefix : "local",
+    role: caller?.role ?? "local",
+    workspace: caller?.workspace,
+    skillId,
+    args: JSON.stringify(args).slice(0, AUDIT_ARGS_MAX_LENGTH),
+    clientIp,
+  };
+}
+
+async function dispatchSkill(skillId: string, args: Record<string, unknown>, text: string, caller?: ApiKeyEntry, clientIp?: string): Promise<string> {
+  const auditBase = makeAuditBase(caller, skillId, args, clientIp);
   // ── License gate ───────────────────────────────────────────────
   if (!isSkillLicensed(skillId)) {
     const tier = getSkillTier(skillId);
     const license = getLicenseInfo();
     const currentTierDescription = license?.expired ? `${license.tier} (expired)` : license?.tier;
-    throw new Error(`Skill '${skillId}' requires a ${tier} license (current: ${currentTierDescription ?? "none"})`);
+    const licenseErr = new Error(`Skill '${skillId}' requires a ${tier} license (current: ${currentTierDescription ?? "none"})`);
+    auditLog({ ...auditBase, success: false, error: licenseErr.message });
+    throw licenseErr;
   }
   // ── RBAC gate (when a validated caller key is provided) ────────
   if (caller && !isSkillAllowed(caller, skillId)) {
-    throw new Error(`Caller '${caller.name}' (role: ${caller.role}) is not authorized to invoke '${skillId}'`);
+    const rbacErr = new Error(`Caller '${caller.name}' (role: ${caller.role}) is not authorized to invoke '${skillId}'`);
+    auditLog({ ...auditBase, success: false, error: rbacErr.message });
+    throw rbacErr;
   }
 
+  // ── Audit: record invocation (success + failure) ───────────────
+  const auditStart = Date.now();
+  try {
+    const result = await dispatchSkillInner(skillId, args, text);
+    auditLog({ ...auditBase, success: true, durationMs: Date.now() - auditStart });
+    return result;
+  } catch (err) {
+    auditLog({
+      ...auditBase,
+      success: false,
+      durationMs: Date.now() - auditStart,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+}
+
+async function dispatchSkillInner(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   switch (skillId) {
     case "delegate": {
       // Consolidated: sync delegate, async delegate (async:true), and task polling (taskId)
@@ -1438,7 +1485,7 @@ const sandboxVarsSkill = {
 
 // ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
-  { name: "a2a-mcp-bridge", version: "3.0.0" },
+  { name: "a2a-mcp-bridge", version: ORCHESTRATOR_VERSION },
   { capabilities: { tools: {}, resources: {}, prompts: {} } }
 );
 
@@ -2198,7 +2245,7 @@ async function startHttpServer() {
       name: "Local A2A Orchestrator",
       description: "MCP + A2A orchestrator with multi-agent workers",
       url: "http://localhost:8080",
-      version: "3.0.0",
+      version: ORCHESTRATOR_VERSION,
       capabilities: { streaming: false },
       skills: allSkills,
     };
@@ -2257,7 +2304,7 @@ async function startHttpServer() {
 
     try {
       const resultText = skillId
-        ? await dispatchSkill(skillId, args ?? {}, text, callerEntry)
+        ? await dispatchSkill(skillId, args ?? {}, text, callerEntry, request.ip)
         : await delegate({ message: text }); // auto-delegate when no skillId
 
       return {
@@ -2414,7 +2461,7 @@ async function startHttpServer() {
       if (webhook.async !== false) {
         const task = createTask({ skillId: webhook.skillId });
         markWorking(task.id);
-        dispatchSkill(webhook.skillId, args, JSON.stringify(request.body))
+        dispatchSkill(webhook.skillId, args, JSON.stringify(request.body), undefined, request.ip)
           .then(result => markCompleted(task.id, result))
           .catch(err => {
             try { markFailed(task.id, { code: "WEBHOOK_ERROR", message: String(err) }); } catch {}
@@ -2422,7 +2469,7 @@ async function startHttpServer() {
         logWebhookCall(webhookId, "success", task.id, undefined, payloadSize);
         return { status: "accepted", taskId: task.id };
       } else {
-        const result = await dispatchSkill(webhook.skillId, args, JSON.stringify(request.body));
+        const result = await dispatchSkill(webhook.skillId, args, JSON.stringify(request.body), undefined, request.ip);
         logWebhookCall(webhookId, "success", undefined, undefined, payloadSize);
         return { status: "completed", result };
       }
@@ -2511,7 +2558,7 @@ ${Object.entries(breakers).map(([name, b]: [string, any]) => `
   });
 
   // Register cloud health routes (/healthz, /readyz, /health)
-  registerHealthRoutes(app, "3.1.0");
+  registerHealthRoutes(app, ORCHESTRATOR_VERSION);
 
   app.get("/healthz", async () => {
     const health: Record<string, unknown> = {};

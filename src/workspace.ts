@@ -197,10 +197,19 @@ export function deleteWorkspace(id: string): boolean {
   return result.changes > 0;
 }
 
+/** Pattern that every valid workspace ID must match. */
+const WORKSPACE_ID_RE = /^ws_[a-f0-9]+$/;
+
 /**
  * Get the shared knowledge directory for a workspace.
+ *
+ * Validates `workspaceId` against a strict allowlist pattern before
+ * constructing the path, preventing path-traversal attacks.
  */
 export function getKnowledgeDir(workspaceId: string): string {
+  if (!WORKSPACE_ID_RE.test(workspaceId)) {
+    throw new Error(`Invalid workspace ID: "${workspaceId}"`);
+  }
   const dir = join(KNOWLEDGE_BASE_DIR, workspaceId, "knowledge");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return dir;

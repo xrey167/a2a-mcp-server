@@ -119,4 +119,12 @@ describe("workspace", () => {
     expect(existsSync(dir)).toBe(true);
     expect(dir).toContain("knowledge");
   });
+
+  test("getKnowledgeDir rejects path traversal in workspaceId", () => {
+    expect(() => getKnowledgeDir("../../etc/passwd")).toThrow("Invalid workspace ID");
+    expect(() => getKnowledgeDir("ws_../../evil")).toThrow("Invalid workspace ID");
+    expect(() => getKnowledgeDir("../sibling")).toThrow("Invalid workspace ID");
+    expect(() => getKnowledgeDir("ws_UPPERCASE1")).toThrow("Invalid workspace ID");
+    expect(() => getKnowledgeDir("ws_abc; rm -rf /")).toThrow("Invalid workspace ID");
+  });
 });
