@@ -71,22 +71,6 @@ const WEBHOOK_BLOCKED_SKILLS = new Set([
   "workflow_execute",
 ]);
 
-// ── Webhook skill denylist ────────────────────────────────────────
-// These skills execute code or modify the filesystem and must not be
-// invocable via the unauthenticated webhook endpoint.
-const WEBHOOK_BLOCKED_SKILLS = new Set([
-  "run_shell",
-  "run_shell_stream",
-  "write_file",
-  "read_file",
-  "codex_exec",
-  "sandbox_execute",
-  "sandbox_vars",
-  "search_files",
-  "query_sqlite",
-  "workflow_execute",
-]);
-
 function sanitizeUrlForLog(url: string): string {
   try {
     const parsed = new URL(url);
