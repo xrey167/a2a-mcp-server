@@ -40,6 +40,9 @@ export interface WebhookConfig {
   enabled: boolean;
 }
 
+/** Input type for registerWebhook — secret is mandatory to enforce HMAC authentication */
+export type RegisterWebhookInput = Omit<WebhookConfig, "id" | "createdAt" | "enabled"> & { secret: string };
+
 // ── Storage (SQLite) ─────────────────────────────────────────────
 
 const dbPath = join(homedir(), ".a2a-webhooks.db");
@@ -69,7 +72,7 @@ db.run(`CREATE TABLE IF NOT EXISTS webhook_log (
 
 // ── CRUD ─────────────────────────────────────────────────────────
 
-export function registerWebhook(config: Omit<WebhookConfig, "id" | "createdAt" | "enabled">): WebhookConfig {
+export function registerWebhook(config: RegisterWebhookInput): WebhookConfig {
   const id = randomUUID().slice(0, 8);
   const createdAt = new Date().toISOString();
   const webhook: WebhookConfig = {
