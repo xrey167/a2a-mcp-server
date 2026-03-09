@@ -74,6 +74,52 @@ describe("audit", () => {
     expect(typeof removed).toBe("number");
   });
 
+  test("timestamp is returned as ISO 8601 string", () => {
+    auditLog({ actor: "ts-format-test", role: "admin", skillId: "test_ts", success: true });
+    const entries = auditQuery({ actor: "ts-format-test", limit: 1 });
+    expect(entries.length).toBeGreaterThanOrEqual(1);
+    const ts = entries[0].timestamp;
+    // Must parse back to a valid date
+    expect(Number.isFinite(new Date(ts).getTime())).toBe(true);
+    // Must look like an ISO string (contains 'T' and ends with 'Z')
+    expect(ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+  });
+
+  test("auditQuery filters by since/until correctly", async () => {
+    const before = new Date().toISOString();
+    await Bun.sleep(10);
+
+    auditLog({ actor: "time-filter-test", role: "admin", skillId: "time_skill", success: true });
+
+    await Bun.sleep(10);
+    const after = new Date().toISOString();
+
+    // since=before should include the entry
+    const found = auditQuery({ actor: "time-filter-test", since: before });
+    expect(found.length).toBeGreaterThanOrEqual(1);
+
+    // since=after should exclude the entry
+    const notFound = auditQuery({ actor: "time-filter-test", since: after });
+    expect(notFound.length).toBe(0);
+
+    // until=before should exclude the entry
+    const alsoNotFound = auditQuery({ actor: "time-filter-test", until: before });
+    expect(alsoNotFound.length).toBe(0);
+  });
+
+  test("auditPrune removes entries older than cutoff", async () => {
+    auditLog({ actor: "prune-epoch-test", role: "admin", skillId: "prune_me", success: true });
+    await Bun.sleep(20);
+
+    // Prune with 0 days: everything older than right-now should be removed
+    const removed = auditPrune(0);
+    expect(removed).toBeGreaterThanOrEqual(1);
+
+    // The entry we just created should now be gone
+    const remaining = auditQuery({ actor: "prune-epoch-test" });
+    expect(remaining.length).toBe(0);
+  });
+
   test("auditLog truncates long args", () => {
     const longArgs = "x".repeat(5000);
     auditLog({ actor: "trunc-test", role: "admin", skillId: "test", success: true, args: longArgs });
