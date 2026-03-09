@@ -134,8 +134,8 @@ Option B gets users fast (developers). The workflow engine, tracing, and resilie
 - [ ] **Cloud deployment** — hosted workers, shared agent registries
 - [ ] **Team features** — shared workflows, knowledge bases, permissions
 - [x] **A2A federation** — discover and connect to external A2A agents
-- [ ] SDK for building workers in Python, Go (not just TypeScript)
-- [ ] Integration with LangGraph/CrewAI agents as workers via A2A
+- [x] SDK for building workers in Python, Go (not just TypeScript)
+- [x] Integration with LangGraph/CrewAI agents as workers via A2A
 
 ### Phase 4: Make It a Business (Ongoing)
 
