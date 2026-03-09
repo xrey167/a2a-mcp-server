@@ -726,7 +726,10 @@ async function startHttpServer() {
   });
 
   // Health check for orchestrator itself
-  app.get("/healthz", async () => {
+  app.get("/healthz", async (request) => {
+    if (!checkAuth(request as any)) {
+      return { error: "Unauthorized", status: "error" };
+    }
     const workerStatus: Record<string, boolean> = {};
     for (const w of WORKERS) {
       workerStatus[w.name] = workerHealth.get(w.name)?.healthy ?? false;
@@ -751,7 +754,10 @@ async function startHttpServer() {
 
     // tasks/get — poll task status
     if (method === "tasks/get") {
-      const taskId = data.params?.id as string;
+      const taskId = data.params?.id;
+      if (!taskId || typeof taskId !== "string" || taskId.trim() === "") {
+        return { jsonrpc: "2.0", id: data.id, error: { code: -32602, message: "Invalid params: 'id' must be a non-empty string" } };
+      }
       const task = getTask(taskId);
       if (!task) {
         return { jsonrpc: "2.0", id: data.id, error: { code: -32602, message: `Task not found: ${taskId}` } };
@@ -761,7 +767,10 @@ async function startHttpServer() {
 
     // tasks/cancel
     if (method === "tasks/cancel") {
-      const taskId = data.params?.id as string;
+      const taskId = data.params?.id;
+      if (!taskId || typeof taskId !== "string" || taskId.trim() === "") {
+        return { jsonrpc: "2.0", id: data.id, error: { code: -32602, message: "Invalid params: 'id' must be a non-empty string" } };
+      }
       const task = markCanceled(taskId);
       if (!task) {
         return { jsonrpc: "2.0", id: data.id, error: { code: -32602, message: `Task not found or already terminal: ${taskId}` } };
@@ -794,6 +803,11 @@ async function startHttpServer() {
 
   // SSE streaming endpoint — subscribe to task events
   app.get<{ Params: { taskId: string } }>("/stream/:taskId", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized — set Authorization: Bearer <A2A_API_KEY>" };
+    }
+
     const { taskId } = request.params;
     const task = getTask(taskId);
 
@@ -855,6 +869,11 @@ async function startHttpServer() {
 
   // SSE streaming endpoint — subscribe to all task events
   app.get("/stream", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized — set Authorization: Bearer <A2A_API_KEY>" };
+    }
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -913,10 +932,14 @@ async function main() {
 
   // Prune old tasks periodically (configurable via TASK_RETENTION_HOURS, default: 1 hour)
   const retentionHours = parseFloat(process.env.TASK_RETENTION_HOURS ?? "1");
-  const retentionMs = retentionHours * 60 * 60 * 1000;
+  if (!Number.isFinite(retentionHours) || retentionHours <= 0) {
+    process.stderr.write(`[orchestrator] Invalid TASK_RETENTION_HOURS: ${process.env.TASK_RETENTION_HOURS}, using default 1 hour\n`);
+  }
+  const validRetentionHours = Number.isFinite(retentionHours) && retentionHours > 0 ? retentionHours : 1;
+  const retentionMs = validRetentionHours * 60 * 60 * 1000;
   setInterval(() => {
     const pruned = pruneTasks(retentionMs);
-    if (pruned > 0) process.stderr.write(`[orchestrator] pruned ${pruned} old tasks (retention: ${retentionHours}h)\n`);
+    if (pruned > 0) process.stderr.write(`[orchestrator] pruned ${pruned} old tasks (retention: ${validRetentionHours}h)\n`);
   }, retentionMs);
 
   // Start HTTP + MCP

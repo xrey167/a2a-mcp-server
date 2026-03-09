@@ -11,9 +11,15 @@ import {
   pruneTasks,
   toA2AResult,
   taskEvents,
+  __clearTasksForTesting,
 } from "../task-store.js";
 
 describe("Task Store", () => {
+  // Reset task store state before each test to prevent test coupling
+  beforeEach(() => {
+    __clearTasksForTesting();
+  });
+
   test("createTask creates a task in submitted state", () => {
     const task = createTask({ skillId: "run_shell" });
     expect(task.state).toBe("submitted");

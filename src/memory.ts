@@ -1,7 +1,8 @@
 import { Database } from "bun:sqlite";
-import { join } from "path";
+import { join, resolve, relative } from "path";
 import { homedir } from "os";
 import { writeFileSync, mkdirSync, unlinkSync } from "fs";
+import { createHash } from "crypto";
 
 const VAULT = process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/a2a-knowledge");
 const MEMORY_DIR = join(VAULT, "_memory");
@@ -34,9 +35,12 @@ try {
   db.run(`INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`);
 } catch {}
 
-/** Sanitize a path component to prevent directory traversal. */
+/** Sanitize a path component to prevent directory traversal. Includes hash suffix to prevent collisions. */
 function safeName(name: string): string {
-  return name.replace(/[\/\\\.]+/g, "_").replace(/^_+|_+$/g, "") || "unnamed";
+  const sanitized = name.replace(/[\/\\\.]+/g, "_").replace(/^_+|_+$/g, "") || "unnamed";
+  // Add short hash suffix to prevent collisions from different inputs mapping to same sanitized name
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, 8);
+  return `${sanitized}_${hash}`;
 }
 
 function noteFile(agent: string, key: string) {
@@ -44,9 +48,11 @@ function noteFile(agent: string, key: string) {
   const safeKey = safeName(key);
   const dir = join(MEMORY_DIR, safeAgent);
   mkdirSync(dir, { recursive: true });
-  const filePath = join(dir, `${safeKey}.md`);
-  // Ensure the resolved path is still within MEMORY_DIR
-  if (!filePath.startsWith(MEMORY_DIR)) {
+  const filePath = resolve(join(dir, `${safeKey}.md`));
+  // Ensure the resolved path is still within MEMORY_DIR using proper path resolution
+  const resolvedMemDir = resolve(MEMORY_DIR);
+  const relPath = relative(resolvedMemDir, filePath);
+  if (relPath.startsWith('..') || resolve(relPath) === relPath) {
     throw new Error(`Invalid memory path: ${filePath}`);
   }
   return filePath;
@@ -77,17 +83,17 @@ export const memory = {
   search(query: string, agent?: string): Array<{ agent: string; key: string; value: string; rank: number }> {
     if (agent) {
       return db.query<{agent:string;key:string;value:string;rank:number},[string,string]>(
-        `SELECT m.agent, m.key, m.value, f.rank
+        `SELECT m.agent, m.key, m.value, bm25(f) AS rank
          FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
          WHERE memory_fts MATCH ? AND m.agent = ?
-         ORDER BY f.rank`
+         ORDER BY rank`
       ).all(query, agent);
     }
     return db.query<{agent:string;key:string;value:string;rank:number},[string]>(
-      `SELECT m.agent, m.key, m.value, f.rank
+      `SELECT m.agent, m.key, m.value, bm25(f) AS rank
        FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
        WHERE memory_fts MATCH ?
-       ORDER BY f.rank`
+       ORDER BY rank`
     ).all(query);
   },
 
