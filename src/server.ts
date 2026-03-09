@@ -44,8 +44,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 
 // ── URL validation (SSRF prevention) ─────────────────────────────
-// Only worker ports allowed — port 8080 (orchestrator) excluded to prevent infinite recursion.
-const ALLOWED_PORTS = new Set([8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088]);
+// Only worker ports allowed — orchestrator port excluded to prevent infinite recursion.
+// Populated dynamically after WORKERS is resolved (below).
 
 // ── Webhook skill denylist ────────────────────────────────────────
 // These skills execute code or modify the filesystem and must not be
@@ -89,7 +89,7 @@ function isAllowedUrl(url: string): boolean {
 }
 
 // ── Worker definitions ──────────────────────────────────────────
-const WORKERS = [
+const ALL_WORKERS = [
   { name: "shell",     path: join(__dirname, "workers/shell.ts"),     port: 8081 },
   { name: "web",       path: join(__dirname, "workers/web.ts"),       port: 8082 },
   { name: "ai",        path: join(__dirname, "workers/ai.ts"),        port: 8083 },
@@ -99,6 +99,22 @@ const WORKERS = [
   { name: "factory",   path: join(__dirname, "workers/factory.ts"),   port: 8087 },
   { name: "data",      path: join(__dirname, "workers/data.ts"),      port: 8088 },
 ];
+
+// Apply config: filter by enabled workers and override ports
+const WORKERS = (() => {
+  const configWorkers = CONFIG.workers;
+  if (!configWorkers || configWorkers.length === 0) return ALL_WORKERS;
+  const configMap = new Map(configWorkers.map(w => [w.name, w]));
+  return ALL_WORKERS.filter(w => {
+    const cw = configMap.get(w.name);
+    return cw ? cw.enabled !== false : true; // enabled by default if not in config
+  }).map(w => {
+    const cw = configMap.get(w.name);
+    return cw?.port ? { ...w, port: cw.port } : w;
+  });
+})();
+
+const ALLOWED_PORTS = new Set(WORKERS.map(w => w.port));
 
 const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 const workerFailures = new Map<string, number>();
@@ -2143,9 +2159,10 @@ async function startHttpServer() {
     return { status: "ok", agent: "orchestrator", uptime: process.uptime(), workers: health };
   });
 
-  await app.listen({ port: 8080, host: "0.0.0.0" });
+  const httpPort = CONFIG.server.port;
+  await app.listen({ port: httpPort, host: "0.0.0.0" });
   const authStatus = A2A_API_KEY ? `auth: Bearer required for remote` : `auth: none (set A2A_API_KEY to enable)`;
-  process.stderr.write(`[orchestrator] A2A HTTP server on http://localhost:8080 — ${authStatus}\n`);
+  process.stderr.write(`[orchestrator] A2A HTTP server on http://localhost:${httpPort} — ${authStatus}\n`);
 }
 
 // ── Start ───────────────────────────────────────────────────────
@@ -2201,7 +2218,7 @@ async function main() {
 
   // Start periodic health checks (every 30s)
   pollWorkerHealth().catch(() => {});
-  setInterval(() => pollWorkerHealth().catch(() => {}), 30_000);
+  setInterval(() => pollWorkerHealth().catch(() => {}), CONFIG.server.healthPollInterval);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

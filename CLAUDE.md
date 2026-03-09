@@ -17,7 +17,7 @@ bun build src/server.ts --target bun  # type-check via bundler (no tsc installed
 The server is registered with Claude Code at user scope:
 
 ```bash
-claude mcp add --scope user a2a-mcp-bridge -- bun /Users/xrey/Developer/a2a-mcp-server/src/server.ts
+claude mcp add --scope user a2a-mcp-bridge -- bun $(pwd)/src/server.ts
 claude mcp list   # verify connection
 ```
 
@@ -137,7 +137,6 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 ## Adding a New Worker
 
 1. Create `src/workers/<name>.ts` — Fastify on a new port, export an `AGENT_CARD` and implement skills
-2. Add an entry to `WORKERS` array in `src/server.ts`
-3. Add the port to `ALLOWED_PORTS` in `src/server.ts`
-4. Optionally create a persona file at `src/personas/<name>.md`
-5. All worker output must go to stderr only
+2. Add an entry to `ALL_WORKERS` array in `src/server.ts` (ALLOWED_PORTS is auto-derived)
+3. Optionally create a persona file at `src/personas/<name>.md`
+4. All worker output must go to stderr only

@@ -97,12 +97,31 @@ Every agent shares `remember` / `recall` / `memory_search` — backed by **SQLit
 git clone https://github.com/xrey167/a2a-mcp-server
 cd a2a-mcp-server
 bun install
+
+# Create default config + .env.example
+bun src/cli.ts init
+
+# See available workers
+bun src/cli.ts workers
+```
+
+### Configure workers (optional)
+
+Disable workers you don't need in `~/.a2a-mcp/config.json`:
+
+```json
+{
+  "workers": [
+    { "name": "design", "port": 8086, "enabled": false },
+    { "name": "code", "port": 8084, "enabled": false }
+  ]
+}
 ```
 
 ### Register with Claude Code (MCP)
 
 ```bash
-claude mcp add --scope user a2a-mcp-bridge -- bun /path/to/a2a-mcp-server/src/server.ts
+claude mcp add --scope user a2a-mcp-bridge -- bun $(pwd)/src/server.ts
 ```
 
 The server starts automatically when Claude Code launches. For standalone:
@@ -701,10 +720,15 @@ Fine-grained control via JSON (see `.env.example` for quick setup):
 ## Docker
 
 ```bash
+# Quick start with Docker Compose
+docker compose up
+
+# Or build and run manually
 docker build -t a2a-mcp-server .
 docker run -p 8080-8088:8080-8088 \
   -e ANTHROPIC_API_KEY=sk-... \
   -e GOOGLE_API_KEY=... \
+  -v a2a-data:/data \
   a2a-mcp-server
 ```
 
@@ -721,9 +745,9 @@ GitHub Actions runs on every push/PR to `main`:
 ### Add a new worker agent
 
 1. Create `src/workers/<n>.ts` — Fastify server with `AGENT_CARD` and skill handlers
-2. Add to `WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
-3. Add port to `ALLOWED_PORTS` in `src/server.ts`
-4. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
+2. Add to `ALL_WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
+3. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
+4. Allowed ports are auto-derived from enabled workers — no manual list needed
 
 ### Add a plugin (hot-reloaded)
 
