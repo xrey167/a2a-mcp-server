@@ -2375,6 +2375,10 @@ async function startHttpServer() {
   // SSE endpoint — stream task events in real-time
   // Usage: curl -N http://localhost:8080/tasks/{id}/events
   app.get<{ Params: { id: string } }>("/tasks/:id/events", (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401).send({ error: "Unauthorized" });
+      return;
+    }
     const taskId = request.params.id;
     const task = getTask(taskId);
     if (!task) {
