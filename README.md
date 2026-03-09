@@ -430,18 +430,18 @@ The MCP surface is consolidated into **10 core tools** (MCX-inspired: minimal to
 
 ### MCP tools (exposed to Claude Code / ACP)
 
-|Tool               |Description                                                                      |
-|:-------------------|:--------------------------------------------------------------------------------|
-|`sandbox_execute`   |Execute TypeScript in an isolated sandbox with access to all skills via `skill(id, args)`. Supports var management (`list_vars`, `get_var`, `delete_var`).|
-|`delegate`          |Route a task to a worker agent (sync by default). Set `async: true` for fire-and-forget (returns `taskId`). Pass `taskId` to poll result.|
-|`list_agents`       |List all worker agents, external agents, and their skills.                       |
-|`run_shell_stream`  |Execute shell command with real-time streaming output.                           |
-|`design_workflow`   |Full design pipeline: suggest screens, generate each. Returns `taskId`.          |
-|`factory_workflow`  |Full project generation pipeline. Returns `taskId`.                              |
-|`workflow_execute`  |Execute a DAG workflow with parallel steps, template refs, and error policies.   |
-|`get_metrics`       |Snapshot of per-skill latency percentiles, error rates, and worker utilization.  |
-|`register_webhook`  |Register HMAC-SHA256 verified webhook that dispatches to a skill.               |
-|`list_webhooks`     |List all registered webhooks with activity stats.                                |
+|Tool|Description|
+|:---|:---|
+|`sandbox_execute`|Execute TypeScript in an isolated sandbox with access to all skills via `skill(id, args)`. Supports var management (`list_vars`, `get_var`, `delete_var`).|
+|`delegate`|Route a task to a worker agent (sync by default). Set `async: true` for fire-and-forget (returns `taskId`). Pass `taskId` to poll result.|
+|`list_agents`|List all worker agents, external agents, and their skills.|
+|`run_shell_stream`|Execute shell command with real-time streaming output.|
+|`design_workflow`|Full design pipeline: suggest screens, generate each. Returns `taskId`.|
+|`factory_workflow`|Full project generation pipeline. Returns `taskId`.|
+|`workflow_execute`|Execute a DAG workflow with parallel steps, template refs, and error policies.|
+|`get_metrics`|Snapshot of per-skill latency percentiles, error rates, and worker utilization.|
+|`register_webhook`|Register HMAC-SHA256 verified webhook that dispatches to a skill.|
+|`list_webhooks`|List all registered webhooks with activity stats.|
 
 ### Skills (callable via sandbox or delegate)
 

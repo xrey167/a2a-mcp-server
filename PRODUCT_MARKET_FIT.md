@@ -26,8 +26,8 @@ A **local, single-machine multi-agent orchestrator** that bridges MCP (Model Con
 
 | Protocol | Purpose | Adoption |
 |----------|---------|----------|
-| **MCP** (Anthropic) | Agent ↔ Tool communication | 30,000+ servers built; adopted by OpenAI, Microsoft, Google |
-| **A2A** (Google) | Agent ↔ Agent communication | 150+ orgs; donated to Linux Foundation |
+| **MCP** (Anthropic) | Agent ↔ Tool communication | Rapidly growing ecosystem of community-built servers; supported by OpenAI, Microsoft, Google and others |
+| **A2A** (Google) | Agent ↔ Agent communication | Adopted across a range of organizations; donated to Linux Foundation |
 
 These are **complementary**, not competing. MCP connects agents to tools; A2A connects agents to each other. **Our project is one of the few that bridges both.**
 
@@ -114,22 +114,22 @@ Option B gets users fast (developers). The workflow engine, tracing, and resilie
 
 ### Phase 1: Make It Installable (Weeks 1-4)
 
-- [ ] **`npx create-a2a-mcp`** or **`bunx a2a-mcp init`** — zero-config setup
-- [ ] Remove hardcoded paths (`/Users/xrey/...`, specific vault paths)
-- [ ] Config file for choosing which workers to enable
-- [ ] Docker Compose for one-command startup
-- [ ] Proper README with GIF demos and quick-start
+- [x] **`bunx a2a-mcp-server init`** — zero-config setup with profile selection (`--lite`, `--data`, `--full`)
+- [x] Remove hardcoded user-specific paths; use `~/` or configurable paths for vault locations
+- [x] Config file for choosing which workers to enable (profiles + per-worker toggle)
+- [x] Docker Compose for one-command startup
+- [x] Proper README with quick-start and architecture docs
 - [ ] Publish to npm as `a2a-mcp-server`
 
-### Phase 2: Make It Useful Out of the Box (Weeks 5-8)
+### Phase 2: Make It Useful Out of the Box (Weeks 5-12)
 
 - [ ] **Plugin system** — let users add custom workers without forking
 - [ ] **Worker marketplace/registry** — community-contributed agents
-- [ ] Pre-built "starter packs": web-dev, data-science, devops
-- [ ] Web UI dashboard for monitoring (traces, metrics, event bus)
-- [ ] Support for remote workers (not just localhost)
+- [x] Pre-built "starter packs" via profiles: `lite`, `data`, `full`
+- [x] Web UI dashboard for monitoring (traces, metrics, circuit breakers, cache)
+- [x] Support for remote workers via `remoteWorkers` config (not just localhost)
 
-### Phase 3: Make It Collaborative (Weeks 9-16)
+### Phase 3: Make It Collaborative (Weeks 13-24)
 
 - [ ] **Cloud deployment** — hosted workers, shared agent registries
 - [ ] **Team features** — shared workflows, knowledge bases, permissions
