@@ -48,6 +48,8 @@ const SKILL_TIERS: Record<string, Tier> = {
   get_trace: "enterprise",
   search_traces: "enterprise",
   audit_query: "enterprise",
+  audit_stats: "enterprise",
+  workspace_manage: "enterprise",
 };
 
 const TIER_HIERARCHY: Record<Tier, number> = {
