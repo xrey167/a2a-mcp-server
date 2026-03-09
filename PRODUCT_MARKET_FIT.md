@@ -123,8 +123,8 @@ Option B gets users fast (developers). The workflow engine, tracing, and resilie
 
 ### Phase 2: Make It Useful Out of the Box (Weeks 5-12)
 
-- [ ] **Plugin system** — let users add custom workers without forking
-- [ ] **Worker marketplace/registry** — community-contributed agents
+- [x] **Plugin system** — let users add custom workers without forking
+- [x] **Worker marketplace/registry** — community-contributed agents
 - [x] Pre-built "starter packs" via profiles: `lite`, `data`, `full`
 - [x] Web UI dashboard for monitoring (traces, metrics, circuit breakers, cache)
 - [x] Support for remote workers via `remoteWorkers` config (not just localhost)

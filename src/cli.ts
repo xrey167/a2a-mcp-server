@@ -11,6 +11,7 @@
 
 import { initConfigDir, loadConfig } from "./config.js";
 import { discoverUserWorkers, scaffoldWorker, getWorkersDir, ensureWorkersDir } from "./worker-loader.js";
+import { searchRegistry, getRegistryEntry, loadRegistry } from "./worker-registry.js";
 import { join } from "path";
 import { existsSync, writeFileSync, readFileSync } from "fs";
 import { homedir } from "os";
@@ -32,6 +33,11 @@ Commands:
   workers         List available workers and their status
   create-worker   Scaffold a new custom worker
                   Usage: create-worker <name> [--port <port>]
+  search          Search the worker registry
+                  Usage: search <query>
+  install         Install a worker from the registry
+                  Usage: install <name> [--port <port>]
+  registry        List all workers in the registry
   help            Show this help message
 
 Profiles:
@@ -166,6 +172,101 @@ function createWorkerCommand() {
   }
 }
 
+function searchCommand() {
+  const query = args.slice(1).join(" ");
+  if (!query) {
+    process.stderr.write("Usage: bun src/cli.ts search <query>\n");
+    process.stderr.write("Example: bun src/cli.ts search database\n");
+    process.exit(1);
+  }
+
+  const results = searchRegistry(query);
+  if (results.length === 0) {
+    process.stderr.write(`No workers found matching "${query}"\n`);
+    return;
+  }
+
+  process.stderr.write(`\nFound ${results.length} worker(s) matching "${query}":\n\n`);
+  for (const w of results) {
+    process.stderr.write(`  ${w.name} (v${w.version}) by ${w.author}\n`);
+    process.stderr.write(`    ${w.description}\n`);
+    process.stderr.write(`    Skills: ${w.skills.join(", ")}\n`);
+    process.stderr.write(`    Tags: ${w.tags.join(", ")}\n`);
+    process.stderr.write(`    Repo: ${w.repo}\n\n`);
+  }
+  process.stderr.write(`Install with: bun src/cli.ts install <name>\n\n`);
+}
+
+function installCommand() {
+  const name = args[1];
+  if (!name) {
+    process.stderr.write("Usage: bun src/cli.ts install <name>\n");
+    process.stderr.write("Search first: bun src/cli.ts search <query>\n");
+    process.exit(1);
+  }
+
+  const entry = getRegistryEntry(name);
+  if (!entry) {
+    process.stderr.write(`Worker "${name}" not found in registry.\n`);
+    process.stderr.write(`Search available workers: bun src/cli.ts search <query>\n`);
+    process.exit(1);
+  }
+
+  // Check if already installed
+  const existing = discoverUserWorkers().find(w => w.name === name);
+  if (existing) {
+    process.stderr.write(`Worker "${name}" is already installed at ${existing.path}\n`);
+    process.exit(1);
+  }
+
+  const portIdx = args.indexOf("--port");
+  const port = portIdx >= 0 ? parseInt(args[portIdx + 1], 10) : entry.port;
+
+  try {
+    ensureWorkersDir();
+    const dir = scaffoldWorker(name, port);
+
+    // Enhance the scaffolded worker.json with registry metadata
+    const workerJsonPath = join(dir, "worker.json");
+    const workerJson = JSON.parse(readFileSync(workerJsonPath, "utf-8"));
+    workerJson.description = entry.description;
+    workerJson.author = entry.author;
+    workerJson.version = entry.version;
+    workerJson.repo = entry.repo;
+    workerJson.skills = entry.skills;
+    writeFileSync(workerJsonPath, JSON.stringify(workerJson, null, 2));
+
+    process.stderr.write(`\nInstalled "${name}" worker at ${dir}\n\n`);
+    process.stderr.write(`  Description: ${entry.description}\n`);
+    process.stderr.write(`  Skills: ${entry.skills.join(", ")}\n`);
+    process.stderr.write(`  Repo: ${entry.repo}\n\n`);
+    process.stderr.write(`Next steps:\n`);
+    process.stderr.write(`  1. Edit ${dir}/index.ts to implement the skills\n`);
+    process.stderr.write(`     (or clone the repo: git clone ${entry.repo} ${dir})\n`);
+    process.stderr.write(`  2. Install deps if needed: cd ${dir} && bun install\n`);
+    process.stderr.write(`  3. Start the server: bun src/server.ts\n\n`);
+  } catch (err: any) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
+}
+
+function registryCommand() {
+  const registry = loadRegistry();
+  process.stderr.write(`\nWorker Registry (${registry.workers.length} workers available)\n`);
+  process.stderr.write(`Updated: ${registry.updated}\n\n`);
+
+  // Check which are already installed
+  const installed = new Set(discoverUserWorkers().map(w => w.name));
+
+  for (const w of registry.workers) {
+    const status = installed.has(w.name) ? " [installed]" : "";
+    process.stderr.write(`  ${w.name.padEnd(20)} ${w.description}${status}\n`);
+  }
+  process.stderr.write(`\nSearch: bun src/cli.ts search <query>\n`);
+  process.stderr.write(`Install: bun src/cli.ts install <name>\n\n`);
+}
+
 switch (command) {
   case "init":
     initCommand();
@@ -178,6 +279,15 @@ switch (command) {
     break;
   case "create-worker":
     createWorkerCommand();
+    break;
+  case "search":
+    searchCommand();
+    break;
+  case "install":
+    installCommand();
+    break;
+  case "registry":
+    registryCommand();
     break;
   case "help":
   case "--help":
