@@ -8,7 +8,7 @@ import { homedir } from "os";
 import { z } from "zod";
 
 function getConfigDir(): string {
-  return join(homedir(), ".a2a-mcp");
+  return join(process.env.HOME ?? homedir(), ".a2a-mcp");
 }
 
 function getConfigFile(): string {

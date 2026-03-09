@@ -12,9 +12,12 @@ export interface UserWorker {
   port: number;
 }
 
-const WORKERS_DIR = join(homedir(), ".a2a-mcp", "workers");
 // User workers start at port 8090 to avoid clashing with built-in workers (8081-8088)
 const USER_PORT_BASE = 8090;
+
+function getWorkersDirectory(): string {
+  return join(process.env.HOME ?? homedir(), ".a2a-mcp", "workers");
+}
 
 /**
  * Scan ~/.a2a-mcp/workers/ for user-defined worker directories.
@@ -22,15 +25,15 @@ const USER_PORT_BASE = 8090;
  * Port is assigned automatically starting from 8090 (or read from worker.json).
  */
 export function discoverUserWorkers(): UserWorker[] {
-  if (!existsSync(WORKERS_DIR)) return [];
+  if (!existsSync(getWorkersDirectory())) return [];
 
-  const entries = readdirSync(WORKERS_DIR).filter(name => {
-    const dir = join(WORKERS_DIR, name);
+  const entries = readdirSync(getWorkersDirectory()).filter(name => {
+    const dir = join(getWorkersDirectory(), name);
     return statSync(dir).isDirectory() && existsSync(join(dir, "index.ts"));
   });
 
   return entries.map((name, i) => {
-    const dir = join(WORKERS_DIR, name);
+    const dir = join(getWorkersDirectory(), name);
     // Check for worker.json config
     let port = USER_PORT_BASE + i;
     const configPath = join(dir, "worker.json");
@@ -48,7 +51,7 @@ export function discoverUserWorkers(): UserWorker[] {
  * Scaffold a new worker in ~/.a2a-mcp/workers/<name>/
  */
 export function scaffoldWorker(name: string, port?: number): string {
-  const dir = join(WORKERS_DIR, name);
+  const dir = join(getWorkersDirectory(), name);
   if (existsSync(dir)) {
     throw new Error(`Worker "${name}" already exists at ${dir}`);
   }
@@ -121,11 +124,11 @@ app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
 }
 
 export function getWorkersDir(): string {
-  return WORKERS_DIR;
+  return getWorkersDirectory();
 }
 
 export function ensureWorkersDir(): void {
-  if (!existsSync(WORKERS_DIR)) {
-    mkdirSync(WORKERS_DIR, { recursive: true });
+  if (!existsSync(getWorkersDirectory())) {
+    mkdirSync(getWorkersDirectory(), { recursive: true });
   }
 }

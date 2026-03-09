@@ -62,6 +62,54 @@ describe("URL validation (SSRF prevention)", () => {
   });
 });
 
+describe("URL validation with remote worker whitelist", () => {
+  // Updated validation logic matching server.ts: supports configured remote URLs
+  const ALLOWED_PORTS = new Set([8081, 8082, 8083]);
+  const ALLOWED_REMOTE_URLS = new Set(["https://agent.example.com", "http://192.168.1.100:9090"]);
+
+  function isAllowedUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+      if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+        const port = parseInt(parsed.port || "80", 10);
+        return ALLOWED_PORTS.has(port);
+      }
+      const origin = parsed.origin;
+      for (const allowed of ALLOWED_REMOTE_URLS) {
+        try { if (new URL(allowed).origin === origin) return true; } catch {}
+      }
+      return false;
+    } catch { return false; }
+  }
+
+  test("allows configured remote URLs", () => {
+    expect(isAllowedUrl("https://agent.example.com")).toBe(true);
+    expect(isAllowedUrl("https://agent.example.com/a2a")).toBe(true);
+    expect(isAllowedUrl("http://192.168.1.100:9090")).toBe(true);
+    expect(isAllowedUrl("http://192.168.1.100:9090/healthz")).toBe(true);
+  });
+
+  test("blocks non-whitelisted remote URLs", () => {
+    expect(isAllowedUrl("https://evil.example.com")).toBe(false);
+    expect(isAllowedUrl("http://192.168.1.100:9091")).toBe(false);
+    expect(isAllowedUrl("http://192.168.1.101:9090")).toBe(false);
+  });
+
+  test("still allows localhost on allowed ports", () => {
+    expect(isAllowedUrl("http://localhost:8081")).toBe(true);
+  });
+
+  test("still blocks cloud metadata endpoints", () => {
+    expect(isAllowedUrl("http://169.254.169.254/latest/meta-data")).toBe(false);
+    expect(isAllowedUrl("http://metadata.google.internal")).toBe(false);
+  });
+
+  test("origin matching ignores path/query/fragment", () => {
+    expect(isAllowedUrl("https://agent.example.com/foo?bar=1#baz")).toBe(true);
+  });
+});
+
 describe("Persona name validation (path traversal prevention)", () => {
   const ALLOWED_PERSONAS = new Set(["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent"]);
 
