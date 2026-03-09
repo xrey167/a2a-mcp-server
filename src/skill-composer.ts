@@ -79,7 +79,8 @@ export function compose(name: string, steps: PipelineStep[], description?: strin
   };
   pipelines.set(pipeline.id, pipeline);
   pipelines.set(name, pipeline); // also index by name
-  process.stderr.write(`[composer] pipeline registered: ${name} (${steps.length} steps)\n`);
+  const safeName = name.replace(/[\r\n]/g, "");
+  process.stderr.write(`[composer] pipeline registered: ${safeName} (${steps.length} steps)\n`);
   return pipeline;
 }
 

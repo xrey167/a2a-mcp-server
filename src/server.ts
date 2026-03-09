@@ -256,13 +256,13 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
       // Cache the result
       putInCache(params.skillId ?? "", cacheArgs as Record<string, unknown>, res);
       // Publish event
-      publish(`agent.${workerName}.completed`, { skillId: params.skillId, resultLength: res.length }, { source: workerName, correlationId: trace.traceId }).catch(() => {});
+      publish(`agent.${workerName}.completed`, { skillId: params.skillId, resultLength: res.length }, { source: workerName, correlationId: trace.traceId }).catch(e => process.stderr.write(`[event-bus] publish error: ${e}\n`));
       return res;
     } catch (err) {
       decrementActive(params.skillId ?? "unknown", workerName);
       endTimer(err instanceof Error ? err.message : String(err));
       span.setTag("error", String(err)).end("error");
-      publish(`agent.${workerName}.failed`, { skillId: params.skillId, error: String(err) }, { source: workerName, correlationId: trace.traceId }).catch(() => {});
+      publish(`agent.${workerName}.failed`, { skillId: params.skillId, error: String(err) }, { source: workerName, correlationId: trace.traceId }).catch(e => process.stderr.write(`[event-bus] publish error: ${e}\n`));
       throw err;
     }
   }
@@ -762,6 +762,10 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     case "event_publish": {
       const topic = args.topic as string;
       if (!topic) throw new Error("event_publish requires topic");
+      // Restrict user-published topics to "user." prefix to prevent spoofing internal events
+      if (!topic.startsWith("user.")) {
+        throw new Error(`event_publish: user topics must start with "user." prefix, got: "${topic}"`);
+      }
       const event = await publish(topic, args.data ?? {}, {
         source: (args.source as string) ?? "user",
         correlationId: args.correlationId as string | undefined,
@@ -773,9 +777,13 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     case "event_subscribe": {
       const pattern = args.pattern as string;
       if (!pattern) throw new Error("event_subscribe requires pattern");
-      // MCP subscriptions store events for later retrieval
+      // MCP subscriptions store events for later retrieval — filter out sensitive metadata
       const events: AgentEvent[] = [];
-      const subId = subscribe(pattern, (event) => { events.push(event); }, {
+      const subId = subscribe(pattern, (event) => {
+        // Strip internal metadata before exposing to MCP users
+        const { meta: _meta, ...safeEvent } = event;
+        events.push(safeEvent as AgentEvent);
+      }, {
         name: (args.name as string) ?? "mcp-subscriber",
         filter: args.filter as Record<string, unknown> | undefined,
       });
@@ -839,6 +847,15 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
       const agents = args.agents as string[];
       if (!agents || !Array.isArray(agents)) throw new Error("collaborate requires agents array");
 
+      const validStrategies: CollaborationRequest["strategy"][] = ["fan_out", "consensus", "debate", "map_reduce"];
+      if (!validStrategies.includes(strategy as CollaborationRequest["strategy"])) {
+        throw new Error(`Invalid strategy: ${strategy}. Must be one of: ${validStrategies.join(", ")}`);
+      }
+      const validMergeStrategies = ["concat", "best_score", "majority_vote", "custom"];
+      if (args.mergeStrategy && !validMergeStrategies.includes(args.mergeStrategy as string)) {
+        throw new Error(`Invalid mergeStrategy: ${args.mergeStrategy}. Must be one of: ${validMergeStrategies.join(", ")}`);
+      }
+
       const task = createTask({ skillId: "collaborate" });
       markWorking(task.id);
 
@@ -849,11 +866,12 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
               strategy: strategy as CollaborationRequest["strategy"],
               query,
               agents,
-              mergeStrategy: args.mergeStrategy as any,
+              mergeStrategy: args.mergeStrategy as CollaborationRequest["mergeStrategy"],
               maxRounds: args.maxRounds as number | undefined,
               items: args.items as unknown[] | undefined,
               timeoutMs: args.timeoutMs as number | undefined,
               mergePrompt: args.mergePrompt as string | undefined,
+              judgeAgent: args.judgeAgent as string | undefined,
             },
             (sid, a, t) => dispatchSkill(sid, a, t),
           );

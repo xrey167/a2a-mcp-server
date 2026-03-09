@@ -280,7 +280,17 @@ export function resetEventBus(): void {
 
 function pruneHistory(): void {
   const cutoff = Date.now() - HISTORY_TTL_MS;
-  while (eventHistory.length > MAX_HISTORY || (eventHistory.length > 0 && new Date(eventHistory[0].timestamp).getTime() < cutoff)) {
-    eventHistory.shift();
+  // Find first index to keep (avoids O(n²) from repeated shift())
+  let removeCount = 0;
+  for (let i = 0; i < eventHistory.length; i++) {
+    if (new Date(eventHistory[i].timestamp).getTime() < cutoff) {
+      removeCount = i + 1;
+    } else {
+      break;
+    }
   }
+  // Also enforce max size
+  const overCapacity = eventHistory.length - removeCount - MAX_HISTORY;
+  if (overCapacity > 0) removeCount += overCapacity;
+  if (removeCount > 0) eventHistory.splice(0, removeCount);
 }

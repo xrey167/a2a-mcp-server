@@ -99,12 +99,17 @@ function cacheKey(skillId: string, args: Record<string, unknown>): string {
   return createHash("sha256").update(payload).digest("hex").slice(0, 32);
 }
 
-function stableStringify(obj: unknown): string {
+const MAX_STRINGIFY_DEPTH = 20;
+
+function stableStringify(obj: unknown, depth = 0, seen = new WeakSet<object>()): string {
   if (obj === null || obj === undefined) return String(obj);
   if (typeof obj !== "object") return JSON.stringify(obj);
-  if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(",")}]`;
+  if (depth > MAX_STRINGIFY_DEPTH) return '"[max depth]"';
+  if (seen.has(obj as object)) return '"[circular]"';
+  seen.add(obj as object);
+  if (Array.isArray(obj)) return `[${obj.map(v => stableStringify(v, depth + 1, seen)).join(",")}]`;
   const sorted = Object.keys(obj as Record<string, unknown>).sort();
-  return `{${sorted.map(k => `${JSON.stringify(k)}:${stableStringify((obj as Record<string, unknown>)[k])}`).join(",")}}`;
+  return `{${sorted.map(k => `${JSON.stringify(k)}:${stableStringify((obj as Record<string, unknown>)[k], depth + 1, seen)}`).join(",")}}`;
 }
 
 // ── Public API ───────────────────────────────────────────────────

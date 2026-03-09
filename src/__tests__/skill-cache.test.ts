@@ -28,7 +28,7 @@ describe("Skill Cache", () => {
   test("expiration removes entry", async () => {
     putInCache("test_skill", { x: 1 }, "data", { ttlMs: 50 });
     expect(getFromCache("test_skill", { x: 1 })).toBe("data");
-    await new Promise(r => setTimeout(r, 60));
+    await Bun.sleep(60);
     expect(getFromCache("test_skill", { x: 1 })).toBeUndefined();
   });
 
@@ -66,5 +66,23 @@ describe("Skill Cache", () => {
     expect(getFromCache("custom_skill", { a: 1 })).toBe("data");
     configureCacheSkill("custom_skill", "no-cache");
     expect(getFromCache("custom_skill", { a: 1 })).toBeUndefined();
+  });
+
+  test("handles circular references in args", () => {
+    const obj: Record<string, unknown> = { a: 1 };
+    obj.self = obj; // circular reference
+    // Should not throw a stack overflow
+    putInCache("test_skill", obj, "data");
+    expect(getFromCache("test_skill", obj)).toBe("data");
+  });
+
+  test("handles deeply nested args", () => {
+    let nested: Record<string, unknown> = { value: "deep" };
+    for (let i = 0; i < 30; i++) {
+      nested = { child: nested };
+    }
+    // Should not throw a stack overflow
+    putInCache("test_skill", nested, "data");
+    expect(getFromCache("test_skill", nested)).toBe("data");
   });
 });

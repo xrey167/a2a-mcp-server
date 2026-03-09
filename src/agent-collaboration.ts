@@ -42,6 +42,8 @@ export interface CollaborationRequest {
   timeoutMs?: number;
   /** Custom merge prompt (used when mergeStrategy is "custom") */
   mergePrompt?: string;
+  /** Agent/skill to use for scoring/synthesis (default: "ask_claude") */
+  judgeAgent?: string;
 }
 
 export interface AgentResponse {
@@ -115,8 +117,9 @@ async function fanOut(
       .filter(r => !r.error)
       .map(r => `<response agent="${r.agent}">\n${r.result}\n</response>`)
       .join("\n");
-    output = await dispatch("ask_claude", {
-      prompt: `${request.mergePrompt}\n\nResponses:\n${responseSummary}`,
+    const judgeAgent = request.judgeAgent ?? "ask_claude";
+    output = await dispatch(judgeAgent, {
+      prompt: `<merge_instructions>\n${request.mergePrompt}\n</merge_instructions>\n\n<responses>\n${responseSummary}\n</responses>`,
     }, request.mergePrompt);
   } else {
     output = responses.filter(r => !r.error).map(r => r.result).join("\n\n");
@@ -156,16 +159,23 @@ async function consensus(
     .map((r, i) => `<option id="${i}" agent="${r.agent}">\n${r.result}\n</option>`)
     .join("\n");
 
-  const scoringPrompt = `You are judging multiple agent responses to this query: "${request.query}"
+  const judgeAgent = request.judgeAgent ?? "ask_claude";
+  const scoringPrompt = `You are judging multiple agent responses to a query.
 
+<query>
+${request.query}
+</query>
+
+<responses>
 ${responseSummary}
+</responses>
 
 Rate each option on quality (1-10) and explain briefly. Then pick the best one.
 Reply with JSON: { "scores": [{"id": 0, "score": 8, "reason": "..."}, ...], "bestId": 0, "agreement": 0.85 }
 "agreement" is 0-1 indicating how much the responses agree with each other.`;
 
   try {
-    const scoring = await dispatch("ask_claude", { prompt: scoringPrompt }, scoringPrompt);
+    const scoring = await dispatch(judgeAgent, { prompt: scoringPrompt }, scoringPrompt);
     const parsed = JSON.parse(scoring);
     const bestId = parsed.bestId ?? 0;
     const agreement = parsed.agreement ?? 0;
@@ -221,23 +231,28 @@ async function debate(
     const critiqueTasks = request.agents.map(async (agent, i) => {
       const others = validPrev.filter((_, j) => j !== i);
       const othersSummary = others
-        .map(r => `[${r.agent}]: ${r.result}`)
-        .join("\n\n");
+        .map(r => `<perspective agent="${r.agent}">\n${r.result}\n</perspective>`)
+        .join("\n");
 
       const myPrev = validPrev.find(r => r.agent === agent);
-      const prompt = `You previously answered: "${myPrev?.result ?? "(no previous answer)"}"
+      const prompt = `You previously answered:
+<previous_answer>
+${myPrev?.result ?? "(no previous answer)"}
+</previous_answer>
 
 Other agents responded:
 ${othersSummary}
 
-Original question: "${request.query}"
+<original_question>
+${request.query}
+</original_question>
 
 Consider the other perspectives. If they raise valid points you missed, improve your answer. If you disagree, explain why.
 Provide your refined answer.`;
 
       const agentStart = Date.now();
       try {
-        const result = await dispatch(agent === request.agents[0] ? "ask_claude" : agent, { prompt }, prompt);
+        const result = await dispatch(agent, { prompt }, prompt);
         return { agent, result, durationMs: Date.now() - agentStart, round: round + 1 } as AgentResponse;
       } catch (err) {
         return { agent, result: "", error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - agentStart, round: round + 1 } as AgentResponse;
@@ -252,13 +267,14 @@ Provide your refined answer.`;
   const finalResponses = currentResponses.filter(r => !r.error);
   let output: string;
 
+  const judgeAgent = request.judgeAgent ?? "ask_claude";
   if (finalResponses.length > 1) {
     const summary = finalResponses
-      .map(r => `[${r.agent}]: ${r.result}`)
-      .join("\n\n");
+      .map(r => `<perspective agent="${r.agent}">\n${r.result}\n</perspective>`)
+      .join("\n");
     try {
-      output = await dispatch("ask_claude", {
-        prompt: `Synthesize these refined perspectives into a single coherent answer:\n\n${summary}\n\nOriginal question: "${request.query}"`,
+      output = await dispatch(judgeAgent, {
+        prompt: `Synthesize these refined perspectives into a single coherent answer:\n\n${summary}\n\n<original_question>\n${request.query}\n</original_question>`,
       }, "");
     } catch {
       output = finalResponses[0].result;
@@ -317,9 +333,10 @@ async function mapReduce(
 
   if (request.mergePrompt) {
     const resultsSummary = validResults.map(r => r.result).join("\n\n");
+    const judgeAgent = request.judgeAgent ?? "ask_claude";
     try {
-      output = await dispatch("ask_claude", {
-        prompt: `${request.mergePrompt}\n\nPartial results:\n${resultsSummary}`,
+      output = await dispatch(judgeAgent, {
+        prompt: `<merge_instructions>\n${request.mergePrompt}\n</merge_instructions>\n\n<partial_results>\n${resultsSummary}\n</partial_results>`,
       }, "");
     } catch {
       output = resultsSummary;
