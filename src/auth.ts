@@ -61,19 +61,44 @@ const ROLE_PERMISSIONS: Record<Role, Set<string>> = {
 
 // ── File I/O ────────────────────────────────────────────────────
 
+/** In-memory cache of the auth store — populated on first read, updated on every write. */
+let authCache: AuthStore | null = null;
+
 function readStore(): AuthStore {
-  if (!existsSync(AUTH_FILE)) return { keys: [] };
+  if (authCache !== null) {
+    // Detect external deletion (e.g., in tests or manual cleanup):
+    // if the backing file was removed since last cache load, reset the cache.
+    if (!existsSync(AUTH_FILE)) {
+      authCache = { keys: [] };
+    }
+    return authCache;
+  }
+  if (!existsSync(AUTH_FILE)) {
+    authCache = { keys: [] };
+    return authCache;
+  }
   try {
-    return JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
+    authCache = JSON.parse(readFileSync(AUTH_FILE, "utf-8")) as AuthStore;
+    return authCache;
   } catch {
-    return { keys: [] };
+    authCache = { keys: [] };
+    return authCache;
   }
 }
 
 function writeStore(store: AuthStore): void {
+  authCache = store; // keep cache in sync before the disk write
   if (!existsSync(AUTH_DIR)) mkdirSync(AUTH_DIR, { recursive: true });
   writeFileSync(AUTH_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
   chmodSync(AUTH_FILE, 0o600);
+}
+
+/**
+ * Invalidate the in-memory auth cache (e.g. after an external edit to auth.json).
+ * The next call to readStore() will re-read from disk.
+ */
+export function invalidateAuthCache(): void {
+  authCache = null;
 }
 
 // ── Deferred lastUsedAt updates ─────────────────────────────────
@@ -171,20 +196,33 @@ export function createApiKey(
 }
 
 /**
- * Validate an API key and return its entry, or null if invalid/expired.
+ * Look up an API key and return its entry if it exists and is not expired,
+ * WITHOUT recording a lastUsedAt update. Use this for pure existence/validity
+ * checks (e.g. auth middleware) to avoid double side-effects when the same
+ * request later calls validateApiKey() to fetch the entry for RBAC purposes.
  */
-export function validateApiKey(key: string): ApiKeyEntry | null {
+export function lookupApiKey(key: string): ApiKeyEntry | null {
   const store = readStore();
   const hash = hashKey(key);
   const entry = store.keys.find(k => k.keyHash === hash);
   if (!entry) return null;
   if (entry.expiresAt && Date.now() > entry.expiresAt) return null;
+  return entry;
+}
+
+/**
+ * Validate an API key and return its entry, or null if invalid/expired.
+ * Also records a lastUsedAt update (deferred flush — no synchronous disk I/O).
+ */
+export function validateApiKey(key: string): ApiKeyEntry | null {
+  const entry = lookupApiKey(key);
+  if (!entry) return null;
 
   // Update lastUsedAt in memory and schedule a deferred flush to avoid
   // blocking the event loop with a synchronous file write on every call.
   const now = Date.now();
   entry.lastUsedAt = now;
-  pendingLastUsed.set(hash, now);
+  pendingLastUsed.set(entry.keyHash, now);
   scheduleDeferredFlush();
   return entry;
 }
