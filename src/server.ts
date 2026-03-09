@@ -41,7 +41,7 @@ import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracin
 import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats, configureCacheSkill } from "./skill-cache.js";
 import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
 import { auditLog, auditQuery, auditStats, closeAuditDb } from "./audit.js";
-import { validateApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, type ApiKeyEntry } from "./auth.js";
+import { validateApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed, type ApiKeyEntry } from "./auth.js";
 import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace } from "./workspace.js";
 import { isSkillLicensed, getSkillTier, getSkillsByTier, getLicenseInfo } from "./skill-tier.js";
 import { registerHealthRoutes, markReady, updateWorkerHealth as updateCloudWorkerHealth, installShutdownHandlers, onShutdown } from "./cloud.js";
@@ -2549,7 +2549,7 @@ async function main() {
 
   // Register graceful shutdown handlers
   installShutdownHandlers();
-  onShutdown(async () => { closeAuditDb(); shutdownWorkers(); });
+  onShutdown(async () => { flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
 
   // Start periodic health checks (every 30s)
   pollWorkerHealth().catch(() => {});

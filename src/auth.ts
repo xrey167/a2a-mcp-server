@@ -76,6 +76,57 @@ function writeStore(store: AuthStore): void {
   chmodSync(AUTH_FILE, 0o600);
 }
 
+// ── Deferred lastUsedAt updates ─────────────────────────────────
+// Accumulate lastUsedAt timestamps in memory and flush to disk periodically
+// to avoid blocking the event loop with a synchronous write on every validation.
+
+const pendingLastUsed = new Map<string, number>(); // keyHash → lastUsedAt
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+const FLUSH_DELAY_MS = 30_000; // flush at most once per 30 s
+
+function scheduleDeferredFlush(): void {
+  if (flushTimer !== null) return; // already scheduled
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    flushPendingLastUsed();
+  }, FLUSH_DELAY_MS);
+  // Allow the process to exit even while the timer is pending.
+  (flushTimer as { unref?: () => void }).unref?.();
+}
+
+/**
+ * Flush all pending lastUsedAt updates to disk.
+ * Called automatically on process "exit"; should also be called during
+ * graceful shutdown so no usage data is lost.
+ */
+export function flushPendingLastUsed(): void {
+  if (pendingLastUsed.size === 0) return;
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  const snapshot = new Map(pendingLastUsed);
+  pendingLastUsed.clear();
+  try {
+    const store = readStore();
+    let changed = false;
+    for (const entry of store.keys) {
+      const ts = snapshot.get(entry.keyHash);
+      if (ts !== undefined) {
+        entry.lastUsedAt = ts;
+        changed = true;
+      }
+    }
+    if (changed) writeStore(store);
+  } catch (err) {
+    // Best-effort: don't crash on flush errors, but surface them so operators can investigate
+    process.stderr.write(`[auth] flushPendingLastUsed error: ${err}\n`);
+  }
+}
+
+// Last-resort synchronous flush on normal process exit
+process.on("exit", flushPendingLastUsed);
+
 // ── Key helpers ─────────────────────────────────────────────────
 
 function hashKey(key: string): string {
@@ -119,9 +170,12 @@ export function validateApiKey(key: string): ApiKeyEntry | null {
   if (!entry) return null;
   if (entry.expiresAt && Date.now() > entry.expiresAt) return null;
 
-  // Update lastUsedAt
-  entry.lastUsedAt = Date.now();
-  writeStore(store);
+  // Update lastUsedAt in memory and schedule a deferred flush to avoid
+  // blocking the event loop with a synchronous file write on every call.
+  const now = Date.now();
+  entry.lastUsedAt = now;
+  pendingLastUsed.set(hash, now);
+  scheduleDeferredFlush();
   return entry;
 }
 
