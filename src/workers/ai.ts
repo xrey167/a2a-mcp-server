@@ -1,9 +1,18 @@
 import Fastify from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
-import { spawnSync } from "child_process";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
-import { memory } from "../memory.js";
+import { z } from "zod";
+import { handleMemorySkill } from "../worker-memory.js";
+import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
+import { safeStringify } from "../safe-json.js";
+
+const AiSchemas = {
+  ask_claude: z.object({ prompt: z.string().min(1), model: z.string().optional(), max_tokens: z.number().int().positive().optional() }).passthrough(),
+  search_files: z.object({ pattern: z.string().min(1), directory: z.string().optional().default(".") }).passthrough(),
+  query_sqlite: z.object({ database: z.string().min(1), sql: z.string().min(1) }).passthrough(),
+};
+import { runClaudeCLI } from "../claude-cli.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
 
@@ -25,39 +34,33 @@ const AGENT_CARD = {
   ],
 };
 
-function runClaudeCLI(prompt: string, model: string): string {
-  const result = spawnSync(
-    "claude",
-    ["-p", prompt, "--model", model, "--output-format", "text", "--dangerously-skip-permissions"],
-    { encoding: "utf-8", timeout: 60_000, env: { ...process.env, CLAUDECODE: undefined } as NodeJS.ProcessEnv }
-  );
-  if (result.error) throw new Error(result.error.message);
-  if (result.status !== 0) throw new Error(result.stderr || "claude CLI failed");
-  return result.stdout.trim();
-}
-
-async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
+async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string | Record<string, unknown>> {
+  const memResult = handleMemorySkill(NAME, skillId, args);
+  if (memResult !== null) return memResult;
   switch (skillId) {
     case "ask_claude": {
-      const prompt = (args.prompt as string) ?? text;
+      const { prompt, model: argModel, max_tokens: argMaxTokens } = AiSchemas.ask_claude.parse({ prompt: args.prompt ?? text, ...args });
       const persona = getPersona(NAME);
-      const model = (args.model as string) ?? persona.model;
+      const model = argModel ?? persona.model;
+      const envMaxTokens = parseInt(process.env.A2A_ASK_CLAUDE_MAX_TOKENS ?? "4096", 10);
+      const maxTokens = argMaxTokens ?? (Number.isNaN(envMaxTokens) ? 4096 : envMaxTokens);
       try {
         const client = new Anthropic();
         const message = await client.messages.create({
-          model, max_tokens: 1024,
+          model, max_tokens: maxTokens,
           system: persona.systemPrompt || undefined,
           messages: [{ role: "user", content: prompt }],
         });
         const block = message.content[0];
-        return block.type === "text" ? block.text : JSON.stringify(block);
+        return block.type === "text" ? block.text : safeStringify(block);
       } catch {
-        return runClaudeCLI(prompt, model);
+        // Fallback to claude CLI (Claude Code OAuth). --strict-mcp-config
+        // prevents re-spawning the MCP server on already-occupied ports.
+        return await runClaudeCLI(prompt, model);
       }
     }
     case "search_files": {
-      const pattern = (args.pattern as string) ?? text;
-      const directory = (args.directory as string) ?? ".";
+      const { pattern, directory } = AiSchemas.search_files.parse({ pattern: args.pattern ?? text, ...args });
       const glob = new Glob(pattern);
       const matches: string[] = [];
       for await (const file of glob.scan(directory)) {
@@ -66,26 +69,17 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       return matches.length > 0 ? matches.join("\n") : "No files found";
     }
     case "query_sqlite": {
-      const database = args.database as string;
-      const sql = args.sql as string;
+      const { database, sql } = AiSchemas.query_sqlite.parse(args);
+      if (!sql.trim().toUpperCase().startsWith("SELECT")) {
+        return "Only SELECT queries are allowed";
+      }
       const db = new Database(database, { readonly: true });
       try {
         const rows = db.query(sql).all();
-        return JSON.stringify(rows, null, 2);
+        return { kind: "data" as const, data: rows };
       } finally {
         db.close();
       }
-    }
-    case "remember": {
-      const key = args.key as string;
-      const value = args.value as string;
-      memory.set(NAME, key, value);
-      return `Remembered: ${key}`;
-    }
-    case "recall": {
-      const key = args.key as string | undefined;
-      if (key) return memory.get(NAME, key) ?? `No memory found for key: ${key}`;
-      return JSON.stringify(memory.all(NAME), null, 2);
     }
     default: {
       // Check dynamically loaded plugin skills
@@ -114,16 +108,15 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     return { jsonrpc: "2.0", error: { code: -32601, message: "Method not found" } };
   }
 
+  const sizeErr = checkRequestSize(data);
+  if (sizeErr) { reply.code(413); return { jsonrpc: "2.0", error: { code: -32000, message: sizeErr } }; }
+
   const { skillId, args, message, id: taskId } = data.params ?? {};
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "ask_claude";
-  const resultText = await handleSkill(sid, args ?? { prompt: text }, text);
-
-  return {
-    jsonrpc: "2.0", id: data.id,
-    result: { id: taskId, status: { state: "completed" },
-      artifacts: [{ parts: [{ text: resultText }] }] },
-  };
+  const result = await handleSkill(sid, args ?? { prompt: text }, text);
+  const resultText = typeof result === "string" ? result : safeStringify(result, 2);
+  return buildA2AResponse(data.id, taskId, resultText);
 });
 
 // Init persona + plugin hot-reload

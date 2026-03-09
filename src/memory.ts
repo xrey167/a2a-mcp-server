@@ -1,12 +1,17 @@
 import { Database } from "bun:sqlite";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import { homedir } from "os";
 import { writeFileSync, mkdirSync, unlinkSync } from "fs";
+import { buildFtsQuery } from "./search.js";
 
 const VAULT = process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/a2a-knowledge");
 const MEMORY_DIR = join(VAULT, "_memory");
 
-const db = new Database(join(homedir(), ".a2a-memory.db"));
+const dbPath = process.env.A2A_MEMORY_DB ?? join(homedir(), ".a2a-memory.db");
+const db = new Database(dbPath);
+// WAL journal mode: 6 processes share this file; without WAL, concurrent writes
+// produce SQLITE_BUSY errors that silently drop data.
+db.run("PRAGMA journal_mode=WAL");
 db.run(`CREATE TABLE IF NOT EXISTS memory (
   agent TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
   ts INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY (agent, key)
@@ -39,16 +44,22 @@ function safeName(name: string): string {
   return name.replace(/[\/\\\.]+/g, "_").replace(/^_+|_+$/g, "") || "unnamed";
 }
 
-function noteFile(agent: string, key: string) {
+/** Pure path builder — does NOT create directories (safe for delete/read). */
+function noteFilePath(agent: string, key: string): string {
   const safeAgent = safeName(agent);
   const safeKey = safeName(key);
-  const dir = join(MEMORY_DIR, safeAgent);
-  mkdirSync(dir, { recursive: true });
-  const filePath = join(dir, `${safeKey}.md`);
-  // Ensure the resolved path is still within MEMORY_DIR
-  if (!filePath.startsWith(MEMORY_DIR)) {
+  const filePath = resolve(join(MEMORY_DIR, safeAgent, `${safeKey}.md`));
+  const memoryDirResolved = resolve(MEMORY_DIR) + sep;
+  if (!filePath.startsWith(memoryDirResolved)) {
     throw new Error(`Invalid memory path: ${filePath}`);
   }
+  return filePath;
+}
+
+/** Creates parent directory and returns the note path (use only when writing). */
+function noteFile(agent: string, key: string): string {
+  const filePath = noteFilePath(agent, key);
+  mkdirSync(join(filePath, ".."), { recursive: true });
   return filePath;
 }
 
@@ -70,25 +81,45 @@ export const memory = {
   },
   forget(agent: string, key: string) {
     db.run(`DELETE FROM memory WHERE agent=? AND key=?`, [agent, key]);
-    try { unlinkSync(noteFile(agent, key)); } catch {}
+    try { unlinkSync(noteFilePath(agent, key)); } catch {} // clean up markdown file too
   },
 
-  /** Full-text search across all memories. Optionally filter by agent. */
+  /** Full-text search across all memories with LIKE fallback. Optionally filter by agent. */
   search(query: string, agent?: string): Array<{ agent: string; key: string; value: string; rank: number }> {
-    if (agent) {
-      return db.query<{agent:string;key:string;value:string;rank:number},[string,string]>(
-        `SELECT m.agent, m.key, m.value, f.rank
-         FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
-         WHERE memory_fts MATCH ? AND m.agent = ?
-         ORDER BY f.rank`
-      ).all(query, agent);
-    }
-    return db.query<{agent:string;key:string;value:string;rank:number},[string]>(
-      `SELECT m.agent, m.key, m.value, f.rank
-       FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
-       WHERE memory_fts MATCH ?
-       ORDER BY f.rank`
-    ).all(query);
+    const ftsQuery = buildFtsQuery(query);
+
+    // Layer 1: FTS5 MATCH with proper query building
+    try {
+      const ftsResults = agent
+        ? db.query<{agent:string;key:string;value:string;rank:number},[string,string]>(
+            `SELECT m.agent, m.key, m.value, f.rank
+             FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
+             WHERE memory_fts MATCH ? AND m.agent = ?
+             ORDER BY f.rank`
+          ).all(ftsQuery, agent)
+        : db.query<{agent:string;key:string;value:string;rank:number},[string]>(
+            `SELECT m.agent, m.key, m.value, f.rank
+             FROM memory_fts f JOIN memory m ON f.rowid = m.rowid
+             WHERE memory_fts MATCH ?
+             ORDER BY f.rank`
+          ).all(ftsQuery);
+      if (ftsResults.length > 0) return ftsResults;
+    } catch {}
+
+    // Layer 2: LIKE fallback for partial/substring matches
+    const likePattern = `%${query}%`;
+    const likeResults = agent
+      ? db.query<{agent:string;key:string;value:string;rank:number},[string,string,string]>(
+          `SELECT agent, key, value, 0 as rank FROM memory
+           WHERE (key LIKE ? OR value LIKE ?) AND agent = ?
+           ORDER BY ts DESC LIMIT 20`
+        ).all(likePattern, likePattern, agent)
+      : db.query<{agent:string;key:string;value:string;rank:number},[string,string]>(
+          `SELECT agent, key, value, 0 as rank FROM memory
+           WHERE key LIKE ? OR value LIKE ?
+           ORDER BY ts DESC LIMIT 20`
+        ).all(likePattern, likePattern);
+    return likeResults;
   },
 
   /** List all keys for an agent, optionally filtered by prefix. */
@@ -115,7 +146,7 @@ export const memory = {
     db.run(`DELETE FROM memory WHERE ts < ?`, [cutoff]);
     // Clean up Obsidian files
     for (const r of rows) {
-      try { unlinkSync(noteFile(r.agent, r.key)); } catch {}
+      try { unlinkSync(noteFilePath(r.agent, r.key)); } catch {}
     }
     return rows.length;
   },

@@ -28,6 +28,7 @@ export interface Task {
   workerUrl?: string;
   artifacts: TaskArtifact[];
   error?: TaskError;
+  progress?: string;   // latest progress message (updated in-place)
   createdAt: number;
   updatedAt: number;
 }
@@ -82,6 +83,7 @@ export function markWorking(taskId: string, progressText?: string): Task | null 
 export function emitProgress(taskId: string, text: string): void {
   const task = tasks.get(taskId);
   if (!task || task.state !== "working") return;
+  task.progress = text;
   task.updatedAt = Date.now();
   emitEvent(task, "progress", text);
 }

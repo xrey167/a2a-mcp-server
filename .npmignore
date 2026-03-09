@@ -1,0 +1,23 @@
+node_modules/
+.env
+.env.*
+*.db
+*.db-journal
+~/.a2a-mcp/
+~/.a2a-memory.db
+~/.a2a-sandbox.db
+
+# Development files
+src/__tests__/
+*.test.ts
+.git/
+.github/
+.vscode/
+CLAUDE.md
+PRODUCT_MARKET_FIT.md
+docker-compose.yml
+Dockerfile
+
+# OS files
+.DS_Store
+Thumbs.db
