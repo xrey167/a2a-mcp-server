@@ -595,7 +595,17 @@ function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
   return (OrchestratorSchemas[skill] as z.ZodType).parse(args);
 }
 
-async function dispatchSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
+async function dispatchSkill(skillId: string, args: Record<string, unknown>, text: string, caller?: ApiKeyEntry): Promise<string> {
+  // ── License gate ───────────────────────────────────────────────
+  if (!isSkillLicensed(skillId)) {
+    const tier = getSkillTier(skillId);
+    throw new Error(`Skill '${skillId}' requires a ${tier} license (current: ${getLicenseInfo().tier})`);
+  }
+  // ── RBAC gate (when a validated caller key is provided) ────────
+  if (caller && !isSkillAllowed(caller, skillId)) {
+    throw new Error(`Caller '${caller.name}' (role: ${caller.role}) is not authorized to invoke '${skillId}'`);
+  }
+
   switch (skillId) {
     case "delegate": {
       // Consolidated: sync delegate, async delegate (async:true), and task polling (taskId)
@@ -1089,8 +1099,10 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
       switch (action) {
         case "create": {
           const name = args.name as string;
-          if (!name) throw new Error("workspace_manage(create) requires name");
-          return JSON.stringify(createWorkspace(name, args.keyPrefix as string ?? "local", args.description as string ?? name, { description: args.description as string, env: args.env as Record<string, string> }), null, 2);
+          const ownerName = args.ownerName as string;
+          if (!name) throw new Error("workspace_manage(create) missing required field: name");
+          if (!ownerName) throw new Error("workspace_manage(create) missing required field: ownerName");
+          return JSON.stringify(createWorkspace(name, args.keyPrefix as string ?? "local", ownerName, { description: args.description as string, env: args.env as Record<string, string> }), null, 2);
         }
         case "list":
           return JSON.stringify(listWorkspaces(), null, 2);
@@ -1808,8 +1820,9 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
           action: { type: "string", description: "Action to perform", enum: ["create", "list", "get", "add_member", "remove_member", "update"] },
           id: { type: "string", description: "Workspace ID (for get/update/add_member/remove_member)" },
           name: { type: "string", description: "Workspace or member name (for create/add_member)" },
+          ownerName: { type: "string", description: "Owner display name (required for create)" },
           description: { type: "string", description: "Workspace description" },
-          keyPrefix: { type: "string", description: "API key prefix (for add_member/remove_member)" },
+          keyPrefix: { type: "string", description: "API key prefix — owner key prefix for create, or member key prefix for add_member/remove_member" },
           role: { type: "string", description: "Member role: member or readonly", enum: ["member", "readonly"] },
           env: { type: "object", description: "Shared environment variables" },
           allowedSkills: { type: "array", items: { type: "string" }, description: "Skill allowlist" },
@@ -2217,9 +2230,23 @@ async function startHttpServer() {
     const { skillId, args, message, id: taskId } = data.params ?? {};
     const text: string = message?.parts?.[0]?.text ?? "";
 
+    // Extract RBAC caller entry if the Authorization header contains an a2a_k_... key
+    const rawAuth = request.headers["authorization"];
+    const bearerToken = (Array.isArray(rawAuth) ? rawAuth[0] : rawAuth)?.replace(/^Bearer\s+/i, "");
+    let callerEntry: ApiKeyEntry | undefined;
+    if (bearerToken?.startsWith("a2a_k_")) {
+      const validated = validateApiKey(bearerToken);
+      if (!validated) {
+        process.stderr.write(`[orchestrator] A2A auth: invalid or expired a2a_k_ key\n`);
+        reply.code(401);
+        return { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized — API key is invalid or expired" } };
+      }
+      callerEntry = validated;
+    }
+
     try {
       const resultText = skillId
-        ? await dispatchSkill(skillId, args ?? {}, text)
+        ? await dispatchSkill(skillId, args ?? {}, text, callerEntry)
         : await delegate({ message: text }); // auto-delegate when no skillId
 
       return {
