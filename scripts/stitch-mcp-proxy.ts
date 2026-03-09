@@ -11,7 +11,7 @@
  *   "stitch": {
  *     "type": "stdio",
  *     "command": "bun",
- *     "args": ["/Users/xrey/Developer/a2a-mcp-server/scripts/stitch-mcp-proxy.ts"]
+ *     "args": ["<path-to-repo>/scripts/stitch-mcp-proxy.ts"]
  *   }
  */
 

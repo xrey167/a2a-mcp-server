@@ -10,6 +10,7 @@ This project uses **Bun** exclusively — no Node.js, no build step. TypeScript 
 bun src/server.ts          # start full stack (orchestrator + all workers)
 bun src/workers/shell.ts   # start a single worker in isolation
 bun build src/server.ts --target bun  # type-check via bundler (no tsc installed)
+bun src/cli.ts create-worker my-tool  # scaffold a custom worker
 ```
 
 ## MCP Registration
@@ -17,7 +18,7 @@ bun build src/server.ts --target bun  # type-check via bundler (no tsc installed
 The server is registered with Claude Code at user scope:
 
 ```bash
-claude mcp add --scope user a2a-mcp-bridge -- bun /Users/xrey/Developer/a2a-mcp-server/src/server.ts
+claude mcp add --scope user a2a-mcp-bridge -- bun $(pwd)/src/server.ts
 claude mcp list   # verify connection
 ```
 
@@ -28,7 +29,11 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 
 ## Architecture
 
-**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns all 8 worker processes via `Bun.spawn`, then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker).
+**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns local worker processes via `Bun.spawn` (filtered by config `workers.enabled` and `profile`), then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker). Also discovers `remoteWorkers` configured in `~/.a2a-mcp/config.json` (no local process spawned).
+
+**Profiles:** `full` (all 8 workers), `lite` (shell+web+ai), `data` (shell+web+ai+data). Set via `{ "profile": "lite" }` in config or `bun src/cli.ts init --lite`.
+
+**Remote workers:** Any A2A agent running elsewhere can be added via `remoteWorkers` config. The orchestrator discovers it, health-polls it, and routes skills to it. The URL is whitelisted in SSRF validation automatically.
 
 **Worker agents** (standalone Fastify HTTP servers, each a separate process):
 | File | Port | Skills |
@@ -117,6 +122,7 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 - `src/tracing.ts` — distributed tracing with waterfall visualization
 - `src/skill-cache.ts` — LRU skill result cache with per-skill TTL
 - `src/capability-negotiation.ts` — version-aware capability negotiation for skill routing
+- `src/worker-loader.ts` — discovers and scaffolds user-space workers from `~/.a2a-mcp/workers/`
 
 **Routing in `delegate` skill (server.ts):**
 1. `agentUrl` provided → send directly (through circuit breaker)
@@ -137,7 +143,6 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 ## Adding a New Worker
 
 1. Create `src/workers/<name>.ts` — Fastify on a new port, export an `AGENT_CARD` and implement skills
-2. Add an entry to `WORKERS` array in `src/server.ts`
-3. Add the port to `ALLOWED_PORTS` in `src/server.ts`
-4. Optionally create a persona file at `src/personas/<name>.md`
-5. All worker output must go to stderr only
+2. Add an entry to `ALL_WORKERS` array in `src/server.ts` (ALLOWED_PORTS is auto-derived)
+3. Optionally create a persona file at `src/personas/<name>.md`
+4. All worker output must go to stderr only
