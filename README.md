@@ -916,9 +916,9 @@ GitHub Actions runs on every push/PR to `main`:
 ### Add a new worker agent
 
 1. Create `src/workers/<n>.ts` — Fastify server with `AGENT_CARD` and skill handlers
-2. Add to `ALL_WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
-3. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
-4. Allowed ports are auto-derived from enabled workers — no manual list needed
+2. Add to `WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
+3. Add port to `ALLOWED_PORTS` in `src/server.ts`
+4. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
 
 ### Add a plugin (hot-reloaded)
 

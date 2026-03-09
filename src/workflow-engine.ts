@@ -26,6 +26,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { sanitizeUserInput } from "./prompt-sanitizer.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -84,23 +85,107 @@ export type ProgressFn = (message: string) => void;
 
 // ── Template Resolution ──────────────────────────────────────────
 
+/** Skills that execute shell commands — substituted values must be shell-escaped. */
+const SHELL_SKILLS = new Set(["run_shell", "run_command", "exec"]);
+
+/** Skills that send text to an LLM — substituted values must be prompt-sanitized. */
+const LLM_SKILLS = new Set(["ask_claude", "ask_llm", "generate"]);
+
+/** Maximum length of a step result that can be substituted into a template. */
+const MAX_SUBSTITUTION_LENGTH = 50_000;
+
+/**
+ * Escape a string for safe embedding inside a POSIX shell single-quoted argument.
+ * The value is wrapped in single quotes; any existing single quotes within
+ * the value are replaced with the sequence `'\''`.
+ */
+function shellEscape(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+/**
+ * Sanitize a step-result string before substituting it into a downstream step's args.
+ *
+ * Context-aware escaping prevents:
+ * - **RCE via shell injection** when the target skill executes shell commands:
+ *   embedded substitutions are single-quote-escaped so metacharacters are inert.
+ *   When `{{stepId.result}}` is the *entire* argument value (not embedded in other
+ *   text) the raw value is passed through, because the workflow author is explicitly
+ *   passing the result as the command; only basic cleaning is applied.
+ * - **Prompt injection** when the target skill calls an LLM:
+ *   the value is always wrapped in XML-style `<step_result>` tags via
+ *   `sanitizeUserInput`, clearly marking it as data rather than instructions.
+ * - **Null-byte / control-character attacks** for all skill types.
+ *
+ * @param value       - Raw string from the upstream step result.
+ * @param targetSkillId - The `skillId` of the step that will receive the value.
+ * @param isEmbedded  - `true` when the `{{…}}` reference appears inside a larger
+ *                      string; `false` when it IS the entire argument value.
+ */
+function sanitizeTemplateValue(
+  value: string,
+  targetSkillId: string,
+  isEmbedded: boolean,
+): string {
+  // Truncate to prevent context-stuffing or excessive memory use.
+  let sanitized = value.slice(0, MAX_SUBSTITUTION_LENGTH);
+
+  // Strip null bytes and other non-printable control characters that could
+  // manipulate string parsing in shells or LLMs.
+  sanitized = sanitized.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "");
+
+  if (SHELL_SKILLS.has(targetSkillId)) {
+    if (isEmbedded) {
+      // Embedded substitution inside a shell command string — shell-quote the value
+      // so that metacharacters (;, &&, |, $(), backticks, etc.) are inert.
+      return shellEscape(sanitized);
+    }
+    // Full-value substitution: the workflow author explicitly passes the step result
+    // as the command; only basic cleaning (done above) is applied.
+    return sanitized;
+  }
+
+  if (LLM_SKILLS.has(targetSkillId)) {
+    // Always sanitize for LLM skills regardless of embedding position.
+    // sanitizeUserInput wraps content in XML tags, marking it as data not instructions.
+    // Pass MAX_SUBSTITUTION_LENGTH so LLM substitutions use the same cap as other skills.
+    return sanitizeUserInput(sanitized, "step_result", MAX_SUBSTITUTION_LENGTH);
+  }
+
+  // For all other skills: return the cleaned value.
+  return sanitized;
+}
+
 function resolveTemplates(
   value: unknown,
   stepResults: Map<string, StepResult>,
+  targetSkillId: string,
 ): unknown {
   if (typeof value === "string") {
+    // `isEmbedded` is `true` whenever the string contains anything other than
+    // a single, standalone `{{stepId.result}}` placeholder — i.e., there is
+    // surrounding literal text or multiple template references.  In these cases
+    // the substituted value is injected *inside* a larger string (e.g., a shell
+    // command or an LLM prompt), so context-appropriate escaping must be applied.
+    //
+    // When the string is solely `{{stepId.result}}` (with optional whitespace),
+    // the workflow author is explicitly forwarding the entire step result as the
+    // argument value — for shell skills this is the "run whatever the previous
+    // step returned" pattern — so only basic cleaning is applied.
+    const isEmbedded = !/^\s*\{\{[-\w]+\.result\}\}\s*$/.test(value);
     return value.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
       const result = stepResults.get(stepId);
-      return result?.result ?? `<step ${stepId} not found>`;
+      const rawValue = result?.result ?? `<step ${stepId} not found>`;
+      return sanitizeTemplateValue(rawValue, targetSkillId, isEmbedded);
     });
   }
   if (Array.isArray(value)) {
-    return value.map(v => resolveTemplates(v, stepResults));
+    return value.map(v => resolveTemplates(v, stepResults, targetSkillId));
   }
   if (typeof value === "object" && value !== null) {
     const resolved: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      resolved[k] = resolveTemplates(v, stepResults);
+      resolved[k] = resolveTemplates(v, stepResults, targetSkillId);
     }
     return resolved;
   }
@@ -221,8 +306,8 @@ export async function executeWorkflow(
     onProgress?.(`▶ Running "${label}" (${step.skillId})`);
 
     // Resolve template references in args
-    const resolvedArgs = (resolveTemplates(step.args ?? {}, stepResults) ?? {}) as Record<string, unknown>;
-    const resolvedMessage = resolveTemplates(step.message ?? "", stepResults) as string;
+    const resolvedArgs = (resolveTemplates(step.args ?? {}, stepResults, step.skillId) ?? {}) as Record<string, unknown>;
+    const resolvedMessage = resolveTemplates(step.message ?? "", stepResults, step.skillId) as string;
 
     let lastError: string | undefined;
     const maxRetries = step.onError === "retry" ? (step.maxRetries ?? 2) : 0;
