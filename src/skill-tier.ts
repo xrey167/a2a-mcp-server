@@ -62,7 +62,30 @@ const TIER_HIERARCHY: Record<Tier, number> = {
 
 const LICENSE_FILE = join(process.env.HOME ?? homedir(), ".a2a-mcp", "license.json");
 
+const VALID_TIERS = new Set<string>(["free", "pro", "enterprise"]);
+
 let cachedLicense: LicenseInfo | null = null;
+
+function coerceLicense(raw: unknown): LicenseInfo {
+  if (typeof raw !== "object" || raw === null) return { tier: "free" };
+  const obj = raw as Record<string, unknown>;
+  const tier: Tier = VALID_TIERS.has(String(obj.tier)) ? (obj.tier as Tier) : "free";
+  if (tier !== obj.tier) {
+    process.stderr.write(`[license] invalid tier "${String(obj.tier)}", defaulting to "free"\n`);
+  }
+  return {
+    tier,
+    ...(typeof obj.email === "string" && { email: obj.email }),
+    ...(typeof obj.expiresAt === "number" && { expiresAt: obj.expiresAt }),
+    ...(Array.isArray(obj.features) && (() => {
+      const valid = obj.features.filter((f): f is string => typeof f === "string");
+      if (valid.length !== obj.features.length) {
+        process.stderr.write("[license] some feature entries were not strings and have been ignored\n");
+      }
+      return { features: valid };
+    })()),
+  };
+}
 
 export function loadLicense(): LicenseInfo {
   if (cachedLicense) return cachedLicense;
@@ -73,7 +96,7 @@ export function loadLicense(): LicenseInfo {
       const decoded = JSON.parse(
         Buffer.from(process.env.A2A_LICENSE_KEY, "base64").toString("utf-8")
       );
-      cachedLicense = decoded as LicenseInfo;
+      cachedLicense = coerceLicense(decoded);
       return cachedLicense;
     } catch {
       process.stderr.write("[license] invalid A2A_LICENSE_KEY format\n");
@@ -83,8 +106,8 @@ export function loadLicense(): LicenseInfo {
   // File-based license
   if (existsSync(LICENSE_FILE)) {
     try {
-      cachedLicense = JSON.parse(readFileSync(LICENSE_FILE, "utf-8"));
-      return cachedLicense!;
+      cachedLicense = coerceLicense(JSON.parse(readFileSync(LICENSE_FILE, "utf-8")));
+      return cachedLicense;
     } catch {
       process.stderr.write("[license] failed to parse license file\n");
     }

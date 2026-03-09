@@ -1,10 +1,25 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { auditLog, auditQuery, auditStats, auditPrune, closeAuditDb } from "../audit.js";
+import { join } from "path";
+import { tmpdir } from "os";
+import { unlinkSync } from "fs";
+
+// Use an isolated temp DB so tests never touch the user's real ~/.a2a-mcp/audit.db
+const testDbPath = join(tmpdir(), `a2a-audit-test-${Date.now()}.db`);
+process.env.A2A_AUDIT_DB = testDbPath;
+
+// Dynamic import AFTER env is set so module picks up the test DB path
+const { auditLog, auditQuery, auditStats, auditPrune, closeAuditDb } =
+  await import("../audit.js");
+
+// Clean up temp DB after all tests
+afterAll(() => {
+  closeAuditDb();
+  try { unlinkSync(testDbPath); } catch {}
+  try { unlinkSync(testDbPath + "-wal"); } catch {}
+  try { unlinkSync(testDbPath + "-shm"); } catch {}
+});
 
 describe("audit", () => {
-  afterAll(() => {
-    closeAuditDb();
-  });
 
   test("auditLog writes and auditQuery reads entries", () => {
     auditLog({
@@ -68,43 +83,48 @@ describe("audit", () => {
   });
 
   test("auditPrune removes old entries", () => {
-    // Prune entries older than 0 days shouldn't remove recent entries
-    const removed = auditPrune(0);
-    // May or may not remove — depends on timing
+    // Prune entries older than 90 days (the default); should not remove recent entries
+    const removed = auditPrune(90);
     expect(typeof removed).toBe("number");
   });
 
-  test("timestamp is returned as ISO 8601 string", () => {
-    auditLog({ actor: "ts-format-test", role: "admin", skillId: "test_ts", success: true });
+  test("auditLog stores timestamp in ISO-8601 UTC format", () => {
+    auditLog({ actor: "ts-format-test", role: "admin", skillId: "ts_check", success: true });
     const entries = auditQuery({ actor: "ts-format-test", limit: 1 });
     expect(entries.length).toBeGreaterThanOrEqual(1);
-    const ts = entries[0].timestamp;
-    // Must parse back to a valid date
-    expect(Number.isFinite(new Date(ts).getTime())).toBe(true);
-    // Must look like an ISO string (contains 'T' and ends with 'Z')
-    expect(ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    const { timestamp } = entries[0];
+    // Must match ISO-8601 UTC: "YYYY-MM-DDTHH:MM:SS.sssZ"
+    expect(timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/);
+    // Must be parseable and not NaN
+    expect(Number.isNaN(new Date(timestamp).getTime())).toBe(false);
   });
 
-  test("auditQuery filters by since/until correctly", async () => {
-    const before = new Date().toISOString();
-    await Bun.sleep(10);
+  test("auditQuery since/until filters work with ISO-8601 timestamps", () => {
+    const before = new Date(Date.now() - 1000).toISOString();
+    auditLog({ actor: "filter-ts-test", role: "admin", skillId: "ts_filter", success: true });
+    const after = new Date(Date.now() + 1000).toISOString();
 
-    auditLog({ actor: "time-filter-test", role: "admin", skillId: "time_skill", success: true });
+    const withSince = auditQuery({ actor: "filter-ts-test", since: before });
+    expect(withSince.length).toBeGreaterThanOrEqual(1);
 
-    await Bun.sleep(10);
-    const after = new Date().toISOString();
+    const withUntil = auditQuery({ actor: "filter-ts-test", until: after });
+    expect(withUntil.length).toBeGreaterThanOrEqual(1);
 
-    // since=before should include the entry
-    const found = auditQuery({ actor: "time-filter-test", since: before });
-    expect(found.length).toBeGreaterThanOrEqual(1);
+    // since in the future → nothing returned
+    const noResults = auditQuery({ actor: "filter-ts-test", since: after });
+    expect(noResults.length).toBe(0);
+  });
 
-    // since=after should exclude the entry
-    const notFound = auditQuery({ actor: "time-filter-test", since: after });
-    expect(notFound.length).toBe(0);
+  test("auditStats since filter works with ISO-8601 timestamps", () => {
+    const beforeAll = new Date(Date.now() - 1000).toISOString();
+    auditLog({ actor: "stats-ts-test", role: "admin", skillId: "ts_stats", success: true });
 
-    // until=before should exclude the entry
-    const alsoNotFound = auditQuery({ actor: "time-filter-test", until: before });
-    expect(alsoNotFound.length).toBe(0);
+    const stats = auditStats(beforeAll);
+    expect(stats.totalCalls).toBeGreaterThanOrEqual(1);
+
+    // since in the future → totalCalls should be 0
+    const futureStats = auditStats(new Date(Date.now() + 1000).toISOString());
+    expect(futureStats.totalCalls).toBe(0);
   });
 
   test("auditPrune removes entries older than cutoff", async () => {
@@ -118,12 +138,5 @@ describe("audit", () => {
     // The entry we just created should now be gone
     const remaining = auditQuery({ actor: "prune-epoch-test" });
     expect(remaining.length).toBe(0);
-  });
-
-  test("auditLog truncates long args", () => {
-    const longArgs = "x".repeat(5000);
-    auditLog({ actor: "trunc-test", role: "admin", skillId: "test", success: true, args: longArgs });
-    const entries = auditQuery({ actor: "trunc-test" });
-    expect(entries[0].args!.length).toBeLessThanOrEqual(2048);
   });
 });

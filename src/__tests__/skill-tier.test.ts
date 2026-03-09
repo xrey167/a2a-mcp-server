@@ -82,4 +82,28 @@ describe("skill-tier", () => {
     expect(info.tier).toBe("free");
     expect(info.expired).toBe(false);
   });
+
+  test("license with invalid tier coerces to free", () => {
+    process.env.A2A_LICENSE_KEY = Buffer.from(JSON.stringify({ tier: "superadmin" })).toString("base64");
+    resetLicense();
+    // Free skills still work
+    expect(isSkillLicensed("delegate")).toBe(true);
+    // Pro/enterprise skills are denied
+    expect(isSkillLicensed("workflow_execute")).toBe(false);
+    expect(isSkillLicensed("register_webhook")).toBe(false);
+  });
+
+  test("license with missing tier coerces to free", () => {
+    process.env.A2A_LICENSE_KEY = Buffer.from(JSON.stringify({ email: "user@example.com" })).toString("base64");
+    resetLicense();
+    expect(isSkillLicensed("delegate")).toBe(true);
+    expect(isSkillLicensed("workflow_execute")).toBe(false);
+  });
+
+  test("license with null/non-object coerces to free", () => {
+    process.env.A2A_LICENSE_KEY = Buffer.from(JSON.stringify(null)).toString("base64");
+    resetLicense();
+    expect(isSkillLicensed("delegate")).toBe(true);
+    expect(isSkillLicensed("register_webhook")).toBe(false);
+  });
 });
