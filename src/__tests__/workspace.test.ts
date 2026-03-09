@@ -23,7 +23,8 @@ describe("workspace", () => {
     // Clean up test workspaces from SQLite and remove any on-disk knowledge dirs.
     for (const id of testWsIds) {
       deleteWorkspace(id);
-      const knowledgeDir = join(KNOWLEDGE_BASE_DIR, id);
+      const workspaceDir = join(KNOWLEDGE_BASE_DIR, id);
+      const knowledgeDir = join(workspaceDir, "knowledge");
       if (existsSync(knowledgeDir)) rmSync(knowledgeDir, { recursive: true });
     }
     testWsIds.length = 0;
