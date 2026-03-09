@@ -3,7 +3,7 @@
 // Stored in SQLite at ~/.a2a-mcp/audit.db.
 
 import Database from "bun:sqlite";
-import { join } from "path";
+import { join, dirname } from "path";
 import { homedir } from "os";
 import { existsSync, mkdirSync } from "fs";
 
@@ -36,15 +36,14 @@ export interface AuditEntry {
 
 // ── Database ────────────────────────────────────────────────────
 
-const DB_DIR = join(process.env.HOME ?? homedir(), ".a2a-mcp");
-const DB_PATH = join(DB_DIR, "audit.db");
-
 let db: Database | null = null;
 
 function getDb(): Database {
   if (db) return db;
-  if (!existsSync(DB_DIR)) mkdirSync(DB_DIR, { recursive: true });
-  db = new Database(DB_PATH);
+  const dbPath = process.env.A2A_AUDIT_DB ?? join(process.env.HOME ?? homedir(), ".a2a-mcp", "audit.db");
+  const dbDir = dirname(dbPath);
+  if (!existsSync(dbDir)) mkdirSync(dbDir, { recursive: true });
+  db = new Database(dbPath);
   db.run("PRAGMA journal_mode=WAL");
   db.run("PRAGMA synchronous=NORMAL");
   db.run(`
