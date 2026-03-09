@@ -199,6 +199,29 @@ function spawnWorkers() {
   for (const w of WORKERS) spawnWorker(w);
 }
 
+// ── Health-based readiness polling ──────────────────────────────
+async function waitForWorker(w: typeof WORKERS[number], maxWaitMs = 10_000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const res = await fetch(`http://localhost:${w.port}/healthz`);
+      if (res.ok) {
+        workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
+        return true;
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+  workerHealth.set(w.name, { healthy: false, failCount: 0, lastCheck: Date.now() });
+  return false;
+}
+
+async function waitForAllWorkers(): Promise<void> {
+  const results = await Promise.all(WORKERS.map(w => waitForWorker(w)));
+  const readyCount = results.filter(Boolean).length;
+  process.stderr.write(`[orchestrator] ${readyCount}/${WORKERS.length} workers ready\n`);
+}
+
 async function discoverWorkers(): Promise<AgentCard[]> {
   // Discover local workers
   const localResults = await Promise.allSettled(
@@ -249,6 +272,7 @@ function buildSkillRouter(builtinCards: AgentCard[], externalCards: AgentCard[] 
       map.set(skill.id, card.url);
     }
   }
+  skillRouterCache = map;
   return map;
 }
 
@@ -302,6 +326,8 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
       historyPrefix = `[Session history]\n${historyText}\n\n[Current message]\n`;
     }
   }
+
+  const startTime = Date.now();
 
   // Prepend project context if set
   const preamble = getContextPreamble();
@@ -2056,6 +2082,8 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+  const startTime = Date.now();
+  const text = (args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "";
 
   // run_shell_stream — handled first to access _meta.progressToken
   if (name === "run_shell_stream") {
@@ -2128,6 +2156,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     return { content: [{ type: "text", text: capResponse(accumulated || "(no output)", CHAR_LIMIT) }] };
   }
+});
 
   const text = String((args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "");
   const raw = await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, text);
@@ -2234,6 +2263,9 @@ async function startHttpServer() {
     const allSkills: Array<{ id: string; name: string; description: string }> = [
       { id: "delegate", name: "Delegate", description: delegateSkill.description },
       { id: "list_agents", name: "List Agents", description: listAgentsSkill.description },
+      { id: "memory_search", name: "Memory Search", description: memorySearchSkill.description },
+      { id: "memory_list", name: "Memory List", description: memoryListSkill.description },
+      { id: "memory_cleanup", name: "Memory Cleanup", description: memoryCleanupSkill.description },
       ...SKILLS.map(({ id, name, description }) => ({ id, name, description })),
     ];
     for (const card of workerCards) {
@@ -2253,6 +2285,21 @@ async function startHttpServer() {
     };
   });
 
+  // Health check for orchestrator itself
+  app.get("/healthz", async () => {
+    const workerStatus: Record<string, boolean> = {};
+    for (const w of WORKERS) {
+      workerStatus[w.name] = workerHealth.get(w.name)?.healthy ?? false;
+    }
+    return {
+      status: "ok",
+      uptime: process.uptime(),
+      workers: workerStatus,
+      tasks: { total: listTasks().length, active: listTasks("working").length },
+    };
+  });
+
+  // tasks/send — create task, execute async, return immediately with status
   app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
@@ -2328,6 +2375,10 @@ async function startHttpServer() {
   // SSE endpoint — stream task events in real-time
   // Usage: curl -N http://localhost:8080/tasks/{id}/events
   app.get<{ Params: { id: string } }>("/tasks/:id/events", (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401).send({ error: "Unauthorized" });
+      return;
+    }
     const taskId = request.params.id;
     const task = getTask(taskId);
     if (!task) {

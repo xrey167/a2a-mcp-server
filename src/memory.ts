@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import { homedir } from "os";
 import { writeFileSync, mkdirSync, unlinkSync } from "fs";
 import { buildFtsQuery } from "./search.js";
@@ -44,16 +44,22 @@ function safeName(name: string): string {
   return name.replace(/[\/\\\.]+/g, "_").replace(/^_+|_+$/g, "") || "unnamed";
 }
 
-function noteFile(agent: string, key: string) {
+/** Pure path builder — does NOT create directories (safe for delete/read). */
+function noteFilePath(agent: string, key: string): string {
   const safeAgent = safeName(agent);
   const safeKey = safeName(key);
-  const dir = join(MEMORY_DIR, safeAgent);
-  mkdirSync(dir, { recursive: true });
-  const filePath = join(dir, `${safeKey}.md`);
-  // Ensure the resolved path is still within MEMORY_DIR
-  if (!filePath.startsWith(MEMORY_DIR)) {
+  const filePath = resolve(join(MEMORY_DIR, safeAgent, `${safeKey}.md`));
+  const memoryDirResolved = resolve(MEMORY_DIR) + sep;
+  if (!filePath.startsWith(memoryDirResolved)) {
     throw new Error(`Invalid memory path: ${filePath}`);
   }
+  return filePath;
+}
+
+/** Creates parent directory and returns the note path (use only when writing). */
+function noteFile(agent: string, key: string): string {
+  const filePath = noteFilePath(agent, key);
+  mkdirSync(join(filePath, ".."), { recursive: true });
   return filePath;
 }
 
@@ -75,7 +81,7 @@ export const memory = {
   },
   forget(agent: string, key: string) {
     db.run(`DELETE FROM memory WHERE agent=? AND key=?`, [agent, key]);
-    try { unlinkSync(noteFile(agent, key)); } catch {} // clean up markdown file too
+    try { unlinkSync(noteFilePath(agent, key)); } catch {} // clean up markdown file too
   },
 
   /** Full-text search across all memories with LIKE fallback. Optionally filter by agent. */
@@ -140,7 +146,7 @@ export const memory = {
     db.run(`DELETE FROM memory WHERE ts < ?`, [cutoff]);
     // Clean up Obsidian files
     for (const r of rows) {
-      try { unlinkSync(noteFile(r.agent, r.key)); } catch {}
+      try { unlinkSync(noteFilePath(r.agent, r.key)); } catch {}
     }
     return rows.length;
   },
