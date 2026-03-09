@@ -105,6 +105,26 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 - Active call tracking for load-aware routing
 - MCP tools: `negotiate_capability`, `list_capabilities`, `capability_stats`; resource: `a2a://capabilities`
 
+**Auth & RBAC:**
+- `src/auth.ts` — API key management with SHA-256 hashing, role-based access (admin/operator/viewer), per-key skill allow/deny lists
+- `src/workspace.ts` — Team workspaces with members, roles (owner/member/readonly), shared env, knowledge dirs
+- MCP tools: `workspace_manage` (CRUD); resource: `a2a://workspaces`
+
+**Audit Logging (Enterprise):**
+- `src/audit.ts` — Immutable SQLite audit trail (`~/.a2a-mcp/audit.db`) of all skill invocations
+- Queryable by actor, skill, workspace, time range; auto-indexed
+- MCP tools: `audit_query`, `audit_stats`; resource: `a2a://audit`
+
+**Skill Tiers (Open-Core):**
+- `src/skill-tier.ts` — Free/pro/enterprise skill gating with base64-encoded license keys
+- License via `~/.a2a-mcp/license.json` or `A2A_LICENSE_KEY` env var
+- MCP tools: `license_info`; resource: `a2a://license`
+
+**Cloud Deployment:**
+- `src/cloud.ts` — Health endpoints (`/healthz`, `/readyz`, `/health`), graceful shutdown, readiness probes
+- `fly.toml` — Fly.io deployment config
+- `railway.json` — Railway deployment config
+
 **Shared modules:**
 - `src/a2a.ts` — `sendTask(url, params)` and `discoverAgent(url)` helpers
 - `src/memory.ts` — dual-write: SQLite (`~/.a2a-memory.db`) + Obsidian markdown (`~/Documents/Obsidian/a2a-knowledge/_memory/`)

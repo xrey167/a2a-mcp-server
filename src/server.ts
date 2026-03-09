@@ -40,6 +40,11 @@ import { collaborate, type CollaborationRequest } from "./agent-collaboration.js
 import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracingStats } from "./tracing.js";
 import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats, configureCacheSkill } from "./skill-cache.js";
 import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
+import { auditLog, auditQuery, auditStats, closeAuditDb } from "./audit.js";
+import { validateApiKey, lookupApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed, type ApiKeyEntry } from "./auth.js";
+import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace } from "./workspace.js";
+import { isSkillLicensed, getSkillTier, getSkillsByTier, getLicenseInfo } from "./skill-tier.js";
+import { registerHealthRoutes, markReady, updateWorkerHealth as updateCloudWorkerHealth, installShutdownHandlers, onShutdown } from "./cloud.js";
 
 // Extend Fastify's request interface with rawBody for HMAC verification
 declare module "fastify" {
@@ -50,6 +55,10 @@ declare module "fastify" {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
+
+// Single source of truth for the orchestrator version, used in the MCP server
+// identity, the /.well-known/agent.json card, and the cloud health routes.
+const ORCHESTRATOR_VERSION = "3.0.0";
 
 // ── URL validation (SSRF prevention) ─────────────────────────────
 // Only worker ports allowed — orchestrator port excluded to prevent infinite recursion.
@@ -590,7 +599,62 @@ function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
   return (OrchestratorSchemas[skill] as z.ZodType).parse(args);
 }
 
-async function dispatchSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
+/** Max bytes stored for `args` in the audit trail (truncated to 2 KB). */
+const AUDIT_ARGS_MAX_LENGTH = 2048;
+
+/** Build the common fields for an audit log entry from a caller context. */
+function makeAuditBase(
+  caller: ApiKeyEntry | undefined,
+  skillId: string,
+  args: Record<string, unknown>,
+  clientIp: string | undefined,
+): Omit<Parameters<typeof auditLog>[0], "success" | "durationMs" | "error"> {
+  return {
+    actor: caller ? caller.prefix : "local",
+    role: caller?.role ?? "local",
+    workspace: caller?.workspace,
+    skillId,
+    args: JSON.stringify(args).slice(0, AUDIT_ARGS_MAX_LENGTH),
+    clientIp,
+  };
+}
+
+async function dispatchSkill(skillId: string, args: Record<string, unknown>, text: string, caller?: ApiKeyEntry, clientIp?: string): Promise<string> {
+  const auditBase = makeAuditBase(caller, skillId, args, clientIp);
+  // ── License gate ───────────────────────────────────────────────
+  if (!isSkillLicensed(skillId)) {
+    const tier = getSkillTier(skillId);
+    const license = getLicenseInfo();
+    const currentTierDescription = license?.expired ? `${license.tier} (expired)` : license?.tier;
+    const licenseErr = new Error(`Skill '${skillId}' requires a ${tier} license (current: ${currentTierDescription ?? "none"})`);
+    auditLog({ ...auditBase, success: false, error: licenseErr.message });
+    throw licenseErr;
+  }
+  // ── RBAC gate (when a validated caller key is provided) ────────
+  if (caller && !isSkillAllowed(caller, skillId)) {
+    const rbacErr = new Error(`Caller '${caller.name}' (role: ${caller.role}) is not authorized to invoke '${skillId}'`);
+    auditLog({ ...auditBase, success: false, error: rbacErr.message });
+    throw rbacErr;
+  }
+
+  // ── Audit: record invocation (success + failure) ───────────────
+  const auditStart = Date.now();
+  try {
+    const result = await dispatchSkillInner(skillId, args, text);
+    auditLog({ ...auditBase, success: true, durationMs: Date.now() - auditStart });
+    return result;
+  } catch (err) {
+    auditLog({
+      ...auditBase,
+      success: false,
+      durationMs: Date.now() - auditStart,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+}
+
+async function dispatchSkillInner(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   switch (skillId) {
     case "delegate": {
       // Consolidated: sync delegate, async delegate (async:true), and task polling (taskId)
@@ -1055,6 +1119,83 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
       return JSON.stringify(getWebhookLog(id, (args.limit as number) ?? 20), null, 2);
     }
 
+    // ── Audit Log ────────────────────────────────────────────────
+    case "audit_query":
+      return JSON.stringify(auditQuery({
+        actor: args.actor as string | undefined,
+        skillId: args.skillId as string | undefined,
+        workspace: args.workspace as string | undefined,
+        since: args.since as string | undefined,
+        until: args.until as string | undefined,
+        success: args.success as boolean | undefined,
+        limit: args.limit as number | undefined,
+      }), null, 2);
+
+    case "audit_stats":
+      return JSON.stringify(auditStats(args.since as string | undefined), null, 2);
+
+    // ── License / Tier Info ───────────────────────────────────────
+    case "license_info":
+      return JSON.stringify({
+        license: getLicenseInfo(),
+        tiers: getSkillsByTier(),
+        roles: getRolePermissions(),
+      }, null, 2);
+
+    // ── Workspace Management ──────────────────────────────────────
+    case "workspace_manage": {
+      const action = args.action as string;
+      switch (action) {
+        case "create": {
+          const name = args.name as string;
+          const ownerName = args.ownerName as string;
+          if (!name) throw new Error("workspace_manage(create) missing required field: name");
+          if (!ownerName) throw new Error("workspace_manage(create) missing required field: ownerName");
+          return JSON.stringify(createWorkspace(name, args.keyPrefix as string ?? "local", ownerName, { description: args.description as string, env: args.env as Record<string, string> }), null, 2);
+        }
+        case "list":
+          return JSON.stringify(listWorkspaces(), null, 2);
+        case "get": {
+          const id = args.id as string;
+          if (!id) throw new Error("workspace_manage(get) requires id");
+          const ws = getWorkspace(id);
+          if (!ws) throw new Error(`Workspace not found: ${id}`);
+          return JSON.stringify(ws, null, 2);
+        }
+        case "add_member": {
+          const id = args.id as string;
+          const keyPrefix = args.keyPrefix as string;
+          const name = args.name as string;
+          if (!id || !keyPrefix || !name) throw new Error("workspace_manage(add_member) requires id, keyPrefix, name");
+          const ws = addMember(id, keyPrefix, name, (args.role as "member" | "readonly") ?? "member");
+          if (!ws) throw new Error(`Workspace not found: ${id}`);
+          return JSON.stringify(ws, null, 2);
+        }
+        case "remove_member": {
+          const id = args.id as string;
+          const keyPrefix = args.keyPrefix as string;
+          if (!id || !keyPrefix) throw new Error("workspace_manage(remove_member) requires id, keyPrefix");
+          const ws = removeMember(id, keyPrefix);
+          if (!ws) throw new Error(`Workspace not found: ${id}`);
+          return JSON.stringify(ws, null, 2);
+        }
+        case "update": {
+          const id = args.id as string;
+          if (!id) throw new Error("workspace_manage(update) requires id");
+          const ws = updateWorkspace(id, {
+            name: args.name as string | undefined,
+            description: args.description as string | undefined,
+            env: args.env as Record<string, string> | undefined,
+            allowedSkills: args.allowedSkills as string[] | undefined,
+          });
+          if (!ws) throw new Error(`Workspace not found: ${id}`);
+          return JSON.stringify(ws, null, 2);
+        }
+        default:
+          throw new Error(`Unknown workspace action: ${action}`);
+      }
+    }
+
     default: {
       // Plugin skills (hot-loaded from src/plugins/)
       const pluginSkill = pluginSkills.get(skillId);
@@ -1344,7 +1485,7 @@ const sandboxVarsSkill = {
 
 // ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
-  { name: "a2a-mcp-bridge", version: "3.0.0" },
+  { name: "a2a-mcp-bridge", version: ORCHESTRATOR_VERSION },
   { capabilities: { tools: {}, resources: {}, prompts: {} } }
 );
 
@@ -1685,6 +1826,59 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         required: ["skillId"],
       },
     },
+    // ── Audit Log (Enterprise) ────────────────────────────────────
+    {
+      name: "audit_query",
+      description: "Query the audit log. Filter by actor, skill, workspace, time range, and success/failure.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          actor: { type: "string", description: "API key prefix or 'local'" },
+          skillId: { type: "string", description: "Filter by skill ID" },
+          workspace: { type: "string", description: "Filter by workspace ID" },
+          since: { type: "string", description: "ISO timestamp start" },
+          until: { type: "string", description: "ISO timestamp end" },
+          success: { type: "boolean", description: "Filter by success/failure" },
+          limit: { type: "number", description: "Max results (default 100, max 1000)" },
+        },
+      },
+    },
+    {
+      name: "audit_stats",
+      description: "Get audit statistics: total calls, success rate, top skills, top actors.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string", description: "ISO timestamp to filter from" },
+        },
+      },
+    },
+    // ── License / Tier Info ───────────────────────────────────────
+    {
+      name: "license_info",
+      description: "Show current license tier (free/pro/enterprise), skill tier requirements, and upgrade info.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    // ── Workspace Management ──────────────────────────────────────
+    {
+      name: "workspace_manage",
+      description: "Manage team workspaces: create, list, add/remove members, update settings.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          action: { type: "string", description: "Action to perform", enum: ["create", "list", "get", "add_member", "remove_member", "update"] },
+          id: { type: "string", description: "Workspace ID (for get/update/add_member/remove_member)" },
+          name: { type: "string", description: "Workspace or member name (for create/add_member)" },
+          ownerName: { type: "string", description: "Owner display name (required for create)" },
+          description: { type: "string", description: "Workspace description" },
+          keyPrefix: { type: "string", description: "API key prefix — owner key prefix for create, or member key prefix for add_member/remove_member" },
+          role: { type: "string", description: "Member role: member or readonly", enum: ["member", "readonly"] },
+          env: { type: "object", description: "Shared environment variables" },
+          allowedSkills: { type: "array", items: { type: "string" }, description: "Skill allowlist" },
+        },
+        required: ["action"],
+      },
+    },
   ];
 
   return tools;
@@ -1709,6 +1903,9 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
     { uri: "a2a://cache", name: "Skill Cache", description: "Skill result cache statistics", mimeType: "application/json" },
     { uri: "a2a://capabilities", name: "Capabilities", description: "Agent capability registry and negotiation stats", mimeType: "application/json" },
     { uri: "a2a://pipelines", name: "Pipelines", description: "Registered skill composition pipelines", mimeType: "application/json" },
+    { uri: "a2a://audit", name: "Audit Log", description: "Recent audit log entries (enterprise)", mimeType: "application/json" },
+    { uri: "a2a://license", name: "License", description: "Current license tier and skill gates", mimeType: "application/json" },
+    { uri: "a2a://workspaces", name: "Workspaces", description: "Team workspaces and members", mimeType: "application/json" },
   ];
   for (const card of workerCards) {
     resources.push({
@@ -1770,6 +1967,18 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
   if (uri === "a2a://pipelines") {
     return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listComposerPipelines(), null, 2) }] };
+  }
+
+  if (uri === "a2a://audit") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ stats: auditStats(), recent: auditQuery({ limit: 20 }) }, null, 2) }] };
+  }
+
+  if (uri === "a2a://license") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ license: getLicenseInfo(), tiers: getSkillsByTier() }, null, 2) }] };
+  }
+
+  if (uri === "a2a://workspaces") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listWorkspaces(), null, 2) }] };
   }
 
   const workerMatch = uri.match(/^a2a:\/\/workers\/([^/]+)\/card$/);
@@ -1943,7 +2152,16 @@ function checkAuth(request: { ip: string; headers: Record<string, string | strin
   if (isLoopback(request.ip)) return true; // loopback always trusted
   const auth = request.headers["authorization"];
   const token = Array.isArray(auth) ? auth[0] : auth;
-  return token === `Bearer ${A2A_API_KEY}`;
+  if (!token) return false;
+  // Accept the configured static A2A_API_KEY
+  if (token === `Bearer ${A2A_API_KEY}`) return true;
+  // Also accept valid a2a_k_... RBAC keys so callers registered via createApiKey()
+  // can authenticate without a separately shared A2A_API_KEY.
+  // Use lookupApiKey (no lastUsedAt side-effect) — the subsequent handler call to
+  // validateApiKey() will record the usage exactly once per request.
+  const bearerValue = token.replace(/^Bearer\s+/i, "");
+  if (bearerValue.startsWith("a2a_k_") && lookupApiKey(bearerValue) !== null) return true;
+  return false;
 }
 
 // ── Worker health polling ────────────────────────────────────────
@@ -2029,7 +2247,7 @@ async function startHttpServer() {
       name: "Local A2A Orchestrator",
       description: "MCP + A2A orchestrator with multi-agent workers",
       url: "http://localhost:8080",
-      version: "3.0.0",
+      version: ORCHESTRATOR_VERSION,
       capabilities: { streaming: false },
       skills: allSkills,
     };
@@ -2070,9 +2288,25 @@ async function startHttpServer() {
     const { skillId, args, message, id: taskId } = data.params ?? {};
     const text: string = message?.parts?.[0]?.text ?? "";
 
+    // Extract RBAC caller entry if the Authorization header contains an a2a_k_... key.
+    // Skip when the token is the plain A2A_API_KEY itself (it may coincidentally start
+    // with "a2a_k_" but is not a key registered via createApiKey()).
+    const rawAuth = request.headers["authorization"];
+    const bearerToken = (Array.isArray(rawAuth) ? rawAuth[0] : rawAuth)?.replace(/^Bearer\s+/i, "");
+    let callerEntry: ApiKeyEntry | undefined;
+    if (bearerToken?.startsWith("a2a_k_") && bearerToken !== A2A_API_KEY) {
+      const validated = validateApiKey(bearerToken);
+      if (!validated) {
+        process.stderr.write(`[orchestrator] A2A auth: invalid or expired a2a_k_ key\n`);
+        reply.code(401);
+        return { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized — API key is invalid or expired" } };
+      }
+      callerEntry = validated;
+    }
+
     try {
       const resultText = skillId
-        ? await dispatchSkill(skillId, args ?? {}, text)
+        ? await dispatchSkill(skillId, args ?? {}, text, callerEntry, request.ip)
         : await delegate({ message: text }); // auto-delegate when no skillId
 
       return {
@@ -2229,7 +2463,7 @@ async function startHttpServer() {
       if (webhook.async !== false) {
         const task = createTask({ skillId: webhook.skillId });
         markWorking(task.id);
-        dispatchSkill(webhook.skillId, args, JSON.stringify(request.body))
+        dispatchSkill(webhook.skillId, args, JSON.stringify(request.body), undefined, request.ip)
           .then(result => markCompleted(task.id, result))
           .catch(err => {
             try { markFailed(task.id, { code: "WEBHOOK_ERROR", message: String(err) }); } catch {}
@@ -2237,7 +2471,7 @@ async function startHttpServer() {
         logWebhookCall(webhookId, "success", task.id, undefined, payloadSize);
         return { status: "accepted", taskId: task.id };
       } else {
-        const result = await dispatchSkill(webhook.skillId, args, JSON.stringify(request.body));
+        const result = await dispatchSkill(webhook.skillId, args, JSON.stringify(request.body), undefined, request.ip);
         logWebhookCall(webhookId, "success", undefined, undefined, payloadSize);
         return { status: "completed", result };
       }
@@ -2325,6 +2559,9 @@ ${Object.entries(breakers).map(([name, b]: [string, any]) => `
 </body></html>`;
   });
 
+  // Register cloud health routes (/healthz, /readyz, /health)
+  registerHealthRoutes(app, ORCHESTRATOR_VERSION);
+
   app.get("/healthz", async () => {
     const health: Record<string, unknown> = {};
     for (const w of WORKERS) {
@@ -2394,6 +2631,13 @@ async function main() {
   // Start HTTP + MCP
   await startHttpServer();
 
+  // Mark cloud readiness after HTTP is up
+  markReady();
+
+  // Register graceful shutdown handlers
+  installShutdownHandlers();
+  onShutdown(async () => { flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
+
   // Start periodic health checks (every 30s)
   pollWorkerHealth().catch(() => {});
   setInterval(() => pollWorkerHealth().catch(() => {}), CONFIG.server.healthPollInterval);
@@ -2402,13 +2646,13 @@ async function main() {
   await server.connect(transport);
 }
 
-// Cleanup on exit
+// Cleanup on exit — only called from the graceful shutdown path (onShutdown callback)
+// and from the fatal-error handler below. SIGINT/SIGTERM are handled by
+// installShutdownHandlers() (cloud.ts) which runs the onShutdown callbacks above.
 function shutdownWorkers() {
   for (const timer of respawnTimers.values()) clearTimeout(timer);
   for (const proc of workerProcs.values()) proc.kill();
 }
-process.on("SIGINT",  () => { shutdownWorkers(); process.exit(0); });
-process.on("SIGTERM", () => { shutdownWorkers(); process.exit(0); });
 
 main().catch((err) => {
   process.stderr.write(`Fatal error: ${err}\n`);
