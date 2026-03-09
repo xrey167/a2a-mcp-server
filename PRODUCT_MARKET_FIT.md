@@ -119,7 +119,7 @@ Option B gets users fast (developers). The workflow engine, tracing, and resilie
 - [x] Config file for choosing which workers to enable (profiles + per-worker toggle)
 - [x] Docker Compose for one-command startup
 - [x] Proper README with quick-start and architecture docs
-- [ ] Publish to npm as `a2a-mcp-server`
+- [x] Publish to npm as `a2a-mcp-server` (LICENSE, .npmignore, files field, prepublishOnly)
 
 ### Phase 2: Make It Useful Out of the Box (Weeks 5-12)
 
@@ -133,7 +133,7 @@ Option B gets users fast (developers). The workflow engine, tracing, and resilie
 
 - [ ] **Cloud deployment** — hosted workers, shared agent registries
 - [ ] **Team features** — shared workflows, knowledge bases, permissions
-- [ ] **A2A federation** — discover and connect to external A2A agents
+- [x] **A2A federation** — discover and connect to external A2A agents
 - [ ] SDK for building workers in Python, Go (not just TypeScript)
 - [ ] Integration with LangGraph/CrewAI agents as workers via A2A
 

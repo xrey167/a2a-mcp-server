@@ -87,6 +87,15 @@ const ServerConfigSchema = z.object({
   healthPollInterval: z.number().int().positive().optional().default(30_000),
 });
 
+const FederationConfigSchema = z.object({
+  /** Peer A2A agent URLs to discover via /.well-known/agent.json */
+  peers: z.array(z.string().url()).optional().default([]),
+  /** Health check interval in ms (default: 30s) */
+  healthIntervalMs: z.number().int().positive().optional().default(30_000),
+  /** Discovery timeout in ms (default: 5s) */
+  discoveryTimeoutMs: z.number().int().positive().optional().default(5_000),
+});
+
 const ConfigSchema = z.object({
   server: ServerConfigSchema.optional(),
   workers: z.array(WorkerConfigSchema).optional(),
@@ -99,6 +108,8 @@ const ConfigSchema = z.object({
   web: WebConfigSchema.optional(),
   /** Worker profile preset: "full" (all), "lite" (shell+web+ai), "data" (shell+web+ai+data) */
   profile: z.enum(["full", "lite", "data"]).optional(),
+  /** A2A federation — connect to external A2A agents */
+  federation: FederationConfigSchema.optional(),
   /** Extra environment variables to pass to workers */
   env: z.record(z.string()).optional(),
 }).strict();
@@ -112,6 +123,7 @@ const DEFAULTS = {
   truncation: TruncationConfigSchema.parse({}),
   timeouts: TimeoutsConfigSchema.parse({}),
   web: WebConfigSchema.parse({}),
+  federation: FederationConfigSchema.parse({}),
   env: {} as Record<string, string>,
 };
 
@@ -128,6 +140,7 @@ function applyDefaults(raw: z.infer<typeof ConfigSchema>): Config {
     workers,
     remoteWorkers: raw.remoteWorkers,
     profile: raw.profile,
+    federation: { ...DEFAULTS.federation, ...raw.federation },
     search: { ...DEFAULTS.search, ...raw.search },
     sandbox: { ...DEFAULTS.sandbox, ...raw.sandbox },
     truncation: { ...DEFAULTS.truncation, ...raw.truncation },
@@ -166,11 +179,14 @@ function applyProfile(profile: string): z.infer<typeof WorkerConfigSchema>[] {
 
 export type RemoteWorkerConfig = z.infer<typeof RemoteWorkerSchema>;
 
+export type FederationConfig = z.infer<typeof FederationConfigSchema>;
+
 export type Config = {
   server: z.infer<typeof ServerConfigSchema>;
   workers?: z.infer<typeof WorkerConfigSchema>[];
   remoteWorkers?: RemoteWorkerConfig[];
   profile?: string;
+  federation: FederationConfig;
   search: z.infer<typeof SearchConfigSchema>;
   sandbox: z.infer<typeof SandboxConfigSchema>;
   truncation: z.infer<typeof TruncationConfigSchema>;
