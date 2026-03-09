@@ -400,7 +400,7 @@ event_publish { topic: "agent.shell.completed", data: { exitCode: 0 } }
 event_subscribe { pattern: "agent.*", name: "my-listener" }
 
 # Replay missed events
-event_replay { pattern: "workflow.#", since: "2025-01-01T00:00:00Z", limit: 100 }
+event_replay { pattern: "workflow.#", since: "YYYY-MM-DDTHH:MM:SSZ", limit: 100 }
 ```
 
 Topic patterns: `*` matches one segment, `#` matches multiple. Events auto-published on agent completion/failure. Available as MCP resource at `a2a://event-bus`.
