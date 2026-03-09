@@ -148,7 +148,8 @@ function sanitizeTemplateValue(
   if (LLM_SKILLS.has(targetSkillId)) {
     // Always sanitize for LLM skills regardless of embedding position.
     // sanitizeUserInput wraps content in XML tags, marking it as data not instructions.
-    return sanitizeUserInput(sanitized, "step_result");
+    // Pass MAX_SUBSTITUTION_LENGTH so LLM substitutions use the same cap as other skills.
+    return sanitizeUserInput(sanitized, "step_result", MAX_SUBSTITUTION_LENGTH);
   }
 
   // For all other skills: return the cleaned value.
