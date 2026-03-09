@@ -56,6 +56,10 @@ declare module "fastify" {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 
+// Single source of truth for the orchestrator version, used in the MCP server
+// identity, the /.well-known/agent.json card, and the cloud health routes.
+const ORCHESTRATOR_VERSION = "3.0.0";
+
 // ── URL validation (SSRF prevention) ─────────────────────────────
 // Only worker ports allowed — orchestrator port excluded to prevent infinite recursion.
 // Populated dynamically after WORKERS is resolved (below).
@@ -1481,7 +1485,7 @@ const sandboxVarsSkill = {
 
 // ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
-  { name: "a2a-mcp-bridge", version: "3.0.0" },
+  { name: "a2a-mcp-bridge", version: ORCHESTRATOR_VERSION },
   { capabilities: { tools: {}, resources: {}, prompts: {} } }
 );
 
@@ -2241,7 +2245,7 @@ async function startHttpServer() {
       name: "Local A2A Orchestrator",
       description: "MCP + A2A orchestrator with multi-agent workers",
       url: "http://localhost:8080",
-      version: "3.0.0",
+      version: ORCHESTRATOR_VERSION,
       capabilities: { streaming: false },
       skills: allSkills,
     };
@@ -2554,7 +2558,7 @@ ${Object.entries(breakers).map(([name, b]: [string, any]) => `
   });
 
   // Register cloud health routes (/healthz, /readyz, /health)
-  registerHealthRoutes(app, "3.1.0");
+  registerHealthRoutes(app, ORCHESTRATOR_VERSION);
 
   app.get("/healthz", async () => {
     const health: Record<string, unknown> = {};

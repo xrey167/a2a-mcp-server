@@ -1,10 +1,25 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { auditLog, auditQuery, auditStats, auditPrune, closeAuditDb } from "../audit.js";
+import { join } from "path";
+import { tmpdir } from "os";
+import { unlinkSync } from "fs";
+
+// Use an isolated temp DB so tests never touch the user's real ~/.a2a-mcp/audit.db
+const testDbPath = join(tmpdir(), `a2a-audit-test-${Date.now()}.db`);
+process.env.A2A_AUDIT_DB = testDbPath;
+
+// Dynamic import AFTER env is set so module picks up the test DB path
+const { auditLog, auditQuery, auditStats, auditPrune, closeAuditDb } =
+  await import("../audit.js");
+
+// Clean up temp DB after all tests
+afterAll(() => {
+  closeAuditDb();
+  try { unlinkSync(testDbPath); } catch {}
+  try { unlinkSync(testDbPath + "-wal"); } catch {}
+  try { unlinkSync(testDbPath + "-shm"); } catch {}
+});
 
 describe("audit", () => {
-  afterAll(() => {
-    closeAuditDb();
-  });
 
   test("auditLog writes and auditQuery reads entries", () => {
     auditLog({
@@ -79,5 +94,44 @@ describe("audit", () => {
     auditLog({ actor: "trunc-test", role: "admin", skillId: "test", success: true, args: longArgs });
     const entries = auditQuery({ actor: "trunc-test" });
     expect(entries[0].args!.length).toBeLessThanOrEqual(2048);
+  });
+
+  test("auditLog stores timestamp in ISO-8601 UTC format", () => {
+    auditLog({ actor: "ts-format-test", role: "admin", skillId: "ts_check", success: true });
+    const entries = auditQuery({ actor: "ts-format-test", limit: 1 });
+    expect(entries.length).toBeGreaterThanOrEqual(1);
+    const { timestamp } = entries[0];
+    // Must match ISO-8601 UTC: "YYYY-MM-DDTHH:MM:SS.sssZ"
+    expect(timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/);
+    // Must be parseable and not NaN
+    expect(Number.isNaN(new Date(timestamp).getTime())).toBe(false);
+  });
+
+  test("auditQuery since/until filters work with ISO-8601 timestamps", () => {
+    const before = new Date(Date.now() - 1000).toISOString();
+    auditLog({ actor: "filter-ts-test", role: "admin", skillId: "ts_filter", success: true });
+    const after = new Date(Date.now() + 1000).toISOString();
+
+    const withSince = auditQuery({ actor: "filter-ts-test", since: before });
+    expect(withSince.length).toBeGreaterThanOrEqual(1);
+
+    const withUntil = auditQuery({ actor: "filter-ts-test", until: after });
+    expect(withUntil.length).toBeGreaterThanOrEqual(1);
+
+    // since in the future → nothing returned
+    const noResults = auditQuery({ actor: "filter-ts-test", since: after });
+    expect(noResults.length).toBe(0);
+  });
+
+  test("auditStats since filter works with ISO-8601 timestamps", () => {
+    const beforeAll = new Date(Date.now() - 1000).toISOString();
+    auditLog({ actor: "stats-ts-test", role: "admin", skillId: "ts_stats", success: true });
+
+    const stats = auditStats(beforeAll);
+    expect(stats.totalCalls).toBeGreaterThanOrEqual(1);
+
+    // since in the future → totalCalls should be 0
+    const futureStats = auditStats(new Date(Date.now() + 1000).toISOString());
+    expect(futureStats.totalCalls).toBe(0);
   });
 });
