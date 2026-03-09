@@ -167,6 +167,23 @@ Add to your Zed `settings.json`:
 }
 ```
 
+### Create custom workers
+
+Add your own workers without forking the project:
+
+```bash
+# Scaffold a new worker
+bun src/cli.ts create-worker my-tool --port 8091
+
+# Edit the generated code
+# ~/.a2a-mcp/workers/my-tool/index.ts
+
+# Restart the server — your worker is auto-discovered
+bun src/server.ts
+```
+
+Workers in `~/.a2a-mcp/workers/` are auto-spawned alongside built-in workers. Each worker is a standalone Fastify server that exposes `/.well-known/agent.json` and handles A2A tasks.
+
 -----
 
 ## Key features

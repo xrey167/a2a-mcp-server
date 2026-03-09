@@ -10,6 +10,7 @@ This project uses **Bun** exclusively — no Node.js, no build step. TypeScript 
 bun src/server.ts          # start full stack (orchestrator + all workers)
 bun src/workers/shell.ts   # start a single worker in isolation
 bun build src/server.ts --target bun  # type-check via bundler (no tsc installed)
+bun src/cli.ts create-worker my-tool  # scaffold a custom worker
 ```
 
 ## MCP Registration
@@ -121,6 +122,7 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 - `src/tracing.ts` — distributed tracing with waterfall visualization
 - `src/skill-cache.ts` — LRU skill result cache with per-skill TTL
 - `src/capability-negotiation.ts` — version-aware capability negotiation for skill routing
+- `src/worker-loader.ts` — discovers and scaffolds user-space workers from `~/.a2a-mcp/workers/`
 
 **Routing in `delegate` skill (server.ts):**
 1. `agentUrl` provided → send directly (through circuit breaker)

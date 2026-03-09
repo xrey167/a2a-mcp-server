@@ -16,6 +16,7 @@ import { sendTask, discoverAgent, fetchWithTimeout, type AgentCard } from "./a2a
 import { initRegistry, listMcpServers, listMcpTools, callMcpTool } from "./mcp-registry.js";
 import { getProjectContext, setProjectContext, getContextPreamble } from "./context.js";
 import { initPlugins, watchPlugins, pluginSkills } from "./skill-loader.js";
+import { discoverUserWorkers, type UserWorker } from "./worker-loader.js";
 import { getPersona, watchPersonas } from "./persona-loader.js";
 import { memory } from "./memory.js";
 import { createTask, markWorking, markCompleted, markFailed, markCanceled, emitProgress, getTask, listTasks, pruneTasks, toA2AResult, taskEvents } from "./task-store.js";
@@ -116,15 +117,27 @@ const ALL_WORKERS = [
 // Apply config: filter by enabled workers and override ports
 const WORKERS = (() => {
   const configWorkers = CONFIG.workers;
-  if (!configWorkers || configWorkers.length === 0) return ALL_WORKERS;
-  const configMap = new Map(configWorkers.map(w => [w.name, w]));
-  return ALL_WORKERS.filter(w => {
-    const cw = configMap.get(w.name);
-    return cw ? cw.enabled !== false : true; // enabled by default if not in config
-  }).map(w => {
-    const cw = configMap.get(w.name);
-    return cw?.port ? { ...w, port: cw.port } : w;
-  });
+  let builtins: typeof ALL_WORKERS;
+  if (!configWorkers || configWorkers.length === 0) {
+    builtins = ALL_WORKERS;
+  } else {
+    const configMap = new Map(configWorkers.map(w => [w.name, w]));
+    builtins = ALL_WORKERS.filter(w => {
+      const cw = configMap.get(w.name);
+      return cw ? cw.enabled !== false : true; // enabled by default if not in config
+    }).map(w => {
+      const cw = configMap.get(w.name);
+      return cw?.port ? { ...w, port: cw.port } : w;
+    });
+  }
+
+  // Discover user-space workers from ~/.a2a-mcp/workers/
+  const userWorkers = discoverUserWorkers();
+  if (userWorkers.length > 0) {
+    process.stderr.write(`[orchestrator] found ${userWorkers.length} user worker(s): ${userWorkers.map(w => w.name).join(", ")}\n`);
+  }
+
+  return [...builtins, ...userWorkers];
 })();
 
 const ALLOWED_PORTS = new Set(WORKERS.map(w => w.port));

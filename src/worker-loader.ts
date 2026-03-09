@@ -1,0 +1,131 @@
+// src/worker-loader.ts
+// Discovers and loads user-space workers from ~/.a2a-mcp/workers/
+// Each subdirectory should contain an index.ts with a Fastify server exporting AGENT_CARD.
+
+import { existsSync, readdirSync, statSync, mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
+
+export interface UserWorker {
+  name: string;
+  path: string;
+  port: number;
+}
+
+const WORKERS_DIR = join(homedir(), ".a2a-mcp", "workers");
+// User workers start at port 8090 to avoid clashing with built-in workers (8081-8088)
+const USER_PORT_BASE = 8090;
+
+/**
+ * Scan ~/.a2a-mcp/workers/ for user-defined worker directories.
+ * Each directory must contain an index.ts that exports a Fastify server.
+ * Port is assigned automatically starting from 8090 (or read from worker.json).
+ */
+export function discoverUserWorkers(): UserWorker[] {
+  if (!existsSync(WORKERS_DIR)) return [];
+
+  const entries = readdirSync(WORKERS_DIR).filter(name => {
+    const dir = join(WORKERS_DIR, name);
+    return statSync(dir).isDirectory() && existsSync(join(dir, "index.ts"));
+  });
+
+  return entries.map((name, i) => {
+    const dir = join(WORKERS_DIR, name);
+    // Check for worker.json config
+    let port = USER_PORT_BASE + i;
+    const configPath = join(dir, "worker.json");
+    if (existsSync(configPath)) {
+      try {
+        const config = JSON.parse(require("fs").readFileSync(configPath, "utf-8"));
+        if (config.port) port = config.port;
+      } catch {}
+    }
+    return { name, path: join(dir, "index.ts"), port };
+  });
+}
+
+/**
+ * Scaffold a new worker in ~/.a2a-mcp/workers/<name>/
+ */
+export function scaffoldWorker(name: string, port?: number): string {
+  const dir = join(WORKERS_DIR, name);
+  if (existsSync(dir)) {
+    throw new Error(`Worker "${name}" already exists at ${dir}`);
+  }
+
+  mkdirSync(dir, { recursive: true });
+
+  const assignedPort = port ?? USER_PORT_BASE;
+
+  // worker.json
+  writeFileSync(join(dir, "worker.json"), JSON.stringify({
+    name,
+    port: assignedPort,
+    description: `Custom ${name} worker`,
+  }, null, 2));
+
+  // index.ts — minimal worker template
+  writeFileSync(join(dir, "index.ts"), `import Fastify from "fastify";
+
+const PORT = ${assignedPort};
+const AGENT_CARD = {
+  name: "${name}-agent",
+  url: \`http://localhost:\${PORT}\`,
+  description: "Custom ${name} worker",
+  skills: [
+    { id: "${name}_hello", name: "Hello", description: "A sample skill that echoes input" },
+  ],
+};
+
+const app = Fastify({ logger: false });
+
+// Agent card endpoint (required for discovery)
+app.get("/.well-known/agent.json", async () => AGENT_CARD);
+
+// Health check (required for monitoring)
+app.get("/healthz", async () => ({ status: "ok", uptime: process.uptime() }));
+
+// A2A task endpoint
+app.post("/a2a", async (req) => {
+  const body = req.body as any;
+  const skillId = body?.params?.message?.parts?.[0]?.metadata?.skillId;
+  const args = body?.params?.message?.parts?.[0]?.metadata?.args ?? {};
+  const taskId = body?.params?.id ?? crypto.randomUUID();
+
+  let result: string;
+  switch (skillId) {
+    case "${name}_hello":
+      result = \`Hello from ${name}! You said: \${args.input ?? "(nothing)"}\`;
+      break;
+    default:
+      result = \`Unknown skill: \${skillId}\`;
+  }
+
+  return {
+    jsonrpc: "2.0",
+    id: body.id,
+    result: {
+      id: taskId,
+      status: { state: "completed" },
+      artifacts: [{ parts: [{ type: "text", text: result }] }],
+    },
+  };
+});
+
+app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
+  process.stderr.write(\`[${name}-agent] listening on :\${PORT}\\n\`);
+});
+`);
+
+  return dir;
+}
+
+export function getWorkersDir(): string {
+  return WORKERS_DIR;
+}
+
+export function ensureWorkersDir(): void {
+  if (!existsSync(WORKERS_DIR)) {
+    mkdirSync(WORKERS_DIR, { recursive: true });
+  }
+}

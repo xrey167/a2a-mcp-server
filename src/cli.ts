@@ -10,6 +10,7 @@
  */
 
 import { initConfigDir, loadConfig } from "./config.js";
+import { discoverUserWorkers, scaffoldWorker, getWorkersDir, ensureWorkersDir } from "./worker-loader.js";
 import { join } from "path";
 import { existsSync, writeFileSync, readFileSync } from "fs";
 import { homedir } from "os";
@@ -22,14 +23,16 @@ function printHelp() {
 a2a-mcp-server — Multi-agent orchestrator bridging MCP and A2A protocols
 
 Commands:
-  (none)     Start the server (MCP stdio + A2A HTTP)
-  init       Create default config at ~/.a2a-mcp/config.json
-             --lite    Only shell + web + ai workers
-             --data    Shell + web + ai + data workers
-             --full    All 8 workers (default)
-  config     Show current configuration
-  workers    List available workers and their status
-  help       Show this help message
+  (none)          Start the server (MCP stdio + A2A HTTP)
+  init            Create default config at ~/.a2a-mcp/config.json
+                  --lite    Only shell + web + ai workers
+                  --data    Shell + web + ai + data workers
+                  --full    All 8 workers (default)
+  config          Show current configuration
+  workers         List available workers and their status
+  create-worker   Scaffold a new custom worker
+                  Usage: create-worker <name> [--port <port>]
+  help            Show this help message
 
 Profiles:
   full       All 8 workers (shell, web, ai, code, knowledge, design, factory, data)
@@ -120,7 +123,47 @@ function workersCommand() {
     }
   }
 
-  process.stderr.write("\nEdit ~/.a2a-mcp/config.json to configure.\n\n");
+  // Show user-space workers
+  const userWorkers = discoverUserWorkers();
+  if (userWorkers.length > 0) {
+    process.stderr.write("\nUser workers (~/.a2a-mcp/workers/):\n");
+    for (const uw of userWorkers) {
+      process.stderr.write(`  * ${uw.name.padEnd(12)} :${uw.port}  ${uw.path}\n`);
+    }
+  }
+
+  process.stderr.write("\nEdit ~/.a2a-mcp/config.json to configure.\n");
+  process.stderr.write(`Create a new worker: bun src/cli.ts create-worker <name>\n\n`);
+}
+
+function createWorkerCommand() {
+  const name = args[1];
+  if (!name) {
+    process.stderr.write("Usage: bun src/cli.ts create-worker <name> [--port <port>]\n");
+    process.exit(1);
+  }
+
+  // Validate name: alphanumeric + hyphens only
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
+    process.stderr.write(`Invalid worker name "${name}". Use lowercase letters, numbers, and hyphens.\n`);
+    process.exit(1);
+  }
+
+  const portIdx = args.indexOf("--port");
+  const port = portIdx >= 0 ? parseInt(args[portIdx + 1], 10) : undefined;
+
+  try {
+    ensureWorkersDir();
+    const dir = scaffoldWorker(name, port);
+    process.stderr.write(`Created worker "${name}" at ${dir}\n`);
+    process.stderr.write(`\nNext steps:\n`);
+    process.stderr.write(`  1. Edit ${dir}/index.ts to add your skills\n`);
+    process.stderr.write(`  2. Start the server: bun src/server.ts\n`);
+    process.stderr.write(`  3. Your worker will be auto-discovered and spawned\n\n`);
+  } catch (err: any) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
 }
 
 switch (command) {
@@ -132,6 +175,9 @@ switch (command) {
     break;
   case "workers":
     workersCommand();
+    break;
+  case "create-worker":
+    createWorkerCommand();
     break;
   case "help":
   case "--help":
