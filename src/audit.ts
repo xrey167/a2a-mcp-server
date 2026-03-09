@@ -190,8 +190,10 @@ export function auditStats(since?: string): {
  */
 export function auditPrune(olderThanDays: number = 90): number {
   const d = getDb();
-  const cutoff = new Date(Date.now() - olderThanDays * 86400_000).toISOString();
-  const result = d.run(`DELETE FROM audit_log WHERE timestamp < ?`, [cutoff]);
+  const result = d.run(
+    `DELETE FROM audit_log WHERE timestamp < datetime('now', ?)`,
+    [`-${olderThanDays} days`]
+  );
   return result.changes;
 }
 
