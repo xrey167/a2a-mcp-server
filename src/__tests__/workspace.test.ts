@@ -1,19 +1,31 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace, getKnowledgeDir } from "../workspace.js";
-import { existsSync, rmSync, mkdirSync } from "fs";
+import { describe, test, expect, afterEach } from "bun:test";
+import {
+  createWorkspace,
+  getWorkspace,
+  listWorkspaces,
+  addMember,
+  removeMember,
+  updateWorkspace,
+  getKnowledgeDir,
+  deleteWorkspace,
+  closeWorkspaceDb,
+} from "../workspace.js";
+import { existsSync, rmSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
-const BASE_DIR = join(process.env.HOME ?? homedir(), ".a2a-mcp", "workspaces");
+const KNOWLEDGE_BASE_DIR = join(process.env.HOME ?? homedir(), ".a2a-mcp", "workspaces");
 
 describe("workspace", () => {
   const testWsIds: string[] = [];
 
   afterEach(() => {
-    // Clean up test workspaces
+    // Clean up test workspaces from SQLite and remove any on-disk knowledge dirs.
     for (const id of testWsIds) {
-      const dir = join(BASE_DIR, id);
-      if (existsSync(dir)) rmSync(dir, { recursive: true });
+      deleteWorkspace(id);
+      const workspaceDir = join(KNOWLEDGE_BASE_DIR, id);
+      const knowledgeDir = join(workspaceDir, "knowledge");
+      if (existsSync(knowledgeDir)) rmSync(knowledgeDir, { recursive: true });
     }
     testWsIds.length = 0;
   });
