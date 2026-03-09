@@ -48,6 +48,15 @@ export const taskEvents = new EventEmitter();
 // Don't limit listeners — SSE clients can be many
 taskEvents.setMaxListeners(100);
 
+// ── Test Helpers (for test isolation) ────────────────────────────
+
+/** Clear all tasks and event listeners (for test isolation). Internal use only. */
+export function __clearTasksForTesting(): void {
+  tasks.clear();
+  taskEvents.removeAllListeners();
+  taskEvents.setMaxListeners(100);
+}
+
 // ── Public API ────────────────────────────────────────────────────
 
 /** Create a new task in "submitted" state. */
