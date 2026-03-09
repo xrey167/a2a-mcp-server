@@ -16,6 +16,7 @@ import { sendTask, discoverAgent, fetchWithTimeout, type AgentCard } from "./a2a
 import { initRegistry, listMcpServers, listMcpTools, callMcpTool } from "./mcp-registry.js";
 import { getProjectContext, setProjectContext, getContextPreamble } from "./context.js";
 import { initPlugins, watchPlugins, pluginSkills } from "./skill-loader.js";
+import { discoverUserWorkers, type UserWorker } from "./worker-loader.js";
 import { getPersona, watchPersonas } from "./persona-loader.js";
 import { memory } from "./memory.js";
 import { createTask, markWorking, markCompleted, markFailed, markCanceled, emitProgress, getTask, listTasks, pruneTasks, toA2AResult, taskEvents } from "./task-store.js";
@@ -33,13 +34,35 @@ import { getBreaker, getAllBreakerStats, resetAllBreakers, CircuitOpenError } fr
 import { startSkillTimer, recordSkillCall, registerWorkerMetric, getMetricsSnapshot } from "./metrics.js";
 import { executeWorkflow, validateWorkflow, type WorkflowDefinition } from "./workflow-engine.js";
 import { registerWebhook, unregisterWebhook, getWebhook, listWebhooks, toggleWebhook, verifySignature, transformPayload, logWebhookCall, getWebhookLog } from "./webhooks.js";
+import { publish, subscribe, unsubscribe, replay, listSubscriptions, getDeadLetters, getEventBusStats, type AgentEvent } from "./event-bus.js";
+import { compose, getPipeline, listPipelines as listComposerPipelines, removePipeline, executePipeline, type Pipeline } from "./skill-composer.js";
+import { collaborate, type CollaborationRequest } from "./agent-collaboration.js";
+import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracingStats } from "./tracing.js";
+import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats, configureCacheSkill } from "./skill-cache.js";
+import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 
 // ── URL validation (SSRF prevention) ─────────────────────────────
-// Only worker ports allowed — port 8080 (orchestrator) excluded to prevent infinite recursion.
-const ALLOWED_PORTS = new Set([8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088]);
+// Only worker ports allowed — orchestrator port excluded to prevent infinite recursion.
+// Populated dynamically after WORKERS is resolved (below).
+
+// ── Webhook skill denylist ────────────────────────────────────────
+// These skills execute code or modify the filesystem and must not be
+// invocable via the unauthenticated webhook endpoint.
+const WEBHOOK_BLOCKED_SKILLS = new Set([
+  "run_shell",
+  "run_shell_stream",
+  "write_file",
+  "read_file",
+  "codex_exec",
+  "sandbox_execute",
+  "sandbox_vars",
+  "search_files",
+  "query_sqlite",
+  "workflow_execute",
+]);
 
 // ── Webhook skill denylist ────────────────────────────────────────
 // These skills execute code or modify the filesystem and must not be
@@ -74,16 +97,29 @@ function isAllowedUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-    if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") return false;
-    const port = parseInt(parsed.port || "80", 10);
-    return ALLOWED_PORTS.has(port);
+
+    // Local workers: localhost on allowed ports
+    if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+      const port = parseInt(parsed.port || "80", 10);
+      return ALLOWED_PORTS.has(port);
+    }
+
+    // Remote workers: exact URL match against configured remoteWorkers
+    const origin = parsed.origin;
+    for (const allowed of ALLOWED_REMOTE_URLS) {
+      try {
+        if (new URL(allowed).origin === origin) return true;
+      } catch {}
+    }
+
+    return false;
   } catch {
     return false;
   }
 }
 
 // ── Worker definitions ──────────────────────────────────────────
-const WORKERS = [
+const ALL_WORKERS = [
   { name: "shell",     path: join(__dirname, "workers/shell.ts"),     port: 8081 },
   { name: "web",       path: join(__dirname, "workers/web.ts"),       port: 8082 },
   { name: "ai",        path: join(__dirname, "workers/ai.ts"),        port: 8083 },
@@ -93,6 +129,39 @@ const WORKERS = [
   { name: "factory",   path: join(__dirname, "workers/factory.ts"),   port: 8087 },
   { name: "data",      path: join(__dirname, "workers/data.ts"),      port: 8088 },
 ];
+
+// Apply config: filter by enabled workers and override ports
+const WORKERS = (() => {
+  const configWorkers = CONFIG.workers;
+  let builtins: typeof ALL_WORKERS;
+  if (!configWorkers || configWorkers.length === 0) {
+    builtins = ALL_WORKERS;
+  } else {
+    const configMap = new Map(configWorkers.map(w => [w.name, w]));
+    builtins = ALL_WORKERS.filter(w => {
+      const cw = configMap.get(w.name);
+      return cw ? cw.enabled !== false : true; // enabled by default if not in config
+    }).map(w => {
+      const cw = configMap.get(w.name);
+      return cw?.port ? { ...w, port: cw.port } : w;
+    });
+  }
+
+  // Discover user-space workers from ~/.a2a-mcp/workers/
+  const userWorkers = discoverUserWorkers();
+  if (userWorkers.length > 0) {
+    process.stderr.write(`[orchestrator] found ${userWorkers.length} user worker(s): ${userWorkers.map(w => w.name).join(", ")}\n`);
+  }
+
+  return [...builtins, ...userWorkers];
+})();
+
+const ALLOWED_PORTS = new Set(WORKERS.map(w => w.port));
+
+// Remote workers configured via config (not spawned locally)
+const REMOTE_WORKERS = CONFIG.remoteWorkers ?? [];
+// Build set of allowed remote URLs for SSRF validation
+const ALLOWED_REMOTE_URLS = new Set(REMOTE_WORKERS.map(rw => rw.url));
 
 const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 const workerFailures = new Map<string, number>();
@@ -131,7 +200,8 @@ function spawnWorkers() {
 }
 
 async function discoverWorkers(): Promise<AgentCard[]> {
-  const results = await Promise.allSettled(
+  // Discover local workers
+  const localResults = await Promise.allSettled(
     WORKERS.map(async (w) => {
       for (let attempt = 0; attempt < 5; attempt++) {
         try {
@@ -146,7 +216,28 @@ async function discoverWorkers(): Promise<AgentCard[]> {
       return null;
     })
   );
-  return results.flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+
+  // Discover remote workers (configured via remoteWorkers)
+  const remoteResults = await Promise.allSettled(
+    REMOTE_WORKERS.map(async (rw) => {
+      try {
+        const card = await discoverAgent(rw.url);
+        process.stderr.write(`[orchestrator] discovered remote worker: ${rw.name} at ${rw.url}\n`);
+        // Store API key in agent registry for auth during task routing
+        if (rw.apiKey) {
+          const { registerAgent: regAgent } = await import("./agent-registry.js");
+          await regAgent(rw.url, rw.apiKey).catch(() => {});
+        }
+        return card;
+      } catch (err) {
+        process.stderr.write(`[orchestrator] failed to discover remote worker ${rw.name} at ${rw.url}: ${err}\n`);
+        return null;
+      }
+    })
+  );
+
+  const all = [...localResults, ...remoteResults];
+  return all.flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 }
 
 // ── Build skill-to-worker map ───────────────────────────────────
@@ -221,17 +312,42 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
 
   let result: string;
 
-  // Helper: send task through circuit breaker with metrics
+  // Start a trace for this delegate call
+  const trace = startTrace("delegate", { skillId, agentUrl, sessionId });
+
+  // Helper: send task through circuit breaker with metrics + tracing
   async function sendWithResilience(url: string, params: Parameters<typeof sendTask>[1], opts?: Parameters<typeof sendTask>[2]): Promise<string> {
     const workerName = workerCards.find(c => c.url === url)?.name ?? url;
+    const span = trace.startSpan(`send:${workerName}`);
+    span.setTag("worker", workerName).setTag("skillId", params.skillId ?? "unknown");
     const breaker = getBreaker(workerName);
     const endTimer = startSkillTimer(params.skillId ?? "unknown", workerName);
-    try {
-      const res = await breaker.call(() => sendTask(url, params, opts));
+
+    // Check cache first for idempotent skills
+    const cacheArgs = params.args ?? {};
+    const cached = getFromCache(params.skillId ?? "", cacheArgs as Record<string, unknown>);
+    if (cached !== undefined) {
+      span.setTag("cache", "hit").end();
       endTimer();
+      return cached;
+    }
+
+    try {
+      incrementActive(params.skillId ?? "unknown", workerName);
+      const res = await breaker.call(() => sendTask(url, params, opts));
+      decrementActive(params.skillId ?? "unknown", workerName);
+      endTimer();
+      span.end();
+      // Cache the result
+      putInCache(params.skillId ?? "", cacheArgs as Record<string, unknown>, res);
+      // Publish event
+      publish(`agent.${workerName}.completed`, { skillId: params.skillId, resultLength: res.length }, { source: workerName, correlationId: trace.traceId }).catch(e => process.stderr.write(`[event-bus] publish error: ${e}\n`));
       return res;
     } catch (err) {
+      decrementActive(params.skillId ?? "unknown", workerName);
       endTimer(err instanceof Error ? err.message : String(err));
+      span.setTag("error", String(err)).end("error");
+      publish(`agent.${workerName}.failed`, { skillId: params.skillId, error: String(err) }, { source: workerName, correlationId: trace.traceId }).catch(e => process.stderr.write(`[event-bus] publish error: ${e}\n`));
       throw err;
     }
   }
@@ -305,6 +421,9 @@ ${sanitizedMessage}`;
       result = "No AI worker available for auto-routing";
     }
   }
+
+  // End trace
+  trace.end();
 
   // Persist session history
   if (sessionId) {
@@ -723,6 +842,191 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     case "reset_circuit_breakers":
       resetAllBreakers();
       return "All circuit breakers reset to closed state";
+
+    // ── Event Bus ─────────────────────────────────────────────
+    case "event_publish": {
+      const topic = args.topic as string;
+      if (!topic) throw new Error("event_publish requires topic");
+      // Restrict user-published topics to "user." prefix to prevent spoofing internal events
+      if (!topic.startsWith("user.")) {
+        throw new Error(`event_publish: user topics must start with "user." prefix, got: "${topic}"`);
+      }
+      const event = await publish(topic, args.data ?? {}, {
+        source: (args.source as string) ?? "user",
+        correlationId: args.correlationId as string | undefined,
+        meta: args.meta as Record<string, unknown> | undefined,
+      });
+      return JSON.stringify({ eventId: event.id, topic: event.topic, timestamp: event.timestamp });
+    }
+
+    case "event_subscribe": {
+      const pattern = args.pattern as string;
+      if (!pattern) throw new Error("event_subscribe requires pattern");
+      // MCP subscriptions store events for later retrieval — filter out sensitive metadata
+      const events: AgentEvent[] = [];
+      const subId = subscribe(pattern, (event) => {
+        // Strip internal metadata before exposing to MCP users
+        const { meta: _meta, ...safeEvent } = event;
+        events.push(safeEvent as AgentEvent);
+      }, {
+        name: (args.name as string) ?? "mcp-subscriber",
+        filter: args.filter as Record<string, unknown> | undefined,
+      });
+      return JSON.stringify({ subscriptionId: subId, pattern });
+    }
+
+    case "event_unsubscribe": {
+      const subId = args.subscriptionId as string;
+      if (!subId) throw new Error("event_unsubscribe requires subscriptionId");
+      return unsubscribe(subId) ? `Unsubscribed: ${subId}` : `Subscription not found: ${subId}`;
+    }
+
+    case "event_replay": {
+      const pattern = args.pattern as string;
+      if (!pattern) throw new Error("event_replay requires pattern");
+      const events = replay(pattern, args.since as string | undefined, (args.limit as number) ?? 50);
+      return JSON.stringify(events, null, 2);
+    }
+
+    case "event_bus_stats":
+      return JSON.stringify({ ...getEventBusStats(), subscriptions_list: listSubscriptions() }, null, 2);
+
+    // ── Skill Composition ────────────────────────────────────────
+    case "compose_pipeline": {
+      const name = args.name as string;
+      if (!name) throw new Error("compose_pipeline requires name");
+      const steps = args.steps as any[];
+      if (!steps || !Array.isArray(steps)) throw new Error("compose_pipeline requires steps array");
+      const pipeline = compose(name, steps, args.description as string | undefined);
+      return JSON.stringify({ id: pipeline.id, name: pipeline.name, steps: pipeline.steps.length }, null, 2);
+    }
+
+    case "execute_pipeline": {
+      const pipelineRef = (args.pipeline as string) ?? (args.name as string);
+      if (!pipelineRef) throw new Error("execute_pipeline requires pipeline (ID or name)");
+      const input = (args.input as Record<string, unknown>) ?? {};
+
+      const task = createTask({ skillId: "execute_pipeline" });
+      markWorking(task.id);
+
+      (async () => {
+        try {
+          const result = await executePipeline(pipelineRef, input, (sid, a, t) => dispatchSkill(sid, a, t));
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          try { markFailed(task.id, { code: "PIPELINE_ERROR", message: String(err) }); } catch {}
+        }
+      })();
+
+      return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
+    }
+
+    case "list_pipelines":
+      return JSON.stringify(listComposerPipelines(), null, 2);
+
+    // ── Agent Collaboration ──────────────────────────────────────
+    case "collaborate": {
+      const strategy = args.strategy as string;
+      if (!strategy) throw new Error("collaborate requires strategy");
+      const query = (args.query as string) ?? "";
+      const agents = args.agents as string[];
+      if (!agents || !Array.isArray(agents)) throw new Error("collaborate requires agents array");
+
+      const validStrategies: CollaborationRequest["strategy"][] = ["fan_out", "consensus", "debate", "map_reduce"];
+      if (!validStrategies.includes(strategy as CollaborationRequest["strategy"])) {
+        throw new Error(`Invalid strategy: ${strategy}. Must be one of: ${validStrategies.join(", ")}`);
+      }
+      const validMergeStrategies = ["concat", "best_score", "majority_vote", "custom"];
+      if (args.mergeStrategy && !validMergeStrategies.includes(args.mergeStrategy as string)) {
+        throw new Error(`Invalid mergeStrategy: ${args.mergeStrategy}. Must be one of: ${validMergeStrategies.join(", ")}`);
+      }
+
+      const task = createTask({ skillId: "collaborate" });
+      markWorking(task.id);
+
+      (async () => {
+        try {
+          const result = await collaborate(
+            {
+              strategy: strategy as CollaborationRequest["strategy"],
+              query,
+              agents,
+              mergeStrategy: args.mergeStrategy as CollaborationRequest["mergeStrategy"],
+              maxRounds: args.maxRounds as number | undefined,
+              items: args.items as unknown[] | undefined,
+              timeoutMs: args.timeoutMs as number | undefined,
+              mergePrompt: args.mergePrompt as string | undefined,
+              judgeAgent: args.judgeAgent as string | undefined,
+            },
+            (sid, a, t) => dispatchSkill(sid, a, t),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          try { markFailed(task.id, { code: "COLLABORATION_ERROR", message: String(err) }); } catch {}
+        }
+      })();
+
+      return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
+    }
+
+    // ── Tracing ──────────────────────────────────────────────────
+    case "list_traces":
+      return JSON.stringify(listTraces((args.limit as number) ?? 50), null, 2);
+
+    case "get_trace": {
+      const traceId = args.traceId as string;
+      if (!traceId) throw new Error("get_trace requires traceId");
+      const waterfall = getWaterfall(traceId);
+      if (waterfall.length === 0) return JSON.stringify({ error: "Trace not found" });
+      return JSON.stringify({ traceId, waterfall }, null, 2);
+    }
+
+    case "search_traces":
+      return JSON.stringify(searchTraces((args.query as string) ?? "", (args.limit as number) ?? 20), null, 2);
+
+    // ── Skill Cache ──────────────────────────────────────────────
+    case "cache_stats":
+      return JSON.stringify(getCacheStats(), null, 2);
+
+    case "cache_invalidate": {
+      const skillId = args.skillId as string | undefined;
+      if (skillId) {
+        const count = invalidateSkill(skillId);
+        return `Invalidated ${count} cache entries for skill: ${skillId}`;
+      }
+      invalidateAll();
+      return "All cache entries invalidated";
+    }
+
+    case "cache_configure": {
+      const skillId = args.skillId as string;
+      if (!skillId) throw new Error("cache_configure requires skillId");
+      const ttl = args.ttlMs as number | undefined;
+      const noCache = args.noCache as boolean | undefined;
+      configureCacheSkill(skillId, noCache ? "no-cache" : (ttl ?? 300_000));
+      return `Cache configured for ${skillId}: ${noCache ? "no-cache" : `TTL ${ttl ?? 300_000}ms`}`;
+    }
+
+    // ── Capability Negotiation ───────────────────────────────────
+    case "negotiate_capability": {
+      const skillId = args.skillId as string;
+      if (!skillId) throw new Error("negotiate_capability requires skillId");
+      const result = negotiate(skillId, {
+        minVersion: args.minVersion as string | undefined,
+        maxVersion: args.maxVersion as string | undefined,
+        requiredFeatures: args.requiredFeatures as string[] | undefined,
+        preferredFeatures: args.preferredFeatures as string[] | undefined,
+        healthAware: args.healthAware as boolean | undefined,
+        loadAware: args.loadAware as boolean | undefined,
+      });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "list_capabilities":
+      return JSON.stringify(listCapabilities(args.skillId as string | undefined), null, 2);
+
+    case "capability_stats":
+      return JSON.stringify(getCapabilityStats(), null, 2);
 
     // ── Webhooks ────────────────────────────────────────────────
     case "register_webhook": {
@@ -1250,6 +1554,148 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
       description: "List all registered webhooks and their endpoints.",
       inputSchema: { type: "object" as const, properties: {} },
     },
+    // ── Event Bus ─────────────────────────────────────────────────
+    {
+      name: "event_publish",
+      description: "Publish an event to the agent event bus. Subscribers matching the topic pattern will be notified.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          topic: { type: "string", description: "Dot-separated topic (e.g. 'agent.shell.completed', 'workflow.step.done')" },
+          data: { type: "object", description: "Event payload" },
+          source: { type: "string", description: "Source agent name (default: 'user')" },
+          correlationId: { type: "string", description: "Correlation ID for tracing event chains" },
+        },
+        required: ["topic"],
+      },
+    },
+    {
+      name: "event_subscribe",
+      description: "Subscribe to events matching a topic pattern. Supports * (one segment) and # (multi-segment) wildcards.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          pattern: { type: "string", description: "Topic pattern (e.g. 'agent.*', 'workflow.#')" },
+          name: { type: "string", description: "Subscriber name for debugging" },
+          filter: { type: "object", description: "Field-level filter: { 'data.status': 'completed' }" },
+        },
+        required: ["pattern"],
+      },
+    },
+    {
+      name: "event_replay",
+      description: "Replay events matching a topic pattern from history. Useful for catching up after reconnection.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          pattern: { type: "string", description: "Topic pattern to replay" },
+          since: { type: "string", description: "ISO timestamp to replay from" },
+          limit: { type: "number", description: "Max events to return (default: 50)" },
+        },
+        required: ["pattern"],
+      },
+    },
+    // ── Skill Composition ─────────────────────────────────────────
+    {
+      name: "compose_pipeline",
+      description: "Create a reusable skill pipeline. Each step's output feeds the next. Supports {{prev.result}}, {{input.*}}, and {{steps.alias.result}} templates.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          name: { type: "string", description: "Pipeline name" },
+          description: { type: "string", description: "What this pipeline does" },
+          steps: {
+            type: "array",
+            description: "Pipeline steps: [{ skillId, args?, transform?, as?, when?, onError? }]",
+            items: { type: "object" },
+          },
+        },
+        required: ["name", "steps"],
+      },
+    },
+    {
+      name: "execute_pipeline",
+      description: "Execute a composed pipeline. Returns taskId — poll with delegate(taskId).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          pipeline: { type: "string", description: "Pipeline ID or name" },
+          input: { type: "object", description: "Input data available as {{input.*}} in steps" },
+        },
+        required: ["pipeline"],
+      },
+    },
+    // ── Agent Collaboration ────────────────────────────────────────
+    {
+      name: "collaborate",
+      description: "Multi-agent collaboration: fan_out (parallel query), consensus (score + pick best), debate (refine through critique), map_reduce (distribute + aggregate). Returns taskId.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          strategy: { type: "string", description: "Collaboration strategy", enum: ["fan_out", "consensus", "debate", "map_reduce"] },
+          query: { type: "string", description: "The question or task for agents to collaborate on" },
+          agents: { type: "array", items: { type: "string" }, description: "Agent names or skill IDs to involve" },
+          mergeStrategy: { type: "string", description: "How to merge: concat, best_score, majority_vote, custom", enum: ["concat", "best_score", "majority_vote", "custom"] },
+          maxRounds: { type: "number", description: "For debate: max refinement rounds (default: 2)" },
+          items: { type: "array", description: "For map_reduce: items to distribute" },
+          mergePrompt: { type: "string", description: "Custom merge prompt (for custom merge strategy)" },
+        },
+        required: ["strategy", "query", "agents"],
+      },
+    },
+    // ── Tracing ────────────────────────────────────────────────────
+    {
+      name: "list_traces",
+      description: "List recent distributed traces across agent calls. Shows timing, status, and span counts.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          limit: { type: "number", description: "Max traces to return (default: 50)" },
+        },
+      },
+    },
+    {
+      name: "get_trace",
+      description: "Get the waterfall visualization of a trace — shows the full call chain with timing.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          traceId: { type: "string", description: "Trace ID" },
+        },
+        required: ["traceId"],
+      },
+    },
+    // ── Skill Cache ────────────────────────────────────────────────
+    {
+      name: "cache_stats",
+      description: "Get skill cache statistics: hit rate, entries, size, top cached skills.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "cache_invalidate",
+      description: "Invalidate cached results. Specify skillId to target a specific skill, or omit to clear all.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          skillId: { type: "string", description: "Skill ID to invalidate (omit for all)" },
+        },
+      },
+    },
+    // ── Capability Negotiation ──────────────────────────────────────
+    {
+      name: "negotiate_capability",
+      description: "Find the best agent for a skill based on version, features, health, and load. Returns ranked candidates.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          skillId: { type: "string", description: "Skill to negotiate" },
+          minVersion: { type: "string", description: "Minimum SemVer version" },
+          requiredFeatures: { type: "array", items: { type: "string" }, description: "Features the agent must support" },
+          preferredFeatures: { type: "array", items: { type: "string" }, description: "Preferred features (bonus scoring)" },
+        },
+        required: ["skillId"],
+      },
+    },
   ];
 
   return tools;
@@ -1269,6 +1715,11 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
     { uri: "a2a://metrics", name: "Metrics", description: "Skill execution metrics: call counts, latencies, error rates", mimeType: "application/json" },
     { uri: "a2a://circuit-breakers", name: "Circuit Breakers", description: "Circuit breaker states for all workers", mimeType: "application/json" },
     { uri: "a2a://webhooks", name: "Webhooks", description: "Registered webhook endpoints", mimeType: "application/json" },
+    { uri: "a2a://event-bus", name: "Event Bus", description: "Event bus stats, subscriptions, and dead letters", mimeType: "application/json" },
+    { uri: "a2a://traces", name: "Traces", description: "Recent distributed traces across agent calls", mimeType: "application/json" },
+    { uri: "a2a://cache", name: "Skill Cache", description: "Skill result cache statistics", mimeType: "application/json" },
+    { uri: "a2a://capabilities", name: "Capabilities", description: "Agent capability registry and negotiation stats", mimeType: "application/json" },
+    { uri: "a2a://pipelines", name: "Pipelines", description: "Registered skill composition pipelines", mimeType: "application/json" },
   ];
   for (const card of workerCards) {
     resources.push({
@@ -1310,6 +1761,26 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
   if (uri === "a2a://webhooks") {
     return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listWebhooks().map(w => ({ ...w, secret: w.secret ? "***" : undefined })), null, 2) }] };
+  }
+
+  if (uri === "a2a://event-bus") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ stats: getEventBusStats(), subscriptions: listSubscriptions(), deadLetters: getDeadLetters(20) }, null, 2) }] };
+  }
+
+  if (uri === "a2a://traces") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ stats: getTracingStats(), recent: listTraces(20) }, null, 2) }] };
+  }
+
+  if (uri === "a2a://cache") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(getCacheStats(), null, 2) }] };
+  }
+
+  if (uri === "a2a://capabilities") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ stats: getCapabilityStats(), capabilities: listCapabilities() }, null, 2) }] };
+  }
+
+  if (uri === "a2a://pipelines") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listComposerPipelines(), null, 2) }] };
   }
 
   const workerMatch = uri.match(/^a2a:\/\/workers\/([^/]+)\/card$/);
@@ -1494,6 +1965,7 @@ async function pollWorkerHealth() {
       const body = await res.json() as { uptime?: number };
       const prev = workerHealth.get(w.name);
       workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now(), uptime: body.uptime });
+      updateAgentHealth(w.name, true);
       if (prev && !prev.healthy) {
         workerFailures.delete(w.name); // reset backoff counter on recovery
         process.stderr.write(`[orchestrator] ${w.name} recovered\n`);
@@ -1501,9 +1973,34 @@ async function pollWorkerHealth() {
     } catch {
       const prev = workerHealth.get(w.name);
       const failCount = (prev?.failCount ?? 0) + 1;
-      workerHealth.set(w.name, { healthy: failCount < 3, failCount, lastCheck: Date.now() });
+      const healthy = failCount < 3;
+      workerHealth.set(w.name, { healthy, failCount, lastCheck: Date.now() });
+      updateAgentHealth(w.name, healthy);
       if (failCount === 3) {
         process.stderr.write(`[orchestrator] ${w.name} marked unhealthy after ${failCount} failures\n`);
+      }
+    }
+  }
+
+  // Poll remote workers
+  for (const rw of REMOTE_WORKERS) {
+    try {
+      const res = await fetchWithTimeout(`${rw.url}/healthz`, {}, 5_000);
+      const body = await res.json() as { uptime?: number };
+      const prev = workerHealth.get(rw.name);
+      workerHealth.set(rw.name, { healthy: true, failCount: 0, lastCheck: Date.now(), uptime: body.uptime });
+      updateAgentHealth(rw.name, true);
+      if (prev && !prev.healthy) {
+        process.stderr.write(`[orchestrator] remote worker ${rw.name} recovered\n`);
+      }
+    } catch {
+      const prev = workerHealth.get(rw.name);
+      const failCount = (prev?.failCount ?? 0) + 1;
+      const healthy = failCount < 3;
+      workerHealth.set(rw.name, { healthy, failCount, lastCheck: Date.now() });
+      updateAgentHealth(rw.name, healthy);
+      if (failCount === 3) {
+        process.stderr.write(`[orchestrator] remote worker ${rw.name} marked unhealthy after ${failCount} failures\n`);
       }
     }
   }
@@ -1746,17 +2243,95 @@ async function startHttpServer() {
   // ── Metrics HTTP endpoint ─────────────────────────────────────
   app.get("/metrics", async () => getMetricsSnapshot());
 
+  // ── Dashboard ─────────────────────────────────────────────────
+  app.get("/dashboard", async (_req, reply) => {
+    const health: Record<string, unknown> = {};
+    for (const w of WORKERS) {
+      health[w.name] = workerHealth.get(w.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+    }
+    for (const rw of REMOTE_WORKERS) {
+      health[`remote:${rw.name}`] = workerHealth.get(rw.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+    }
+    const metrics = getMetricsSnapshot();
+    const breakers = getAllBreakerStats();
+    const tracingStats = getTracingStats();
+    const cacheStats = getCacheStats();
+
+    reply.type("text/html");
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>a2a-mcp-server dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px}
+h1{font-size:1.5rem;margin-bottom:8px;color:#f8fafc}
+.sub{color:#94a3b8;margin-bottom:24px;font-size:.875rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:32px}
+.card{background:#1e293b;border-radius:12px;padding:16px;border:1px solid #334155}
+.card h3{font-size:.875rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+.worker{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:.875rem}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.dot.ok{background:#22c55e}.dot.fail{background:#ef4444}.dot.warn{background:#f59e0b}
+.stat{display:flex;justify-content:space-between;margin-bottom:4px;font-size:.8rem}
+.stat .label{color:#94a3b8}.stat .val{color:#f8fafc;font-variant-numeric:tabular-nums}
+.section{margin-bottom:32px}
+.section h2{font-size:1.1rem;margin-bottom:12px;color:#f8fafc}
+table{width:100%;border-collapse:collapse;font-size:.8rem}
+th{text-align:left;color:#94a3b8;padding:8px;border-bottom:1px solid #334155}
+td{padding:8px;border-bottom:1px solid #1e293b}
+.mono{font-family:ui-monospace,monospace}
+</style></head><body>
+<h1>a2a-mcp-server</h1>
+<p class="sub">Uptime: ${Math.floor(process.uptime())}s &middot; Workers: ${Object.keys(health).length} &middot; Profile: ${CONFIG.profile ?? "full"}</p>
+<div class="section"><h2>Workers</h2><div class="grid">
+${Object.entries(health).map(([name, h]: [string, any]) => `
+<div class="card">
+  <div class="worker"><span class="dot ${h.healthy ? "ok" : h.failCount > 0 ? "fail" : "warn"}"></span><strong>${name}</strong></div>
+  <div class="stat"><span class="label">Status</span><span class="val">${h.healthy ? "healthy" : "unhealthy"}</span></div>
+  <div class="stat"><span class="label">Fail count</span><span class="val">${h.failCount ?? 0}</span></div>
+  ${h.uptime ? `<div class="stat"><span class="label">Uptime</span><span class="val">${Math.floor(h.uptime)}s</span></div>` : ""}
+</div>`).join("")}
+</div></div>
+<div class="section"><h2>Skill Metrics</h2>
+<table><thead><tr><th>Skill</th><th>Calls</th><th>Errors</th><th>p50</th><th>p95</th><th>p99</th></tr></thead><tbody>
+${Object.entries((metrics as any).skills ?? {}).map(([id, m]: [string, any]) => `
+<tr><td class="mono">${id}</td><td>${m.calls}</td><td>${m.errors}</td><td>${m.p50?.toFixed(0) ?? "-"}ms</td><td>${m.p95?.toFixed(0) ?? "-"}ms</td><td>${m.p99?.toFixed(0) ?? "-"}ms</td></tr>`).join("")}
+</tbody></table></div>
+<div class="grid">
+<div class="card"><h3>Circuit Breakers</h3>
+${Object.entries(breakers).map(([name, b]: [string, any]) => `
+<div class="stat"><span class="label">${name}</span><span class="val">${b.state}</span></div>`).join("")}
+</div>
+<div class="card"><h3>Cache</h3>
+<div class="stat"><span class="label">Entries</span><span class="val">${(cacheStats as any).size ?? 0}</span></div>
+<div class="stat"><span class="label">Hits</span><span class="val">${(cacheStats as any).hits ?? 0}</span></div>
+<div class="stat"><span class="label">Misses</span><span class="val">${(cacheStats as any).misses ?? 0}</span></div>
+</div>
+<div class="card"><h3>Traces</h3>
+<div class="stat"><span class="label">Total</span><span class="val">${(tracingStats as any).totalTraces ?? 0}</span></div>
+<div class="stat"><span class="label">Active</span><span class="val">${(tracingStats as any).activeTraces ?? 0}</span></div>
+</div>
+</div>
+<script>setTimeout(()=>location.reload(),10000)</script>
+</body></html>`;
+  });
+
   app.get("/healthz", async () => {
     const health: Record<string, unknown> = {};
     for (const w of WORKERS) {
       health[w.name] = workerHealth.get(w.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
     }
+    for (const rw of REMOTE_WORKERS) {
+      const h = workerHealth.get(rw.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
+      health[`remote:${rw.name}`] = { ...h, url: rw.url };
+    }
     return { status: "ok", agent: "orchestrator", uptime: process.uptime(), workers: health };
   });
 
-  await app.listen({ port: 8080, host: "0.0.0.0" });
+  const httpPort = CONFIG.server.port;
+  await app.listen({ port: httpPort, host: "0.0.0.0" });
   const authStatus = A2A_API_KEY ? `auth: Bearer required for remote` : `auth: none (set A2A_API_KEY to enable)`;
-  process.stderr.write(`[orchestrator] A2A HTTP server on http://localhost:8080 — ${authStatus}\n`);
+  process.stderr.write(`[orchestrator] A2A HTTP server on http://localhost:${httpPort} — ${authStatus}\n`);
 }
 
 // ── Start ───────────────────────────────────────────────────────
@@ -1783,9 +2358,16 @@ async function main() {
     process.stderr.write(`  - ${card.name}: ${card.skills.map(s => s.id).join(", ")}\n`);
   }
 
-  // Register workers for metrics tracking
+  // Register workers for metrics tracking + capability negotiation
   for (const card of workerCards) {
     registerWorkerMetric(card.name, card.url);
+    for (const skill of card.skills) {
+      registerCapability(skill.id, card.name, {
+        agentUrl: card.url,
+        version: (card as any).version ?? "1.0.0",
+        features: (skill as any).features ?? [],
+      });
+    }
   }
 
   // Clean up old sandbox vars and populate adapter list
@@ -1805,7 +2387,7 @@ async function main() {
 
   // Start periodic health checks (every 30s)
   pollWorkerHealth().catch(() => {});
-  setInterval(() => pollWorkerHealth().catch(() => {}), 30_000);
+  setInterval(() => pollWorkerHealth().catch(() => {}), CONFIG.server.healthPollInterval);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

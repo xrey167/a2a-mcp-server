@@ -10,6 +10,7 @@ This project uses **Bun** exclusively — no Node.js, no build step. TypeScript 
 bun src/server.ts          # start full stack (orchestrator + all workers)
 bun src/workers/shell.ts   # start a single worker in isolation
 bun build src/server.ts --target bun  # type-check via bundler (no tsc installed)
+bun src/cli.ts create-worker my-tool  # scaffold a custom worker
 ```
 
 ## MCP Registration
@@ -17,7 +18,7 @@ bun build src/server.ts --target bun  # type-check via bundler (no tsc installed
 The server is registered with Claude Code at user scope:
 
 ```bash
-claude mcp add --scope user a2a-mcp-bridge -- bun /Users/xrey/Developer/a2a-mcp-server/src/server.ts
+claude mcp add --scope user a2a-mcp-bridge -- bun $(pwd)/src/server.ts
 claude mcp list   # verify connection
 ```
 
@@ -28,7 +29,11 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 
 ## Architecture
 
-**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns all 8 worker processes via `Bun.spawn`, then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker).
+**Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns local worker processes via `Bun.spawn` (filtered by config `workers.enabled` and `profile`), then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker). Also discovers `remoteWorkers` configured in `~/.a2a-mcp/config.json` (no local process spawned).
+
+**Profiles:** `full` (all 8 workers), `lite` (shell+web+ai), `data` (shell+web+ai+data). Set via `{ "profile": "lite" }` in config or `bun src/cli.ts init --lite`.
+
+**Remote workers:** Any A2A agent running elsewhere can be added via `remoteWorkers` config. The orchestrator discovers it, health-polls it, and routes skills to it. The URL is whitelisted in SSRF validation automatically.
 
 **Worker agents** (standalone Fastify HTTP servers, each a separate process):
 | File | Port | Skills |
@@ -59,6 +64,47 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 - HMAC-SHA256 signature verification, payload field mapping, async task creation
 - Endpoints: `POST /webhooks/:id` on the A2A HTTP server
 
+**Agent Event Bus:**
+- `src/event-bus.ts` — Real-time pub/sub between agents with topic-based routing
+- Topic patterns with wildcards: `*` (one segment), `#` (multi-segment) — e.g. `agent.*.completed`, `workflow.#`
+- Event history with configurable retention, replay from timestamp, dead letter queue for failed deliveries
+- MCP tools: `event_publish`, `event_subscribe`, `event_replay`; resource: `a2a://event-bus`
+- Events auto-published on agent completion/failure (integrated into delegate flow)
+
+**Skill Composition (Pipeline Engine):**
+- `src/skill-composer.ts` — Declarative skill chaining with pipe() semantics
+- Each step's output feeds the next; template refs: `{{prev.result}}`, `{{input.*}}`, `{{steps.alias.result}}`
+- Error strategies per step: abort (default), skip, or fallback value
+- Conditional execution with `when` expressions
+- MCP tools: `compose_pipeline`, `execute_pipeline`, `list_pipelines`; resource: `a2a://pipelines`
+
+**Agent Collaboration:**
+- `src/agent-collaboration.ts` — Multi-agent consensus and negotiation protocols
+- Strategies: `fan_out` (parallel query + merge), `consensus` (AI-scored voting), `debate` (iterative critique/refinement), `map_reduce` (distribute + aggregate)
+- Configurable merge strategies: concat, best_score, majority_vote, custom (with LLM merge prompt)
+- MCP tool: `collaborate` (returns taskId for async polling)
+
+**Distributed Tracing:**
+- `src/tracing.ts` — OpenTelemetry-style trace/span observability across agent calls
+- Trace → Span hierarchy with automatic context propagation
+- Span tags, events, status tracking, waterfall visualization data
+- Integrated into delegate flow: every delegation creates a trace with child spans per worker call
+- MCP tools: `list_traces`, `get_trace` (waterfall view), `search_traces`; resource: `a2a://traces`
+
+**Smart Skill Cache:**
+- `src/skill-cache.ts` — LRU cache with TTL for idempotent skill results
+- Content-addressable keys (deterministic hashing of skillId + args)
+- Per-skill TTL configuration; auto-excludes side-effect skills (run_shell, write_file, etc.)
+- Integrated into delegate flow: cache check before worker call, auto-cache on success
+- MCP tools: `cache_stats`, `cache_invalidate`, `cache_configure`; resource: `a2a://cache`
+
+**Capability Negotiation:**
+- `src/capability-negotiation.ts` — Version-aware skill routing with SemVer matching
+- Multi-dimensional scoring: version, required/preferred features, health, load, priority
+- Auto-populated from worker discovery; health synced from health polling
+- Active call tracking for load-aware routing
+- MCP tools: `negotiate_capability`, `list_capabilities`, `capability_stats`; resource: `a2a://capabilities`
+
 **Shared modules:**
 - `src/a2a.ts` — `sendTask(url, params)` and `discoverAgent(url)` helpers
 - `src/memory.ts` — dual-write: SQLite (`~/.a2a-memory.db`) + Obsidian markdown (`~/Documents/Obsidian/a2a-knowledge/_memory/`)
@@ -70,6 +116,13 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 - `src/metrics.ts` — execution metrics collection
 - `src/workflow-engine.ts` — DAG-based multi-agent workflow orchestration
 - `src/webhooks.ts` — webhook registration, verification, and payload transformation
+- `src/event-bus.ts` — agent event bus (pub/sub with topic wildcards)
+- `src/skill-composer.ts` — declarative skill pipeline composition
+- `src/agent-collaboration.ts` — multi-agent collaboration protocols
+- `src/tracing.ts` — distributed tracing with waterfall visualization
+- `src/skill-cache.ts` — LRU skill result cache with per-skill TTL
+- `src/capability-negotiation.ts` — version-aware capability negotiation for skill routing
+- `src/worker-loader.ts` — discovers and scaffolds user-space workers from `~/.a2a-mcp/workers/`
 
 **Routing in `delegate` skill (server.ts):**
 1. `agentUrl` provided → send directly (through circuit breaker)
@@ -90,7 +143,6 @@ All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 ## Adding a New Worker
 
 1. Create `src/workers/<name>.ts` — Fastify on a new port, export an `AGENT_CARD` and implement skills
-2. Add an entry to `WORKERS` array in `src/server.ts`
-3. Add the port to `ALLOWED_PORTS` in `src/server.ts`
-4. Optionally create a persona file at `src/personas/<name>.md`
-5. All worker output must go to stderr only
+2. Add an entry to `ALL_WORKERS` array in `src/server.ts` (ALLOWED_PORTS is auto-derived)
+3. Optionally create a persona file at `src/personas/<name>.md`
+4. All worker output must go to stderr only
