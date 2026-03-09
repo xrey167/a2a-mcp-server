@@ -1,10 +1,25 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { auditLog, auditQuery, auditStats, auditPrune, closeAuditDb } from "../audit.js";
+import { join } from "path";
+import { tmpdir } from "os";
+import { unlinkSync } from "fs";
+
+// Use an isolated temp DB so tests never touch the user's real ~/.a2a-mcp/audit.db
+const testDbPath = join(tmpdir(), `a2a-audit-test-${Date.now()}.db`);
+process.env.A2A_AUDIT_DB = testDbPath;
+
+// Dynamic import AFTER env is set so module picks up the test DB path
+const { auditLog, auditQuery, auditStats, auditPrune, closeAuditDb } =
+  await import("../audit.js");
+
+// Clean up temp DB after all tests
+afterAll(() => {
+  closeAuditDb();
+  try { unlinkSync(testDbPath); } catch {}
+  try { unlinkSync(testDbPath + "-wal"); } catch {}
+  try { unlinkSync(testDbPath + "-shm"); } catch {}
+});
 
 describe("audit", () => {
-  afterAll(() => {
-    closeAuditDb();
-  });
 
   test("auditLog writes and auditQuery reads entries", () => {
     auditLog({
