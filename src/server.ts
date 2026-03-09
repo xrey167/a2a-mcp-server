@@ -33,6 +33,12 @@ import { getBreaker, getAllBreakerStats, resetAllBreakers, CircuitOpenError } fr
 import { startSkillTimer, recordSkillCall, registerWorkerMetric, getMetricsSnapshot } from "./metrics.js";
 import { executeWorkflow, validateWorkflow, type WorkflowDefinition } from "./workflow-engine.js";
 import { registerWebhook, unregisterWebhook, getWebhook, listWebhooks, toggleWebhook, verifySignature, transformPayload, logWebhookCall, getWebhookLog } from "./webhooks.js";
+import { publish, subscribe, unsubscribe, replay, listSubscriptions, getDeadLetters, getEventBusStats, type AgentEvent } from "./event-bus.js";
+import { compose, getPipeline, listPipelines as listComposerPipelines, removePipeline, executePipeline, type Pipeline } from "./skill-composer.js";
+import { collaborate, type CollaborationRequest } from "./agent-collaboration.js";
+import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracingStats } from "./tracing.js";
+import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats, configureCacheSkill } from "./skill-cache.js";
+import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
@@ -221,17 +227,42 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
 
   let result: string;
 
-  // Helper: send task through circuit breaker with metrics
+  // Start a trace for this delegate call
+  const trace = startTrace("delegate", { skillId, agentUrl, sessionId });
+
+  // Helper: send task through circuit breaker with metrics + tracing
   async function sendWithResilience(url: string, params: Parameters<typeof sendTask>[1], opts?: Parameters<typeof sendTask>[2]): Promise<string> {
     const workerName = workerCards.find(c => c.url === url)?.name ?? url;
+    const span = trace.startSpan(`send:${workerName}`);
+    span.setTag("worker", workerName).setTag("skillId", params.skillId ?? "unknown");
     const breaker = getBreaker(workerName);
     const endTimer = startSkillTimer(params.skillId ?? "unknown", workerName);
-    try {
-      const res = await breaker.call(() => sendTask(url, params, opts));
+
+    // Check cache first for idempotent skills
+    const cacheArgs = params.args ?? {};
+    const cached = getFromCache(params.skillId ?? "", cacheArgs as Record<string, unknown>);
+    if (cached !== undefined) {
+      span.setTag("cache", "hit").end();
       endTimer();
+      return cached;
+    }
+
+    try {
+      incrementActive(params.skillId ?? "unknown", workerName);
+      const res = await breaker.call(() => sendTask(url, params, opts));
+      decrementActive(params.skillId ?? "unknown", workerName);
+      endTimer();
+      span.end();
+      // Cache the result
+      putInCache(params.skillId ?? "", cacheArgs as Record<string, unknown>, res);
+      // Publish event
+      publish(`agent.${workerName}.completed`, { skillId: params.skillId, resultLength: res.length }, { source: workerName, correlationId: trace.traceId }).catch(e => process.stderr.write(`[event-bus] publish error: ${e}\n`));
       return res;
     } catch (err) {
+      decrementActive(params.skillId ?? "unknown", workerName);
       endTimer(err instanceof Error ? err.message : String(err));
+      span.setTag("error", String(err)).end("error");
+      publish(`agent.${workerName}.failed`, { skillId: params.skillId, error: String(err) }, { source: workerName, correlationId: trace.traceId }).catch(e => process.stderr.write(`[event-bus] publish error: ${e}\n`));
       throw err;
     }
   }
@@ -305,6 +336,9 @@ ${sanitizedMessage}`;
       result = "No AI worker available for auto-routing";
     }
   }
+
+  // End trace
+  trace.end();
 
   // Persist session history
   if (sessionId) {
@@ -723,6 +757,191 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     case "reset_circuit_breakers":
       resetAllBreakers();
       return "All circuit breakers reset to closed state";
+
+    // ── Event Bus ─────────────────────────────────────────────
+    case "event_publish": {
+      const topic = args.topic as string;
+      if (!topic) throw new Error("event_publish requires topic");
+      // Restrict user-published topics to "user." prefix to prevent spoofing internal events
+      if (!topic.startsWith("user.")) {
+        throw new Error(`event_publish: user topics must start with "user." prefix, got: "${topic}"`);
+      }
+      const event = await publish(topic, args.data ?? {}, {
+        source: (args.source as string) ?? "user",
+        correlationId: args.correlationId as string | undefined,
+        meta: args.meta as Record<string, unknown> | undefined,
+      });
+      return JSON.stringify({ eventId: event.id, topic: event.topic, timestamp: event.timestamp });
+    }
+
+    case "event_subscribe": {
+      const pattern = args.pattern as string;
+      if (!pattern) throw new Error("event_subscribe requires pattern");
+      // MCP subscriptions store events for later retrieval — filter out sensitive metadata
+      const events: AgentEvent[] = [];
+      const subId = subscribe(pattern, (event) => {
+        // Strip internal metadata before exposing to MCP users
+        const { meta: _meta, ...safeEvent } = event;
+        events.push(safeEvent as AgentEvent);
+      }, {
+        name: (args.name as string) ?? "mcp-subscriber",
+        filter: args.filter as Record<string, unknown> | undefined,
+      });
+      return JSON.stringify({ subscriptionId: subId, pattern });
+    }
+
+    case "event_unsubscribe": {
+      const subId = args.subscriptionId as string;
+      if (!subId) throw new Error("event_unsubscribe requires subscriptionId");
+      return unsubscribe(subId) ? `Unsubscribed: ${subId}` : `Subscription not found: ${subId}`;
+    }
+
+    case "event_replay": {
+      const pattern = args.pattern as string;
+      if (!pattern) throw new Error("event_replay requires pattern");
+      const events = replay(pattern, args.since as string | undefined, (args.limit as number) ?? 50);
+      return JSON.stringify(events, null, 2);
+    }
+
+    case "event_bus_stats":
+      return JSON.stringify({ ...getEventBusStats(), subscriptions_list: listSubscriptions() }, null, 2);
+
+    // ── Skill Composition ────────────────────────────────────────
+    case "compose_pipeline": {
+      const name = args.name as string;
+      if (!name) throw new Error("compose_pipeline requires name");
+      const steps = args.steps as any[];
+      if (!steps || !Array.isArray(steps)) throw new Error("compose_pipeline requires steps array");
+      const pipeline = compose(name, steps, args.description as string | undefined);
+      return JSON.stringify({ id: pipeline.id, name: pipeline.name, steps: pipeline.steps.length }, null, 2);
+    }
+
+    case "execute_pipeline": {
+      const pipelineRef = (args.pipeline as string) ?? (args.name as string);
+      if (!pipelineRef) throw new Error("execute_pipeline requires pipeline (ID or name)");
+      const input = (args.input as Record<string, unknown>) ?? {};
+
+      const task = createTask({ skillId: "execute_pipeline" });
+      markWorking(task.id);
+
+      (async () => {
+        try {
+          const result = await executePipeline(pipelineRef, input, (sid, a, t) => dispatchSkill(sid, a, t));
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          try { markFailed(task.id, { code: "PIPELINE_ERROR", message: String(err) }); } catch {}
+        }
+      })();
+
+      return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
+    }
+
+    case "list_pipelines":
+      return JSON.stringify(listComposerPipelines(), null, 2);
+
+    // ── Agent Collaboration ──────────────────────────────────────
+    case "collaborate": {
+      const strategy = args.strategy as string;
+      if (!strategy) throw new Error("collaborate requires strategy");
+      const query = (args.query as string) ?? "";
+      const agents = args.agents as string[];
+      if (!agents || !Array.isArray(agents)) throw new Error("collaborate requires agents array");
+
+      const validStrategies: CollaborationRequest["strategy"][] = ["fan_out", "consensus", "debate", "map_reduce"];
+      if (!validStrategies.includes(strategy as CollaborationRequest["strategy"])) {
+        throw new Error(`Invalid strategy: ${strategy}. Must be one of: ${validStrategies.join(", ")}`);
+      }
+      const validMergeStrategies = ["concat", "best_score", "majority_vote", "custom"];
+      if (args.mergeStrategy && !validMergeStrategies.includes(args.mergeStrategy as string)) {
+        throw new Error(`Invalid mergeStrategy: ${args.mergeStrategy}. Must be one of: ${validMergeStrategies.join(", ")}`);
+      }
+
+      const task = createTask({ skillId: "collaborate" });
+      markWorking(task.id);
+
+      (async () => {
+        try {
+          const result = await collaborate(
+            {
+              strategy: strategy as CollaborationRequest["strategy"],
+              query,
+              agents,
+              mergeStrategy: args.mergeStrategy as CollaborationRequest["mergeStrategy"],
+              maxRounds: args.maxRounds as number | undefined,
+              items: args.items as unknown[] | undefined,
+              timeoutMs: args.timeoutMs as number | undefined,
+              mergePrompt: args.mergePrompt as string | undefined,
+              judgeAgent: args.judgeAgent as string | undefined,
+            },
+            (sid, a, t) => dispatchSkill(sid, a, t),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          try { markFailed(task.id, { code: "COLLABORATION_ERROR", message: String(err) }); } catch {}
+        }
+      })();
+
+      return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
+    }
+
+    // ── Tracing ──────────────────────────────────────────────────
+    case "list_traces":
+      return JSON.stringify(listTraces((args.limit as number) ?? 50), null, 2);
+
+    case "get_trace": {
+      const traceId = args.traceId as string;
+      if (!traceId) throw new Error("get_trace requires traceId");
+      const waterfall = getWaterfall(traceId);
+      if (waterfall.length === 0) return JSON.stringify({ error: "Trace not found" });
+      return JSON.stringify({ traceId, waterfall }, null, 2);
+    }
+
+    case "search_traces":
+      return JSON.stringify(searchTraces((args.query as string) ?? "", (args.limit as number) ?? 20), null, 2);
+
+    // ── Skill Cache ──────────────────────────────────────────────
+    case "cache_stats":
+      return JSON.stringify(getCacheStats(), null, 2);
+
+    case "cache_invalidate": {
+      const skillId = args.skillId as string | undefined;
+      if (skillId) {
+        const count = invalidateSkill(skillId);
+        return `Invalidated ${count} cache entries for skill: ${skillId}`;
+      }
+      invalidateAll();
+      return "All cache entries invalidated";
+    }
+
+    case "cache_configure": {
+      const skillId = args.skillId as string;
+      if (!skillId) throw new Error("cache_configure requires skillId");
+      const ttl = args.ttlMs as number | undefined;
+      const noCache = args.noCache as boolean | undefined;
+      configureCacheSkill(skillId, noCache ? "no-cache" : (ttl ?? 300_000));
+      return `Cache configured for ${skillId}: ${noCache ? "no-cache" : `TTL ${ttl ?? 300_000}ms`}`;
+    }
+
+    // ── Capability Negotiation ───────────────────────────────────
+    case "negotiate_capability": {
+      const skillId = args.skillId as string;
+      if (!skillId) throw new Error("negotiate_capability requires skillId");
+      const result = negotiate(skillId, {
+        minVersion: args.minVersion as string | undefined,
+        maxVersion: args.maxVersion as string | undefined,
+        requiredFeatures: args.requiredFeatures as string[] | undefined,
+        preferredFeatures: args.preferredFeatures as string[] | undefined,
+        healthAware: args.healthAware as boolean | undefined,
+        loadAware: args.loadAware as boolean | undefined,
+      });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "list_capabilities":
+      return JSON.stringify(listCapabilities(args.skillId as string | undefined), null, 2);
+
+    case "capability_stats":
+      return JSON.stringify(getCapabilityStats(), null, 2);
 
     // ── Webhooks ────────────────────────────────────────────────
     case "register_webhook": {
@@ -1250,6 +1469,148 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
       description: "List all registered webhooks and their endpoints.",
       inputSchema: { type: "object" as const, properties: {} },
     },
+    // ── Event Bus ─────────────────────────────────────────────────
+    {
+      name: "event_publish",
+      description: "Publish an event to the agent event bus. Subscribers matching the topic pattern will be notified.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          topic: { type: "string", description: "Dot-separated topic (e.g. 'agent.shell.completed', 'workflow.step.done')" },
+          data: { type: "object", description: "Event payload" },
+          source: { type: "string", description: "Source agent name (default: 'user')" },
+          correlationId: { type: "string", description: "Correlation ID for tracing event chains" },
+        },
+        required: ["topic"],
+      },
+    },
+    {
+      name: "event_subscribe",
+      description: "Subscribe to events matching a topic pattern. Supports * (one segment) and # (multi-segment) wildcards.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          pattern: { type: "string", description: "Topic pattern (e.g. 'agent.*', 'workflow.#')" },
+          name: { type: "string", description: "Subscriber name for debugging" },
+          filter: { type: "object", description: "Field-level filter: { 'data.status': 'completed' }" },
+        },
+        required: ["pattern"],
+      },
+    },
+    {
+      name: "event_replay",
+      description: "Replay events matching a topic pattern from history. Useful for catching up after reconnection.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          pattern: { type: "string", description: "Topic pattern to replay" },
+          since: { type: "string", description: "ISO timestamp to replay from" },
+          limit: { type: "number", description: "Max events to return (default: 50)" },
+        },
+        required: ["pattern"],
+      },
+    },
+    // ── Skill Composition ─────────────────────────────────────────
+    {
+      name: "compose_pipeline",
+      description: "Create a reusable skill pipeline. Each step's output feeds the next. Supports {{prev.result}}, {{input.*}}, and {{steps.alias.result}} templates.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          name: { type: "string", description: "Pipeline name" },
+          description: { type: "string", description: "What this pipeline does" },
+          steps: {
+            type: "array",
+            description: "Pipeline steps: [{ skillId, args?, transform?, as?, when?, onError? }]",
+            items: { type: "object" },
+          },
+        },
+        required: ["name", "steps"],
+      },
+    },
+    {
+      name: "execute_pipeline",
+      description: "Execute a composed pipeline. Returns taskId — poll with delegate(taskId).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          pipeline: { type: "string", description: "Pipeline ID or name" },
+          input: { type: "object", description: "Input data available as {{input.*}} in steps" },
+        },
+        required: ["pipeline"],
+      },
+    },
+    // ── Agent Collaboration ────────────────────────────────────────
+    {
+      name: "collaborate",
+      description: "Multi-agent collaboration: fan_out (parallel query), consensus (score + pick best), debate (refine through critique), map_reduce (distribute + aggregate). Returns taskId.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          strategy: { type: "string", description: "Collaboration strategy", enum: ["fan_out", "consensus", "debate", "map_reduce"] },
+          query: { type: "string", description: "The question or task for agents to collaborate on" },
+          agents: { type: "array", items: { type: "string" }, description: "Agent names or skill IDs to involve" },
+          mergeStrategy: { type: "string", description: "How to merge: concat, best_score, majority_vote, custom", enum: ["concat", "best_score", "majority_vote", "custom"] },
+          maxRounds: { type: "number", description: "For debate: max refinement rounds (default: 2)" },
+          items: { type: "array", description: "For map_reduce: items to distribute" },
+          mergePrompt: { type: "string", description: "Custom merge prompt (for custom merge strategy)" },
+        },
+        required: ["strategy", "query", "agents"],
+      },
+    },
+    // ── Tracing ────────────────────────────────────────────────────
+    {
+      name: "list_traces",
+      description: "List recent distributed traces across agent calls. Shows timing, status, and span counts.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          limit: { type: "number", description: "Max traces to return (default: 50)" },
+        },
+      },
+    },
+    {
+      name: "get_trace",
+      description: "Get the waterfall visualization of a trace — shows the full call chain with timing.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          traceId: { type: "string", description: "Trace ID" },
+        },
+        required: ["traceId"],
+      },
+    },
+    // ── Skill Cache ────────────────────────────────────────────────
+    {
+      name: "cache_stats",
+      description: "Get skill cache statistics: hit rate, entries, size, top cached skills.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "cache_invalidate",
+      description: "Invalidate cached results. Specify skillId to target a specific skill, or omit to clear all.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          skillId: { type: "string", description: "Skill ID to invalidate (omit for all)" },
+        },
+      },
+    },
+    // ── Capability Negotiation ──────────────────────────────────────
+    {
+      name: "negotiate_capability",
+      description: "Find the best agent for a skill based on version, features, health, and load. Returns ranked candidates.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          skillId: { type: "string", description: "Skill to negotiate" },
+          minVersion: { type: "string", description: "Minimum SemVer version" },
+          requiredFeatures: { type: "array", items: { type: "string" }, description: "Features the agent must support" },
+          preferredFeatures: { type: "array", items: { type: "string" }, description: "Preferred features (bonus scoring)" },
+        },
+        required: ["skillId"],
+      },
+    },
   ];
 
   return tools;
@@ -1269,6 +1630,11 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
     { uri: "a2a://metrics", name: "Metrics", description: "Skill execution metrics: call counts, latencies, error rates", mimeType: "application/json" },
     { uri: "a2a://circuit-breakers", name: "Circuit Breakers", description: "Circuit breaker states for all workers", mimeType: "application/json" },
     { uri: "a2a://webhooks", name: "Webhooks", description: "Registered webhook endpoints", mimeType: "application/json" },
+    { uri: "a2a://event-bus", name: "Event Bus", description: "Event bus stats, subscriptions, and dead letters", mimeType: "application/json" },
+    { uri: "a2a://traces", name: "Traces", description: "Recent distributed traces across agent calls", mimeType: "application/json" },
+    { uri: "a2a://cache", name: "Skill Cache", description: "Skill result cache statistics", mimeType: "application/json" },
+    { uri: "a2a://capabilities", name: "Capabilities", description: "Agent capability registry and negotiation stats", mimeType: "application/json" },
+    { uri: "a2a://pipelines", name: "Pipelines", description: "Registered skill composition pipelines", mimeType: "application/json" },
   ];
   for (const card of workerCards) {
     resources.push({
@@ -1310,6 +1676,26 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
   if (uri === "a2a://webhooks") {
     return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listWebhooks().map(w => ({ ...w, secret: w.secret ? "***" : undefined })), null, 2) }] };
+  }
+
+  if (uri === "a2a://event-bus") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ stats: getEventBusStats(), subscriptions: listSubscriptions(), deadLetters: getDeadLetters(20) }, null, 2) }] };
+  }
+
+  if (uri === "a2a://traces") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ stats: getTracingStats(), recent: listTraces(20) }, null, 2) }] };
+  }
+
+  if (uri === "a2a://cache") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(getCacheStats(), null, 2) }] };
+  }
+
+  if (uri === "a2a://capabilities") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ stats: getCapabilityStats(), capabilities: listCapabilities() }, null, 2) }] };
+  }
+
+  if (uri === "a2a://pipelines") {
+    return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listComposerPipelines(), null, 2) }] };
   }
 
   const workerMatch = uri.match(/^a2a:\/\/workers\/([^/]+)\/card$/);
@@ -1494,6 +1880,7 @@ async function pollWorkerHealth() {
       const body = await res.json() as { uptime?: number };
       const prev = workerHealth.get(w.name);
       workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now(), uptime: body.uptime });
+      updateAgentHealth(w.name, true);
       if (prev && !prev.healthy) {
         workerFailures.delete(w.name); // reset backoff counter on recovery
         process.stderr.write(`[orchestrator] ${w.name} recovered\n`);
@@ -1501,7 +1888,9 @@ async function pollWorkerHealth() {
     } catch {
       const prev = workerHealth.get(w.name);
       const failCount = (prev?.failCount ?? 0) + 1;
-      workerHealth.set(w.name, { healthy: failCount < 3, failCount, lastCheck: Date.now() });
+      const healthy = failCount < 3;
+      workerHealth.set(w.name, { healthy, failCount, lastCheck: Date.now() });
+      updateAgentHealth(w.name, healthy);
       if (failCount === 3) {
         process.stderr.write(`[orchestrator] ${w.name} marked unhealthy after ${failCount} failures\n`);
       }
@@ -1783,9 +2172,16 @@ async function main() {
     process.stderr.write(`  - ${card.name}: ${card.skills.map(s => s.id).join(", ")}\n`);
   }
 
-  // Register workers for metrics tracking
+  // Register workers for metrics tracking + capability negotiation
   for (const card of workerCards) {
     registerWorkerMetric(card.name, card.url);
+    for (const skill of card.skills) {
+      registerCapability(skill.id, card.name, {
+        agentUrl: card.url,
+        version: (card as any).version ?? "1.0.0",
+        features: (skill as any).features ?? [],
+      });
+    }
   }
 
   // Clean up old sandbox vars and populate adapter list
