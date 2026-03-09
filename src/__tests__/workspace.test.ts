@@ -100,6 +100,18 @@ describe("workspace", () => {
     expect(updated!.allowedSkills).toEqual(["delegate"]);
   });
 
+  test("updateWorkspace ignores undefined fields, preserves existing values", () => {
+    const ws = createWorkspace("Preserve Test", "owner1", "Owner", { description: "original" });
+    testWsIds.push(ws.id);
+    // Pass undefined for name — should NOT overwrite the existing name
+    const updated = updateWorkspace(ws.id, {
+      name: undefined,
+      description: "updated",
+    });
+    expect(updated!.name).toBe("Preserve Test");
+    expect(updated!.description).toBe("updated");
+  });
+
   test("getKnowledgeDir creates knowledge directory", () => {
     const ws = createWorkspace("Knowledge Test", "owner1", "Owner");
     testWsIds.push(ws.id);
