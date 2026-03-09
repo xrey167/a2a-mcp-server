@@ -41,7 +41,7 @@ import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracin
 import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats, configureCacheSkill } from "./skill-cache.js";
 import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
 import { auditLog, auditQuery, auditStats, closeAuditDb } from "./audit.js";
-import { validateApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed, type ApiKeyEntry } from "./auth.js";
+import { validateApiKey, lookupApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed, type ApiKeyEntry } from "./auth.js";
 import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace } from "./workspace.js";
 import { isSkillLicensed, getSkillTier, getSkillsByTier, getLicenseInfo } from "./skill-tier.js";
 import { registerHealthRoutes, markReady, updateWorkerHealth as updateCloudWorkerHealth, installShutdownHandlers, onShutdown } from "./cloud.js";
@@ -2157,8 +2157,10 @@ function checkAuth(request: { ip: string; headers: Record<string, string | strin
   if (token === `Bearer ${A2A_API_KEY}`) return true;
   // Also accept valid a2a_k_... RBAC keys so callers registered via createApiKey()
   // can authenticate without a separately shared A2A_API_KEY.
+  // Use lookupApiKey (no lastUsedAt side-effect) — the subsequent handler call to
+  // validateApiKey() will record the usage exactly once per request.
   const bearerValue = token.replace(/^Bearer\s+/i, "");
-  if (bearerValue.startsWith("a2a_k_") && validateApiKey(bearerValue) !== null) return true;
+  if (bearerValue.startsWith("a2a_k_") && lookupApiKey(bearerValue) !== null) return true;
   return false;
 }
 
@@ -2644,13 +2646,13 @@ async function main() {
   await server.connect(transport);
 }
 
-// Cleanup on exit
+// Cleanup on exit — only called from the graceful shutdown path (onShutdown callback)
+// and from the fatal-error handler below. SIGINT/SIGTERM are handled by
+// installShutdownHandlers() (cloud.ts) which runs the onShutdown callbacks above.
 function shutdownWorkers() {
   for (const timer of respawnTimers.values()) clearTimeout(timer);
   for (const proc of workerProcs.values()) proc.kill();
 }
-process.on("SIGINT",  () => { shutdownWorkers(); process.exit(0); });
-process.on("SIGTERM", () => { shutdownWorkers(); process.exit(0); });
 
 main().catch((err) => {
   process.stderr.write(`Fatal error: ${err}\n`);
