@@ -25,6 +25,8 @@ describe("skill-tier", () => {
     expect(isSkillLicensed("register_webhook")).toBe(false);
     expect(isSkillLicensed("list_traces")).toBe(false);
     expect(isSkillLicensed("audit_query")).toBe(false);
+    expect(isSkillLicensed("audit_stats")).toBe(false);
+    expect(isSkillLicensed("workspace_manage")).toBe(false);
   });
 
   test("pro license unlocks pro skills", () => {
@@ -42,6 +44,8 @@ describe("skill-tier", () => {
     expect(isSkillLicensed("workflow_execute")).toBe(true);
     expect(isSkillLicensed("register_webhook")).toBe(true);
     expect(isSkillLicensed("list_traces")).toBe(true);
+    expect(isSkillLicensed("audit_stats")).toBe(true);
+    expect(isSkillLicensed("workspace_manage")).toBe(true);
   });
 
   test("expired license falls back to free", () => {
@@ -58,6 +62,8 @@ describe("skill-tier", () => {
     expect(getSkillTier("delegate")).toBe("free");
     expect(getSkillTier("workflow_execute")).toBe("pro");
     expect(getSkillTier("register_webhook")).toBe("enterprise");
+    expect(getSkillTier("audit_stats")).toBe("enterprise");
+    expect(getSkillTier("workspace_manage")).toBe("enterprise");
     expect(getSkillTier("unknown_skill")).toBe("free"); // default
   });
 

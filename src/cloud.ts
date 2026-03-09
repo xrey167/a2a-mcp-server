@@ -21,6 +21,9 @@ export interface WorkerHealth {
   lastCheck?: number;
 }
 
+/** Public-safe subset of WorkerHealth — omits internal URL. */
+export type PublicWorkerHealth = Omit<WorkerHealth, "url">;
+
 // ── State ────────────────────────────────────────────────────────
 
 let startTime = Date.now();
@@ -77,11 +80,15 @@ export function registerHealthRoutes(app: FastifyInstance, version: string): voi
     reply.send({ status: "ready", timestamp: new Date().toISOString() });
   });
 
-  // Detailed health — returns worker-level status
+  // Detailed health — returns worker-level status (URLs omitted to avoid leaking internal topology)
   app.get("/health", async (_req, reply) => {
     const health = getHealth(version);
     const code = health.status === "unhealthy" ? 503 : 200;
-    reply.status(code).send(health);
+    const publicHealth = {
+      ...health,
+      workers: health.workers.map(({ name, healthy, lastCheck }): PublicWorkerHealth => ({ name, healthy, lastCheck })),
+    };
+    reply.status(code).send(publicHealth);
   });
 }
 
