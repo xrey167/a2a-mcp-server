@@ -103,12 +103,52 @@ Every agent shares `remember` / `recall` / `memory_search` — backed by **SQLit
 git clone https://github.com/xrey167/a2a-mcp-server
 cd a2a-mcp-server
 bun install
+
+# Create default config (choose a profile)
+bun src/cli.ts init             # all 8 workers (full)
+bun src/cli.ts init --lite      # shell + web + ai only (fastest)
+bun src/cli.ts init --data      # shell + web + ai + data
+
+# See available workers
+bun src/cli.ts workers
 ```
+
+### Configure workers (optional)
+
+Use a **profile** for quick setup, or fine-tune individual workers:
+
+```json
+// ~/.a2a-mcp/config.json
+
+// Option 1: Use a preset profile
+{ "profile": "lite" }
+
+// Option 2: Disable specific workers
+{
+  "workers": [
+    { "name": "design", "port": 8086, "enabled": false },
+    { "name": "code", "port": 8084, "enabled": false }
+  ]
+}
+
+// Option 3: Add remote A2A agents
+{
+  "remoteWorkers": [
+    { "name": "my-agent", "url": "https://agent.example.com", "apiKey": "secret" }
+  ]
+}
+```
+
+| Profile | Workers | Best for |
+|---------|---------|----------|
+| `full` | All 8 | Full-stack development |
+| `lite` | shell, web, ai | Quick tasks, low resource usage |
+| `data` | shell, web, ai, data | Data processing + analysis |
 
 ### Register with Claude Code (MCP)
 
 ```bash
-claude mcp add --scope user a2a-mcp-bridge -- bun /path/to/a2a-mcp-server/src/server.ts
+claude mcp add --scope user a2a-mcp-bridge -- bun $(pwd)/src/server.ts
 ```
 
 The server starts automatically when Claude Code launches. For standalone:
@@ -132,6 +172,23 @@ Add to your Zed `settings.json`:
   }
 }
 ```
+
+### Create custom workers
+
+Add your own workers without forking the project:
+
+```bash
+# Scaffold a new worker
+bun src/cli.ts create-worker my-tool --port 8091
+
+# Edit the generated code
+# ~/.a2a-mcp/workers/my-tool/index.ts
+
+# Restart the server — your worker is auto-discovered
+bun src/server.ts
+```
+
+Workers in `~/.a2a-mcp/workers/` are auto-spawned alongside built-in workers. Each worker is a standalone Fastify server that exposes `/.well-known/agent.json` and handles A2A tasks.
 
 -----
 
@@ -825,13 +882,24 @@ Fine-grained control via JSON (see `.env.example` for quick setup):
 
 -----
 
+## Dashboard
+
+While the server is running, open **http://localhost:8080/dashboard** for a live monitoring view showing worker health, skill metrics (latency p50/p95/p99, error rates), circuit breaker states, cache stats, and tracing info. Auto-refreshes every 10 seconds.
+
+-----
+
 ## Docker
 
 ```bash
+# Quick start with Docker Compose
+docker compose up
+
+# Or build and run manually
 docker build -t a2a-mcp-server .
 docker run -p 8080-8088:8080-8088 \
   -e ANTHROPIC_API_KEY=sk-... \
   -e GOOGLE_API_KEY=... \
+  -v a2a-data:/data \
   a2a-mcp-server
 ```
 
@@ -848,9 +916,9 @@ GitHub Actions runs on every push/PR to `main`:
 ### Add a new worker agent
 
 1. Create `src/workers/<n>.ts` — Fastify server with `AGENT_CARD` and skill handlers
-2. Add to `WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
-3. Add port to `ALLOWED_PORTS` in `src/server.ts`
-4. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
+2. Add to `ALL_WORKERS` array in `src/server.ts` (and `src/acp-server.ts` for ACP support)
+3. All output → `process.stderr` (stdout reserved for MCP/ACP JSON-RPC)
+4. Allowed ports are auto-derived from enabled workers — no manual list needed
 
 ### Add a plugin (hot-reloaded)
 
