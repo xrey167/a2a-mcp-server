@@ -118,9 +118,19 @@ export function flushPendingLastUsed(): void {
       }
     }
     if (changed) writeStore(store);
-  } catch (err) {
-    // Best-effort: don't crash on flush errors, but surface them so operators can investigate
-    process.stderr.write(`[auth] flushPendingLastUsed error: ${err}\n`);
+  } catch (err: unknown) {
+    // Best-effort: don't crash on flush errors, but surface them so operators can investigate.
+    const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    process.stderr.write(`[auth] flushPendingLastUsed error: ${msg}\n`);
+    // Re-queue the snapshot so that usage data is not lost and can be flushed later.
+    for (const [keyHash, ts] of snapshot.entries()) {
+      const existing = pendingLastUsed.get(keyHash);
+      if (existing === undefined || ts > existing) {
+        pendingLastUsed.set(keyHash, ts);
+      }
+    }
+    // Schedule another deferred flush attempt.
+    scheduleDeferredFlush();
   }
 }
 

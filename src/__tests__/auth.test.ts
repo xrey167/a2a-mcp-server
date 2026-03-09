@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { createApiKey, validateApiKey, isSkillAllowed, revokeApiKey, listApiKeys, getRolePermissions } from "../auth.js";
-import { existsSync, unlinkSync, mkdirSync } from "fs";
+import { createApiKey, validateApiKey, isSkillAllowed, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed } from "../auth.js";
+import { existsSync, unlinkSync, mkdirSync, readFileSync, chmodSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -10,6 +10,9 @@ describe("auth", () => {
   let originalFile: string | null = null;
 
   beforeEach(() => {
+    // Drain any pending lastUsedAt updates left over from a prior test so
+    // module-level state doesn't leak across tests.
+    flushPendingLastUsed();
     // Back up existing auth file
     if (existsSync(AUTH_FILE)) {
       originalFile = require("fs").readFileSync(AUTH_FILE, "utf-8");
@@ -111,5 +114,51 @@ describe("auth", () => {
     expect(perms.admin).toContain("*");
     expect(perms.viewer).toContain("delegate");
     expect(perms.operator).toContain("sandbox_execute");
+  });
+
+  // ── Deferred-write behavior ──────────────────────────────────────
+
+  test("validateApiKey does not write lastUsedAt to disk immediately", () => {
+    const { key } = createApiKey("deferred-key", "admin");
+    const contentBefore = readFileSync(AUTH_FILE, "utf-8");
+
+    validateApiKey(key);
+
+    // File on disk must be unchanged — the update lives only in memory
+    expect(readFileSync(AUTH_FILE, "utf-8")).toBe(contentBefore);
+  });
+
+  test("flushPendingLastUsed persists lastUsedAt to disk", () => {
+    const { key } = createApiKey("flush-key", "admin");
+    const before = Date.now();
+
+    validateApiKey(key); // buffers into pendingLastUsed
+    flushPendingLastUsed(); // writes to disk
+
+    const stored = JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
+    const entry = stored.keys.find((k: { name: string }) => k.name === "flush-key");
+    expect(entry).not.toBeUndefined();
+    expect(entry.lastUsedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  test("flushPendingLastUsed re-queues entries if write fails", () => {
+    const { key } = createApiKey("requeue-key", "admin");
+    const before = Date.now();
+    validateApiKey(key); // buffers into pendingLastUsed
+
+    // Make the auth file read-only to force a write failure
+    chmodSync(AUTH_FILE, 0o444);
+    try {
+      flushPendingLastUsed(); // should fail to write, then re-queue
+    } finally {
+      chmodSync(AUTH_FILE, 0o600);
+    }
+
+    // A second flush must now succeed and persist the timestamp
+    flushPendingLastUsed();
+
+    const stored = JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
+    const entry = stored.keys.find((k: { name: string }) => k.name === "requeue-key");
+    expect(entry?.lastUsedAt).toBeGreaterThanOrEqual(before);
   });
 });
