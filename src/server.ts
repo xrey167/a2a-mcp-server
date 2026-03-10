@@ -2156,10 +2156,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     return { content: [{ type: "text", text: capResponse(accumulated || "(no output)", CHAR_LIMIT) }] };
   }
-});
 
-  const text = String((args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "");
-  const raw = await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, text);
+  const raw = await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, String(text));
   // Apply smart truncation to reduce token usage on large responses
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { parsed = raw; }
