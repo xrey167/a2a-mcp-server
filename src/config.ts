@@ -78,6 +78,25 @@ const TruncationConfigSchema = z.object({
   headRatio: z.number().min(0).max(1).optional().default(0.6),
 });
 
+const OutputFilterConfigSchema = z.object({
+  /** Master switch for output filtering */
+  enabled: z.boolean().optional().default(true),
+  /** Strip ANSI escape codes from all output */
+  stripAnsi: z.boolean().optional().default(true),
+  /** Use built-in filter rules (git, npm, test runners, etc.) */
+  builtinFilters: z.boolean().optional().default(true),
+  /** Path to custom filters JSON file */
+  customFiltersPath: z.string().optional(),
+  /** Save raw output when filtering removes >50% */
+  teeEnabled: z.boolean().optional().default(true),
+  /** Max age for tee files in minutes (default 24h) */
+  teeMaxAgeMins: z.number().int().positive().optional().default(1440),
+  /** Track token savings in SQLite */
+  tokenTrackingEnabled: z.boolean().optional().default(true),
+  /** Retention period for token savings records in days */
+  tokenRetentionDays: z.number().int().positive().optional().default(90),
+});
+
 const ServerConfigSchema = z.object({
   /** A2A HTTP port (default: 8080) */
   port: z.number().int().positive().optional().default(8080),
@@ -110,6 +129,8 @@ const ConfigSchema = z.object({
   profile: z.enum(["full", "lite", "data"]).optional(),
   /** A2A federation — connect to external A2A agents */
   federation: FederationConfigSchema.optional(),
+  /** Output filter settings (RTK-style token reduction) */
+  outputFilter: OutputFilterConfigSchema.optional(),
   /** Extra environment variables to pass to workers */
   env: z.record(z.string()).optional(),
 }).strict();
@@ -124,6 +145,7 @@ const DEFAULTS = {
   timeouts: TimeoutsConfigSchema.parse({}),
   web: WebConfigSchema.parse({}),
   federation: FederationConfigSchema.parse({}),
+  outputFilter: OutputFilterConfigSchema.parse({}),
   env: {} as Record<string, string>,
 };
 
@@ -146,6 +168,7 @@ function applyDefaults(raw: z.infer<typeof ConfigSchema>): Config {
     truncation: { ...DEFAULTS.truncation, ...raw.truncation },
     timeouts: { ...DEFAULTS.timeouts, ...raw.timeouts },
     web: { ...DEFAULTS.web, ...raw.web },
+    outputFilter: { ...DEFAULTS.outputFilter, ...raw.outputFilter },
     env: { ...DEFAULTS.env, ...raw.env },
   };
 }
@@ -181,6 +204,8 @@ export type RemoteWorkerConfig = z.infer<typeof RemoteWorkerSchema>;
 
 export type FederationConfig = z.infer<typeof FederationConfigSchema>;
 
+export type OutputFilterConfig = z.infer<typeof OutputFilterConfigSchema>;
+
 export type Config = {
   server: z.infer<typeof ServerConfigSchema>;
   workers?: z.infer<typeof WorkerConfigSchema>[];
@@ -192,6 +217,7 @@ export type Config = {
   truncation: z.infer<typeof TruncationConfigSchema>;
   timeouts: z.infer<typeof TimeoutsConfigSchema>;
   web: z.infer<typeof WebConfigSchema>;
+  outputFilter: OutputFilterConfig;
   env: Record<string, string>;
 };
 
@@ -233,6 +259,9 @@ export function loadConfig(): Config {
   }
   if (process.env.A2A_MAX_RESPONSE_SIZE) {
     raw.truncation = { ...(raw.truncation as object ?? {}), maxResponseSize: parseInt(process.env.A2A_MAX_RESPONSE_SIZE, 10) };
+  }
+  if (process.env.A2A_OUTPUT_FILTER_ENABLED !== undefined) {
+    raw.outputFilter = { ...(raw.outputFilter as object ?? {}), enabled: process.env.A2A_OUTPUT_FILTER_ENABLED !== "false" };
   }
 
   const result = ConfigSchema.safeParse(raw);

@@ -6,6 +6,7 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { sanitizePath } from "../path-utils.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
+import { stripAnsi, applyCommandFilter } from "../output-filter.js";
 
 const ShellSchemas = {
   run_shell: z.object({ command: z.string().min(1) }).passthrough(),
@@ -40,9 +41,14 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       // intentional: run_shell exists to execute arbitrary shell commands
       const result = spawnSync(command, { shell: true, timeout: 15_000, encoding: "utf-8" });
       if (result.error) return `Error: ${result.error.message}`;
-      const out = result.stdout?.trim();
+      let out = result.stdout?.trim() ?? "";
       const err = result.stderr?.trim();
-      if (result.status !== 0) return `Exit ${result.status}: ${err || out}`;
+      if (result.status !== 0) {
+        const raw = err || out;
+        return `Exit ${result.status}: ${applyCommandFilter(raw, command, result.status ?? 1)}`;
+      }
+      // Apply worker-level output filtering (ANSI strip + command-aware)
+      out = applyCommandFilter(out, command, 0);
       return out || "(no output)";
     }
     case "read_file": {

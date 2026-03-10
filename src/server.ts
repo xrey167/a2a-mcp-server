@@ -45,6 +45,9 @@ import { validateApiKey, lookupApiKey, isSkillAllowed, createApiKey, revokeApiKe
 import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace } from "./workspace.js";
 import { isSkillLicensed, getSkillTier, getSkillsByTier, getLicenseInfo } from "./skill-tier.js";
 import { registerHealthRoutes, markReady, updateWorkerHealth as updateCloudWorkerHealth, installShutdownHandlers, onShutdown } from "./cloud.js";
+import { applyFilters, recordFilterStats, type FilterContext } from "./output-filter.js";
+import { recordTokenSaving, getTokenStats } from "./token-tracker.js";
+import { teeOutput, readTee, pruneTeeFiles, listTeeFiles } from "./tee.js";
 
 // Extend Fastify's request interface with rawBody for HMAC verification
 declare module "fastify" {
@@ -360,11 +363,44 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
 
     try {
       incrementActive(params.skillId ?? "unknown", workerName);
-      const res = await breaker.call(() => sendTask(url, params, opts));
+      let res = await breaker.call(() => sendTask(url, params, opts));
       decrementActive(params.skillId ?? "unknown", workerName);
       endTimer();
+
+      // Apply RTK-style output filtering
+      const filterCtx: FilterContext = {
+        skillId: params.skillId ?? "unknown",
+        workerName,
+        command: (params.args as Record<string, unknown>)?.command as string | undefined,
+        exitCode: typeof res === "string" && res.startsWith("Exit ") ? parseInt(res.split(":")[0].replace("Exit ", "")) : undefined,
+      };
+      const filterResult = applyFilters(res, filterCtx);
+      if (filterResult.filtersApplied.length > 0) {
+        // Tee raw output if significant filtering occurred (>50% reduction)
+        if (CONFIG.outputFilter?.teeEnabled && filterResult.filteredLength < filterResult.originalLength * 0.5) {
+          filterResult.teeFile = teeOutput(res, params.skillId ?? "unknown");
+        }
+        res = filterResult.output;
+        recordFilterStats(filterResult);
+        // Record token savings asynchronously
+        if (CONFIG.outputFilter?.tokenTrackingEnabled) {
+          try {
+            recordTokenSaving({
+              skillId: params.skillId ?? "unknown",
+              worker: workerName,
+              command: filterCtx.command,
+              inputTokens: Math.ceil(filterResult.originalLength / 4),
+              outputTokens: Math.ceil(filterResult.filteredLength / 4),
+              savedTokens: filterResult.savedTokens,
+              filtersApplied: filterResult.filtersApplied,
+            });
+          } catch (e) { process.stderr.write(`[output-filter] token tracking error: ${e}\n`); }
+        }
+        span.setTag("filter.saved_tokens", String(filterResult.savedTokens));
+      }
+
       span.end();
-      // Cache the result
+      // Cache the (filtered) result
       putInCache(params.skillId ?? "", cacheArgs as Record<string, unknown>, res);
       // Publish event
       publish(`agent.${workerName}.completed`, { skillId: params.skillId, resultLength: res.length }, { source: workerName, correlationId: trace.traceId }).catch(e => process.stderr.write(`[event-bus] publish error: ${e}\n`));
@@ -1160,6 +1196,19 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
     case "audit_stats":
       return JSON.stringify(auditStats(args.since as string | undefined), null, 2);
 
+    // ── Token Savings (RTK-style) ────────────────────────────────
+    case "token_savings":
+      return JSON.stringify(getTokenStats({
+        since: args.since as string | undefined,
+        skillId: args.skillId as string | undefined,
+      }), null, 2);
+
+    case "read_raw_output": {
+      const path = args.path as string;
+      if (!path) return JSON.stringify(listTeeFiles(), null, 2);
+      return readTee(path);
+    }
+
     // ── License / Tier Info ───────────────────────────────────────
     case "license_info":
       return JSON.stringify({
@@ -1876,6 +1925,28 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         type: "object" as const,
         properties: {
           since: { type: "string", description: "ISO timestamp to filter from" },
+        },
+      },
+    },
+    // ── Token Savings (RTK-style) ──────────────────────────────────
+    {
+      name: "token_savings",
+      description: "Get token savings statistics from RTK-style output filtering. Shows total tokens saved, savings rate, and top skills by savings.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string", description: "ISO timestamp to filter from" },
+          skillId: { type: "string", description: "Filter by skill ID" },
+        },
+      },
+    },
+    {
+      name: "read_raw_output",
+      description: "Read raw unfiltered output from a tee file. Call with no args to list available tee files, or provide a path to read a specific file.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          path: { type: "string", description: "Path to the tee file (from token_savings or list)" },
         },
       },
     },

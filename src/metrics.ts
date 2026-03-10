@@ -11,6 +11,8 @@
  * Exposed via MCP resource a2a://metrics.
  */
 
+import { getTokenStats } from "./token-tracker.js";
+
 const WINDOW_MS = 5 * 60_000; // reserved for potential future time-windowed decay
 
 interface SkillMetric {
@@ -138,6 +140,13 @@ export interface MetricsSnapshot {
     errorRate: string;
     avgLatencyMs: number;
   }>;
+  tokenSavings?: {
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalSavedTokens: number;
+    savingsRate: string;
+    topSkills: Array<{ skillId: string; saved: number; count: number }>;
+  };
 }
 
 /** Get a snapshot of all metrics. */
@@ -186,6 +195,21 @@ export function getMetricsSnapshot(): MetricsSnapshot {
     });
   }
 
+  // Fetch token savings from the tracker (best-effort)
+  let tokenSavings: MetricsSnapshot["tokenSavings"];
+  try {
+    const ts = getTokenStats();
+    if (ts.totalRecords > 0) {
+      tokenSavings = {
+        totalInputTokens: ts.totalInputTokens,
+        totalOutputTokens: ts.totalOutputTokens,
+        totalSavedTokens: ts.totalSavedTokens,
+        savingsRate: ts.savingsRate,
+        topSkills: ts.topSkills,
+      };
+    }
+  } catch { /* token tracker may not be initialized */ }
+
   return {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
@@ -197,6 +221,7 @@ export function getMetricsSnapshot(): MetricsSnapshot {
     },
     skills,
     workers,
+    tokenSavings,
   };
 }
 
