@@ -1,7 +1,12 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll } from "bun:test";
 import { AgentError } from "../errors.js";
-import { isAllowedUrl } from "../server.js";
+import { isAllowedUrl, configureAllowedUrls } from "../url-validation.js";
 import { safeName } from "../memory.js";
+
+// Configure allowed ports/URLs for testing (matches default worker ports)
+beforeAll(() => {
+  configureAllowedUrls([8080, 8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088], []);
+});
 
 /**
  * Security-focused tests for review findings.

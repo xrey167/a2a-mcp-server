@@ -45,6 +45,7 @@ import { validateApiKey, lookupApiKey, isSkillAllowed, createApiKey, revokeApiKe
 import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace } from "./workspace.js";
 import { isSkillLicensed, getSkillTier, getSkillsByTier, getLicenseInfo } from "./skill-tier.js";
 import { registerHealthRoutes, markReady, updateWorkerHealth as updateCloudWorkerHealth, installShutdownHandlers, onShutdown } from "./cloud.js";
+import { isAllowedUrl, configureAllowedUrls } from "./url-validation.js";
 import { applyFilters, recordFilterStats, type FilterContext } from "./output-filter.js";
 import { recordTokenSaving, getTokenStats } from "./token-tracker.js";
 import { teeOutput, readTee, pruneTeeFiles, listTeeFiles } from "./tee.js";
@@ -96,30 +97,7 @@ function sanitizeUrlForLog(url: string): string {
   }
 }
 
-function isAllowedUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-
-    // Local workers: localhost on allowed ports
-    if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
-      const port = parseInt(parsed.port || "80", 10);
-      return ALLOWED_PORTS.has(port);
-    }
-
-    // Remote workers: exact URL match against configured remoteWorkers
-    const origin = parsed.origin;
-    for (const allowed of ALLOWED_REMOTE_URLS) {
-      try {
-        if (new URL(allowed).origin === origin) return true;
-      } catch {}
-    }
-
-    return false;
-  } catch {
-    return false;
-  }
-}
+// isAllowedUrl imported from ./url-validation.js
 
 // ── Worker definitions ──────────────────────────────────────────
 const ALL_WORKERS = [
@@ -165,6 +143,9 @@ const ALLOWED_PORTS = new Set(WORKERS.map(w => w.port));
 const REMOTE_WORKERS = CONFIG.remoteWorkers ?? [];
 // Build set of allowed remote URLs for SSRF validation
 const ALLOWED_REMOTE_URLS = new Set(REMOTE_WORKERS.map(rw => rw.url));
+
+// Configure URL validation module with allowed ports and remote URLs
+configureAllowedUrls([...ALLOWED_PORTS], [...ALLOWED_REMOTE_URLS]);
 
 const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 const workerFailures = new Map<string, number>();
@@ -2227,10 +2208,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     return { content: [{ type: "text", text: capResponse(accumulated || "(no output)", CHAR_LIMIT) }] };
   }
-});
 
-  const text = String((args as any)?.message ?? (args as any)?.prompt ?? (args as any)?.command ?? "");
-  const raw = await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, text);
+  const raw = await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, String(text));
   // Apply smart truncation to reduce token usage on large responses
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { parsed = raw; }

@@ -40,3 +40,17 @@ export async function discoverAgent(agentUrl: string): Promise<AgentCard> {
 
   return res.json();
 }
+
+export async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs: number = 10_000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...opts, signal: controller.signal, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      throw new Error(`Redirect detected (${res.status}) — rejected to prevent SSRF bypass`);
+    }
+    return res;
+  } finally {
+    clearTimeout(timer);
+  }
+}
