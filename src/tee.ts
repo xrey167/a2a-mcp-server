@@ -3,7 +3,7 @@
 // filtering removes significant content, allowing full recovery.
 
 import { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 import { homedir } from "os";
 
 // ── Config ───────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ export function teeOutput(raw: string, skillId: string): string {
  */
 export function readTee(path: string): string {
   const dir = getTeeDir();
-  const resolved = require("path").resolve(path);
+  const resolved = resolve(path);
   if (!resolved.startsWith(dir)) {
     return `Error: path must be within ${dir}`;
   }
