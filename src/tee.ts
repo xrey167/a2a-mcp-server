@@ -47,6 +47,11 @@ export function readTee(path: string): string {
   if (!existsSync(resolved)) {
     return `Error: file not found: ${path}`;
   }
+  const stat = statSync(resolved);
+  const MAX_READ_SIZE = 10 * 1024 * 1024; // 10 MB limit
+  if (stat.size > MAX_READ_SIZE) {
+    return `Error: file too large to read (${Math.round(stat.size / 1024)}KB). Use a streaming tool or check the file on disk.`;
+  }
   return readFileSync(resolved, "utf-8");
 }
 
