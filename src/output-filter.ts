@@ -358,7 +358,7 @@ export function applyFilters(output: string, ctx: FilterContext): FilterResult {
     // Stage 5: Head/tail selection
     if (rule.headLines || rule.tailLines) {
       const lines = result.split("\n");
-      const headN = rule.headLines ?? lines.length;
+      const headN = rule.headLines ?? 0;
       const tailN = rule.tailLines ?? 0;
       if (lines.length > headN + tailN) {
         const head = lines.slice(0, headN);
