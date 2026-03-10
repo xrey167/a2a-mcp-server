@@ -28,6 +28,24 @@ export async function sendTask(agentUrl: string, params: {
   return json.result?.artifacts?.[0]?.parts?.[0]?.text ?? JSON.stringify(json.result);
 }
 
+export async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 10_000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      throw new Error(`Redirect detected (${res.status}) — rejected to prevent SSRF bypass`);
+    }
+    return res;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function discoverAgent(agentUrl: string): Promise<AgentCard> {
   const res = await fetch(`${agentUrl}/.well-known/agent.json`, {
     redirect: "manual", // Prevent following redirects to bypass SSRF checks
