@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
   <img src="https://img.shields.io/badge/protocol-ACP_(Zed)-ef4444" alt="ACP" />
   <img src="https://img.shields.io/badge/agents-8_workers-f59e0b" alt="Agents" />
-  <img src="https://img.shields.io/badge/MCP_tools-21-8b5cf6" alt="Tools" />
+  <img src="https://img.shields.io/badge/MCP_tools-27-8b5cf6" alt="Tools" />
   <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
 </p>
 
@@ -13,7 +13,7 @@
 
 **A multi-protocol AI agent orchestrator** that bridges Google's Agent-to-Agent (A2A) protocol, Anthropic's Model Context Protocol (MCP), and IBM's Agent Communication Protocol (ACP) into a single, production-ready runtime.
 
-Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, provides 25+ MCP tools, supports DAG-based workflows, multi-agent collaboration strategies, federated peer discovery, enterprise RBAC, and a full project generation factory with quality gates.
+Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, provides 27 MCP tools, supports DAG-based workflows, multi-agent collaboration strategies, federated peer discovery, enterprise RBAC, RTK-style token savings, and a full project generation factory with quality gates.
 
 ---
 
@@ -36,6 +36,7 @@ Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, pr
 - [Search](#search)
 - [Sandbox Execution](#sandbox-execution)
 - [Federation](#federation)
+- [Output Filtering & Token Savings](#output-filtering--token-savings)
 - [Security](#security)
 - [Plugin System](#plugin-system)
 - [Persona System](#persona-system)
@@ -203,86 +204,79 @@ a2a-mcp-server install github-agent
 
 ## MCP Tools
 
-The orchestrator exposes 25+ tools via the MCP stdio interface. These are the tools available to any MCP client (Claude Desktop, Cursor, Windsurf, etc.):
+The orchestrator exposes 27 tools via the MCP stdio interface. These are the tools available to any MCP client (Claude Desktop, Cursor, Windsurf, etc.):
 
 ### Core Delegation
 
 | Tool | Description |
 |------|-------------|
 | `delegate` | Route a task to the best worker via auto-routing, direct URL, or skill ID |
-| `broadcast` | Send a task to all workers in parallel |
-| `list_agents` | List all registered worker agents and their skills |
+| `list_agents` | List all worker agents, external agents, and their skills |
 
-### File & Shell
-
-| Tool | Description |
-|------|-------------|
-| `run_shell` | Execute a shell command with timeout protection |
-| `read_file` | Read a file with path sanitization |
-| `write_file` | Write a file with sanitized paths |
-
-### Web & API
+### Shell
 
 | Tool | Description |
 |------|-------------|
-| `fetch_url` | Fetch a URL with SSRF protection |
-| `call_api` | Make an HTTP API call |
-
-### AI & Knowledge
-
-| Tool | Description |
-|------|-------------|
-| `ask_claude` | Query Claude with optional persona and model selection |
-| `search_files` | Glob-based file search |
-| `query_sqlite` | Read-only SQLite queries (SELECT only) |
-| `remember` | Store a key-value pair in memory (SQLite FTS5 + Obsidian vault) |
-| `recall` | Retrieve a value from memory by key |
-| `search_memory` | Full-text search across all stored memories |
+| `run_shell_stream` | Execute a shell command with real-time stdout/stderr streamed as MCP progress notifications |
 
 ### Workflow & Composition
 
 | Tool | Description |
 |------|-------------|
-| `run_workflow` | Execute a DAG-based workflow with template resolution |
-| `compose_skills` | Run a declarative skill pipeline with `pipe()` syntax |
+| `workflow_execute` | Execute a multi-step DAG workflow with parallel execution, template refs `{{stepId.result}}`, retry/skip error handling, and conditional execution |
+| `compose_pipeline` | Create a reusable skill pipeline with `pipe()` syntax — each step's output feeds the next |
+| `execute_pipeline` | Execute a composed pipeline by ID |
+| `design_workflow` | Full design pipeline: suggest screens, create project, generate each screen (async, returns taskId) |
+| `factory_workflow` | Full project generation pipeline: normalize, scaffold, codegen, quality gate (async, returns taskId) |
 
 ### Collaboration
 
 | Tool | Description |
 |------|-------------|
-| `collaborate` | Run a multi-agent collaboration (fan_out, consensus, debate, map_reduce) |
+| `collaborate` | Multi-agent collaboration: `fan_out`, `consensus`, `debate`, `map_reduce` strategies |
 
 ### Sandbox
 
 | Tool | Description |
 |------|-------------|
-| `sandbox_execute` | Execute TypeScript code in an isolated Bun subprocess with prelude helpers |
+| `sandbox_execute` | Execute TypeScript in an isolated Bun subprocess with access to all skills via `skill(id, args)` |
 
 ### Event System
 
 | Tool | Description |
 |------|-------------|
-| `emit_event` | Publish an event to the topic-based event bus |
-| `subscribe_event` | Subscribe to events matching a topic pattern (supports `*` and `#` wildcards) |
+| `event_publish` | Publish an event to the topic-based event bus |
+| `event_subscribe` | Subscribe to events matching a topic pattern (supports `*` and `#` wildcards) |
+| `event_replay` | Replay events from history matching a topic pattern |
 
 ### Webhooks
 
 | Tool | Description |
 |------|-------------|
 | `register_webhook` | Register an inbound webhook with HMAC-SHA256 authentication |
+| `list_webhooks` | List all registered webhooks and their endpoints |
 
-### Factory
+### Observability
 
 | Tool | Description |
 |------|-------------|
-| `create_project` | Generate a complete project from a natural language idea |
+| `get_metrics` | Skill execution metrics: call counts, latencies (p50/p95/p99), error rates |
+| `list_traces` | List recent distributed traces across agent calls |
+| `get_trace` | Get waterfall visualization of a trace — full call chain with timing |
+| `cache_stats` | Skill cache statistics: hit rate, entries, size, top cached skills |
+| `cache_invalidate` | Invalidate cached skill results (by skill ID or all) |
+| `negotiate_capability` | Find the best agent for a skill based on version, features, health, and load |
+| `token_savings` | RTK-style output filtering statistics: total tokens saved, savings rate, top skills |
+| `read_raw_output` | Read raw unfiltered output from tee files (before token-saving filters) |
 
 ### Administration
 
 | Tool | Description |
 |------|-------------|
-| `manage_workspace` | Create, list, or manage multi-tenant workspaces |
-| `manage_federation` | Add, remove, or list federated peer agents |
+| `workspace_manage` | Manage team workspaces: create, list, add/remove members, update settings |
+| `audit_query` | Query the audit log by actor, skill, workspace, time range, and success/failure |
+| `audit_stats` | Audit statistics: total calls, success rate, top skills, top actors |
+| `license_info` | Show current license tier (free/pro/enterprise) and skill tier requirements |
 
 ---
 
@@ -292,20 +286,20 @@ The orchestrator exposes 25+ tools via the MCP stdio interface. These are the to
 
 | URI | Description |
 |-----|-------------|
-| `a2a://agents` | List of all registered agents |
-| `a2a://config` | Current server configuration |
-| `a2a://metrics` | Skill and worker execution metrics (counts, latency percentiles, error rates) |
-| `a2a://traces` | Distributed tracing data with waterfall visualization |
-| `a2a://events` | Event bus history (last 1000 events) |
-| `a2a://dead-letters` | Dead letter queue (unhandled events, max 200) |
-| `a2a://sessions` | Active session list with turn counts |
-| `a2a://audit` | Audit log entries (last 100) |
-| `a2a://federation` | Federated peer agents and their health status |
-| `a2a://workspaces` | Workspace listing |
+| `a2a://context` | Current project context (summary, goals, stack, notes) |
+| `a2a://health` | Health status of all worker agents |
+| `a2a://tasks` | List of all active and recent tasks |
+| `a2a://metrics` | Skill execution metrics: call counts, latencies, error rates |
 | `a2a://circuit-breakers` | Circuit breaker states for all workers |
-| `a2a://pipelines` | Available project generation pipelines |
-| `a2a://capabilities` | Capability negotiation data |
-| `a2a://cache-stats` | Skill cache hit/miss statistics |
+| `a2a://webhooks` | Registered webhook endpoints |
+| `a2a://event-bus` | Event bus stats, subscriptions, and dead letters |
+| `a2a://traces` | Recent distributed traces across agent calls |
+| `a2a://cache` | Skill result cache statistics |
+| `a2a://capabilities` | Agent capability registry and negotiation stats |
+| `a2a://pipelines` | Registered skill composition pipelines |
+| `a2a://audit` | Recent audit log entries (enterprise) |
+| `a2a://license` | Current license tier and skill gates |
+| `a2a://workspaces` | Team workspaces and members |
 
 ---
 
@@ -313,17 +307,17 @@ The orchestrator exposes 25+ tools via the MCP stdio interface. These are the to
 
 ### Personas
 
-7 built-in personas loaded from `src/personas/`:
+7 agent-specific personas loaded from `src/personas/`:
 
 | Persona | Description |
 |---------|-------------|
-| `architect` | System design and architecture decisions |
-| `reviewer` | Code review and quality assessment |
-| `debugger` | Bug hunting and debugging |
-| `writer` | Technical writing and documentation |
-| `planner` | Project planning and task breakdown |
-| `security` | Security analysis and threat modeling |
-| `data-analyst` | Data analysis and visualization |
+| `orchestrator` | System prompt for the main orchestrator agent |
+| `shell-agent` | System prompt for the shell worker |
+| `web-agent` | System prompt for the web worker |
+| `ai-agent` | System prompt for the AI worker |
+| `code-agent` | System prompt for the code worker |
+| `knowledge-agent` | System prompt for the knowledge worker |
+| `factory-agent` | System prompt for the factory worker |
 
 Each persona is a Markdown file with YAML frontmatter specifying model and temperature. Personas support hot-reload via filesystem watch.
 
@@ -602,6 +596,26 @@ Features:
 - Periodic health checks (default: 30 seconds)
 - Automatic skill aggregation from peers
 - Stale peer removal on consecutive health check failures
+
+---
+
+## Output Filtering & Token Savings
+
+RTK-style output filtering reduces token usage by intelligently filtering and truncating tool outputs before they reach the LLM context window.
+
+**Modules:**
+
+| Module | Description |
+|--------|-------------|
+| `src/output-filter.ts` | RTK-style output filtering — strips noise, truncates large payloads, preserves essential content |
+| `src/token-tracker.ts` | Tracks token savings statistics per skill and globally |
+| `src/tee.ts` | Records raw unfiltered outputs to tee files for debugging and audit |
+| `src/truncate.ts` | Smart truncation for large responses with configurable limits |
+| `src/env-filter.ts` | Filters dangerous environment variables from sandbox and shell contexts |
+
+**MCP tools:**
+- `token_savings` — View savings statistics (total saved, rate, top skills by savings)
+- `read_raw_output` — Read raw pre-filter output from tee files
 
 ---
 
