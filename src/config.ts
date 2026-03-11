@@ -106,6 +106,25 @@ const ServerConfigSchema = z.object({
   healthPollInterval: z.number().int().positive().optional().default(30_000),
 });
 
+const ErpConfigSchema = z.object({
+  /** Enable periodic connector renewal sweeps */
+  autoRenewEnabled: z.boolean().optional().default(true),
+  /** Renewal sweep interval in ms (default: 1h) */
+  renewalSweepIntervalMs: z.number().int().positive().optional().default(60 * 60 * 1000),
+  /** Random jitter added to each sweep in ms (default: 5m) */
+  renewalSweepJitterMs: z.number().int().min(0).optional().default(5 * 60 * 1000),
+  /** Enable periodic CSV+JSON renewal snapshot exports */
+  snapshotExportEnabled: z.boolean().optional().default(false),
+  /** Snapshot export interval in ms (default: 24h) */
+  snapshotExportIntervalMs: z.number().int().positive().optional().default(24 * 60 * 60 * 1000),
+  /** Snapshot retention in days */
+  snapshotRetentionDays: z.number().int().positive().optional().default(30),
+  /** Snapshot output directory */
+  snapshotOutputDir: z.string().optional().default(join(getConfigDir(), "reports", "connector-renewals")),
+  /** Optional HMAC signing key for snapshot manifests (prefer env in production) */
+  snapshotSigningKey: z.string().optional(),
+});
+
 const FederationConfigSchema = z.object({
   /** Peer A2A agent URLs to discover via /.well-known/agent.json */
   peers: z.array(z.string().url()).optional().default([]),
@@ -117,6 +136,7 @@ const FederationConfigSchema = z.object({
 
 const ConfigSchema = z.object({
   server: ServerConfigSchema.optional(),
+  erp: ErpConfigSchema.optional(),
   workers: z.array(WorkerConfigSchema).optional(),
   /** Remote A2A agents to discover and route to (no local process spawned) */
   remoteWorkers: z.array(RemoteWorkerSchema).optional(),
@@ -139,6 +159,7 @@ const ConfigSchema = z.object({
 // we apply defaults manually after parsing.
 const DEFAULTS = {
   server: ServerConfigSchema.parse({}),
+  erp: ErpConfigSchema.parse({}),
   search: SearchConfigSchema.parse({}),
   sandbox: SandboxConfigSchema.parse({}),
   truncation: TruncationConfigSchema.parse({}),
@@ -159,6 +180,7 @@ function applyDefaults(raw: z.infer<typeof ConfigSchema>): Config {
 
   return {
     server: { ...DEFAULTS.server, ...raw.server },
+    erp: { ...DEFAULTS.erp, ...raw.erp },
     workers,
     remoteWorkers: raw.remoteWorkers,
     profile: raw.profile,
@@ -208,6 +230,7 @@ export type OutputFilterConfig = z.infer<typeof OutputFilterConfigSchema>;
 
 export type Config = {
   server: z.infer<typeof ServerConfigSchema>;
+  erp: z.infer<typeof ErpConfigSchema>;
   workers?: z.infer<typeof WorkerConfigSchema>[];
   remoteWorkers?: RemoteWorkerConfig[];
   profile?: string;
@@ -230,6 +253,14 @@ let __config: Config | null = null;
  * Environment variable overrides:
  *   A2A_PORT → server.port
  *   A2A_API_KEY → server.apiKey
+ *   A2A_ERP_AUTO_RENEW_ENABLED → erp.autoRenewEnabled
+ *   A2A_ERP_SWEEP_INTERVAL_MS → erp.renewalSweepIntervalMs
+ *   A2A_ERP_SWEEP_JITTER_MS → erp.renewalSweepJitterMs
+ *   A2A_ERP_SNAPSHOT_EXPORT_ENABLED → erp.snapshotExportEnabled
+ *   A2A_ERP_SNAPSHOT_INTERVAL_MS → erp.snapshotExportIntervalMs
+ *   A2A_ERP_SNAPSHOT_RETENTION_DAYS → erp.snapshotRetentionDays
+ *   A2A_ERP_SNAPSHOT_OUTPUT_DIR → erp.snapshotOutputDir
+ *   A2A_ERP_SNAPSHOT_SIGNING_KEY → erp.snapshotSigningKey
  *   A2A_SANDBOX_TIMEOUT → sandbox.timeout
  *   A2A_MAX_RESPONSE_SIZE → truncation.maxResponseSize
  */
@@ -250,6 +281,36 @@ export function loadConfig(): Config {
   // Environment variable overrides
   if (process.env.A2A_PORT) {
     raw.server = { ...(raw.server as object ?? {}), port: parseInt(process.env.A2A_PORT, 10) };
+  }
+  if (process.env.A2A_ERP_AUTO_RENEW_ENABLED) {
+    raw.erp = {
+      ...(raw.erp as object ?? {}),
+      autoRenewEnabled: String(process.env.A2A_ERP_AUTO_RENEW_ENABLED).toLowerCase() !== "false",
+    };
+  }
+  if (process.env.A2A_ERP_SWEEP_INTERVAL_MS) {
+    raw.erp = { ...(raw.erp as object ?? {}), renewalSweepIntervalMs: parseInt(process.env.A2A_ERP_SWEEP_INTERVAL_MS, 10) };
+  }
+  if (process.env.A2A_ERP_SWEEP_JITTER_MS) {
+    raw.erp = { ...(raw.erp as object ?? {}), renewalSweepJitterMs: parseInt(process.env.A2A_ERP_SWEEP_JITTER_MS, 10) };
+  }
+  if (process.env.A2A_ERP_SNAPSHOT_EXPORT_ENABLED) {
+    raw.erp = {
+      ...(raw.erp as object ?? {}),
+      snapshotExportEnabled: String(process.env.A2A_ERP_SNAPSHOT_EXPORT_ENABLED).toLowerCase() !== "false",
+    };
+  }
+  if (process.env.A2A_ERP_SNAPSHOT_INTERVAL_MS) {
+    raw.erp = { ...(raw.erp as object ?? {}), snapshotExportIntervalMs: parseInt(process.env.A2A_ERP_SNAPSHOT_INTERVAL_MS, 10) };
+  }
+  if (process.env.A2A_ERP_SNAPSHOT_RETENTION_DAYS) {
+    raw.erp = { ...(raw.erp as object ?? {}), snapshotRetentionDays: parseInt(process.env.A2A_ERP_SNAPSHOT_RETENTION_DAYS, 10) };
+  }
+  if (process.env.A2A_ERP_SNAPSHOT_OUTPUT_DIR) {
+    raw.erp = { ...(raw.erp as object ?? {}), snapshotOutputDir: process.env.A2A_ERP_SNAPSHOT_OUTPUT_DIR };
+  }
+  if (process.env.A2A_ERP_SNAPSHOT_SIGNING_KEY) {
+    raw.erp = { ...(raw.erp as object ?? {}), snapshotSigningKey: process.env.A2A_ERP_SNAPSHOT_SIGNING_KEY };
   }
   if (process.env.A2A_API_KEY) {
     raw.server = { ...(raw.server as object ?? {}), apiKey: process.env.A2A_API_KEY };

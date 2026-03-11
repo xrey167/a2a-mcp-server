@@ -30,6 +30,18 @@ const SKILL_TIERS: Record<string, Tier> = {
   sandbox_vars: "free",
   get_metrics: "free",
   cache_stats: "free",
+  erp_connector_status: "free",
+  erp_kpis: "free",
+  erp_connector_kpis: "free",
+  erp_connector_renewals: "free",
+  erp_connector_renewals_export: "free",
+  erp_connector_renewals_verify: "free",
+  erp_connector_trust_report: "free",
+  erp_connector_sales_packet: "free",
+  erp_pilot_readiness: "free",
+  erp_pilot_launches: "free",
+  erp_connector_renewals_snapshot: "pro",
+  erp_launch_pilot: "pro",
 
   // Pro tier — advanced workflows & collaboration
   workflow_execute: "pro",
@@ -40,6 +52,11 @@ const SKILL_TIERS: Record<string, Tier> = {
   event_publish: "pro",
   event_subscribe: "pro",
   event_replay: "pro",
+  erp_connector_connect: "pro",
+  erp_connector_sync: "pro",
+  erp_connector_renew: "pro",
+  erp_connector_renew_due: "pro",
+  erp_workflow_run: "pro",
 
   // Enterprise tier — governance & observability
   register_webhook: "enterprise",

@@ -11,6 +11,7 @@ import {
 import Fastify from "fastify";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { mkdirSync, readdirSync, statSync, unlinkSync } from "fs";
 import { SKILLS, SKILL_MAP } from "./skills.js";
 import { sendTask, discoverAgent, fetchWithTimeout, type AgentCard } from "./a2a.js";
 import { initRegistry, listMcpServers, listMcpTools, callMcpTool } from "./mcp-registry.js";
@@ -22,7 +23,7 @@ import { memory } from "./memory.js";
 import { createTask, markWorking, markCompleted, markFailed, markCanceled, emitProgress, getTask, listTasks, pruneTasks, toA2AResult, taskEvents } from "./task-store.js";
 import { initAgentRegistry, registerAgent, unregisterAgent, getExternalCards, getRegistryEntries, getAgentApiKey } from "./agent-registry.js";
 import { AgentError } from "./errors.js";
-import { randomUUID } from "crypto";
+import { createHash, createHmac, randomUUID } from "crypto";
 import { executeSandbox, setAdapters } from "./sandbox.js";
 import { sandboxStore } from "./sandbox-store.js";
 import { sanitizeForPrompt } from "./prompt-sanitizer.js";
@@ -49,6 +50,28 @@ import { isAllowedUrl, configureAllowedUrls } from "./url-validation.js";
 import { applyFilters, recordFilterStats, type FilterContext } from "./output-filter.js";
 import { recordTokenSaving, getTokenStats } from "./token-tracker.js";
 import { teeOutput, readTee, pruneTeeFiles, listTeeFiles } from "./tee.js";
+import { getAgencyProductSummary, getAgencyRoiSnapshot, getAgencyWorkflowTemplates } from "./agency-product.js";
+import {
+  buildConnectorRenewalSnapshot,
+  connectConnector,
+  createPilotLaunchRun,
+  exportConnectorRenewalsCsv,
+  listConnectorRenewals,
+  listPilotLaunchRuns,
+  getConnectorKpis,
+  getConnectorStatus,
+  getProductKpis,
+  listConnectorStatuses,
+  recordWorkflowRun,
+  renewDueConnectors,
+  renewBusinessCentralSubscription,
+  syncConnector,
+  updatePilotLaunchRun,
+  updateWorkflowRun,
+  validateConnectorType,
+  validateProductType,
+  workflowDefinitionFor,
+} from "./erp-platform.js";
 
 // Extend Fastify's request interface with rawBody for HMAC verification
 declare module "fastify" {
@@ -633,6 +656,103 @@ const OrchestratorSchemas = {
     action: z.enum(["list", "get", "delete"]).optional().default("list"),
     varName: z.string().optional(),
   }).strict(),
+  erp_connector_connect: z.object({
+    type: z.enum(["odoo", "business-central", "dynamics"]),
+    authMode: z.enum(["oauth", "api-key"]),
+    config: z.record(z.string(), z.unknown()).optional().default({}),
+    metadata: z.record(z.string(), z.unknown()).optional().default({}),
+    enabled: z.boolean().optional().default(true),
+  }).strict(),
+  erp_connector_sync: z.object({
+    type: z.enum(["odoo", "business-central", "dynamics"]),
+    direction: z.enum(["ingest", "writeback", "two-way"]).optional().default("two-way"),
+    entityType: z.enum(["lead", "deal", "invoice", "quote", "order"]).optional().default("lead"),
+    externalId: z.string().optional(),
+    idempotencyKey: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional().default({}),
+    maxRetries: z.number().int().min(0).max(5).optional().default(3),
+  }).strict(),
+  erp_connector_status: z.object({
+    type: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+  }).strict(),
+  erp_connector_renew: z.object({
+    type: z.enum(["business-central"]),
+    webhookExpiresAt: z.string().optional(),
+    notificationUrl: z.string().url().optional(),
+    resource: z.string().optional(),
+  }).strict(),
+  erp_connector_renew_due: z.object({
+    dryRun: z.boolean().optional().default(false),
+  }).strict(),
+  erp_workflow_run: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]),
+    context: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_kpis: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]),
+    since: z.string().optional(),
+  }).strict(),
+  erp_connector_kpis: z.object({
+    since: z.string().optional(),
+  }).strict(),
+  erp_connector_renewals: z.object({
+    connector: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+    status: z.enum(["success", "failed"]).optional(),
+    since: z.string().optional(),
+    before: z.string().optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict(),
+  erp_connector_renewals_export: z.object({
+    connector: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+    status: z.enum(["success", "failed"]).optional(),
+    since: z.string().optional(),
+    before: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+  }).strict(),
+  erp_connector_renewals_snapshot: z.object({
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    outputDir: z.string().optional(),
+  }).strict(),
+  erp_connector_renewals_verify: z.object({
+    manifestPath: z.string().min(1),
+  }).strict(),
+  erp_connector_trust_report: z.object({
+    outputDir: z.string().optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    generateIfMissing: z.boolean().optional().default(true),
+  }).strict(),
+  erp_connector_sales_packet: z.object({
+    outputDir: z.string().optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    generateIfMissing: z.boolean().optional().default(true),
+    products: z.array(z.enum(["quote-to-order", "lead-to-cash", "collections"])).optional(),
+    format: z.enum(["full", "brief", "email"]).optional().default("full"),
+  }).strict(),
+  erp_pilot_readiness: z.object({
+    outputDir: z.string().optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    generateIfMissing: z.boolean().optional().default(true),
+    requiredTrustScore: z.number().min(0).max(100).optional().default(80),
+    requireProcurementReady: z.boolean().optional().default(true),
+  }).strict(),
+  erp_launch_pilot: z.object({
+    outputDir: z.string().optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    generateIfMissing: z.boolean().optional().default(true),
+    requiredTrustScore: z.number().min(0).max(100).optional().default(80),
+    requireProcurementReady: z.boolean().optional().default(true),
+    dryRun: z.boolean().optional().default(false),
+  }).strict(),
+  erp_pilot_launches: z.object({
+    status: z.enum(["blocked", "ready", "launched", "delivery_failed", "dry_run"]).optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict(),
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -927,6 +1047,146 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       })();
 
       return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
+    }
+
+    case "agency_workflow_templates":
+      return JSON.stringify({
+        summary: getAgencyProductSummary(),
+        templates: getAgencyWorkflowTemplates(),
+      }, null, 2);
+
+    case "agency_roi_snapshot":
+      return JSON.stringify(getAgencyRoiSnapshot({
+        since: args.since as string | undefined,
+        assumedMinutesSavedPerSuccessfulRun: args.assumedMinutesSavedPerSuccessfulRun as number | undefined,
+        assumedManualStepsRemovedPerRun: args.assumedManualStepsRemovedPerRun as number | undefined,
+      }), null, 2);
+
+    case "erp_connector_connect": {
+      const { type, authMode, config, metadata, enabled } = validateOrchestrator("erp_connector_connect", args);
+      return JSON.stringify(connectConnector(type, { authMode, config, metadata, enabled }), null, 2);
+    }
+
+    case "erp_connector_sync": {
+      const { type, direction, entityType, externalId, idempotencyKey, payload, maxRetries } = validateOrchestrator("erp_connector_sync", args);
+      const result = await syncConnector(type, { direction, entityType, externalId, idempotencyKey, payload, maxRetries });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "erp_connector_status": {
+      const { type } = validateOrchestrator("erp_connector_status", args);
+      return JSON.stringify(type ? getConnectorStatus(type) : listConnectorStatuses(), null, 2);
+    }
+
+    case "erp_connector_renew": {
+      const { type, webhookExpiresAt, notificationUrl, resource } = validateOrchestrator("erp_connector_renew", args);
+      if (type !== "business-central") {
+        throw new Error("Only business-central renewal is currently supported");
+      }
+      const result = await renewBusinessCentralSubscription({ webhookExpiresAt, notificationUrl, resource });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "erp_connector_renew_due": {
+      const { dryRun } = validateOrchestrator("erp_connector_renew_due", args);
+      const result = await renewDueConnectors({ dryRun });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "erp_workflow_run": {
+      const { product, context } = validateOrchestrator("erp_workflow_run", args);
+      const workflow = workflowDefinitionFor(product, context);
+      const task = createTask({ skillId: `erp:${product}` });
+      markWorking(task.id);
+      const workflowRunId = recordWorkflowRun(product, "running", task.id, context);
+
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+          updateWorkflowRun(workflowRunId, "completed");
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch {}
+          updateWorkflowRun(workflowRunId, "failed", msg);
+        }
+      })();
+
+      return JSON.stringify({ status: "accepted", product, workflowRunId, taskId: task.id }, null, 2);
+    }
+
+    case "erp_kpis": {
+      const { product, since } = validateOrchestrator("erp_kpis", args);
+      return JSON.stringify(getProductKpis(product, { since }), null, 2);
+    }
+
+    case "erp_connector_kpis": {
+      const { since } = validateOrchestrator("erp_connector_kpis", args);
+      return JSON.stringify(getConnectorKpis({ since }), null, 2);
+    }
+
+    case "erp_connector_renewals": {
+      const { connector, status, since, before, limit } = validateOrchestrator("erp_connector_renewals", args);
+      return JSON.stringify(listConnectorRenewals({ connector, status, since, before, limit }), null, 2);
+    }
+
+    case "erp_connector_renewals_export": {
+      const { connector, status, since, before, limit } = validateOrchestrator("erp_connector_renewals_export", args);
+      return exportConnectorRenewalsCsv({ connector, status, since, before, limit });
+    }
+
+    case "erp_connector_renewals_snapshot": {
+      const { since, limit, outputDir } = validateOrchestrator("erp_connector_renewals_snapshot", args);
+      return JSON.stringify(await writeConnectorRenewalSnapshot({ since, limit, outputDir }), null, 2);
+    }
+
+    case "erp_connector_renewals_verify": {
+      const { manifestPath } = validateOrchestrator("erp_connector_renewals_verify", args);
+      return JSON.stringify(await verifyConnectorRenewalManifest(manifestPath), null, 2);
+    }
+
+    case "erp_connector_trust_report": {
+      const { outputDir, since, limit, generateIfMissing } = validateOrchestrator("erp_connector_trust_report", args);
+      return JSON.stringify(await buildConnectorTrustReport({ outputDir, since, limit, generateIfMissing }), null, 2);
+    }
+
+    case "erp_connector_sales_packet": {
+      const { outputDir, since, limit, generateIfMissing, products, format } = validateOrchestrator("erp_connector_sales_packet", args);
+      return JSON.stringify(await buildConnectorSalesPacket({ outputDir, since, limit, generateIfMissing, products, format }), null, 2);
+    }
+
+    case "erp_pilot_readiness": {
+      const { outputDir, since, limit, generateIfMissing, requiredTrustScore, requireProcurementReady } = validateOrchestrator("erp_pilot_readiness", args);
+      return JSON.stringify(await buildPilotReadiness({
+        outputDir,
+        since,
+        limit,
+        generateIfMissing,
+        requiredTrustScore,
+        requireProcurementReady,
+      }), null, 2);
+    }
+
+    case "erp_launch_pilot": {
+      const { outputDir, since, limit, generateIfMissing, requiredTrustScore, requireProcurementReady, dryRun } = validateOrchestrator("erp_launch_pilot", args);
+      return JSON.stringify(await launchPilot({
+        outputDir,
+        since,
+        limit,
+        generateIfMissing,
+        requiredTrustScore,
+        requireProcurementReady,
+        dryRun,
+      }), null, 2);
+    }
+
+    case "erp_pilot_launches": {
+      const { status, since, limit } = validateOrchestrator("erp_pilot_launches", args);
+      return JSON.stringify(listPilotLaunchRuns({ status, since, limit }), null, 2);
     }
 
     // ── Metrics ─────────────────────────────────────────────────
@@ -1713,6 +1973,245 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         required: ["workflow"],
       },
     },
+    {
+      name: "agency_workflow_templates",
+      description: "Return three packaged agency workflow templates (reporting, approval, handoff) with ready-to-adapt workflow_execute definitions.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "agency_roi_snapshot",
+      description: "Compute agency KPI snapshot: runs completed, failure rate, estimated hours saved, manual steps removed, and token savings.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string", description: "Optional ISO timestamp lower bound for KPI window" },
+          assumedMinutesSavedPerSuccessfulRun: { type: "number", description: "Default 20 minutes saved per successful run" },
+          assumedManualStepsRemovedPerRun: { type: "number", description: "Default 4 manual steps removed per successful run" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_connect",
+      description: "Connect or update an ERP connector (odoo, business-central, dynamics). Enforces Odoo Custom-plan gating via metadata.odooPlan.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          type: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          authMode: { type: "string", enum: ["oauth", "api-key"] },
+          config: { type: "object", description: "Connector credentials/settings (provider-specific)" },
+          metadata: { type: "object", description: "Connector metadata (tenantId, tokenExpiresAt, webhookExpiresAt, odooPlan, instanceUrl)" },
+          enabled: { type: "boolean", description: "Enable connector after connect (default: true)" },
+        },
+        required: ["type", "authMode"],
+      },
+    },
+    {
+      name: "erp_connector_sync",
+      description: "Run connector sync with idempotency key, retry policy, and dead-letter safety.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          type: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          direction: { type: "string", enum: ["ingest", "writeback", "two-way"] },
+          entityType: { type: "string", enum: ["lead", "deal", "invoice", "quote", "order"] },
+          externalId: { type: "string" },
+          idempotencyKey: { type: "string" },
+          payload: { type: "object" },
+          maxRetries: { type: "number", description: "Default 3, max 5" },
+        },
+        required: ["type"],
+      },
+    },
+    {
+      name: "erp_connector_status",
+      description: "Get ERP connector health status, token expiry state, and renewal warnings. If type omitted, returns all.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          type: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renew",
+      description: "Renew Business Central webhook subscription. Uses native subscription API when connector has baseUrl, accessToken, notificationUrl, and resource configured.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          type: { type: "string", enum: ["business-central"] },
+          webhookExpiresAt: { type: "string", description: "Optional explicit ISO expiry timestamp" },
+          notificationUrl: { type: "string", description: "Optional webhook callback URL override for renewal request" },
+          resource: { type: "string", description: "Optional Business Central resource path override for renewal request" },
+        },
+        required: ["type"],
+      },
+    },
+    {
+      name: "erp_connector_renew_due",
+      description: "Scan connectors with renewalDue=true and renew automatically (Business Central). Use dryRun=true for no-op planning.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          dryRun: { type: "boolean", description: "If true, report what would be renewed without performing renewals" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_run",
+      description: "Run a packaged ERP product workflow (quote-to-order, lead-to-cash, collections). Returns taskId.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          context: { type: "object", description: "Optional product context (customerName, quoteUrl, leadUrl, invoiceUrl, etc.)" },
+        },
+        required: ["product"],
+      },
+    },
+    {
+      name: "erp_kpis",
+      description: "Get KPI snapshot for ERP product lines (workflow success, sync outcomes, revenue proxy signals).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          since: { type: "string", description: "Optional ISO timestamp lower bound" },
+        },
+        required: ["product"],
+      },
+    },
+    {
+      name: "erp_connector_kpis",
+      description: "Get connector health and renewal KPIs (success/failure rate, due backlog, alert flags).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string", description: "Optional ISO timestamp lower bound for renewal KPI window" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renewals",
+      description: "List connector renewal incidents with filters and cursor-style pagination.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          connector: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          status: { type: "string", enum: ["success", "failed"] },
+          since: { type: "string", description: "Optional ISO lower bound for created_at" },
+          before: { type: "string", description: "Optional ISO cursor (returns rows older than this timestamp)" },
+          limit: { type: "number", description: "Page size (1-200, default 50)" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renewals_export",
+      description: "Export connector renewal incidents as CSV using the same filters as erp_connector_renewals.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          connector: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          status: { type: "string", enum: ["success", "failed"] },
+          since: { type: "string", description: "Optional ISO lower bound for created_at" },
+          before: { type: "string", description: "Optional ISO cursor (returns rows older than this timestamp)" },
+          limit: { type: "number", description: "Page size (1-2000, default 1000)" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renewals_snapshot",
+      description: "Generate CSV+JSON renewal snapshot files and return file paths for reporting pipelines.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string", description: "Optional ISO lower bound for included renewal incidents" },
+          limit: { type: "number", description: "Maximum incidents to include (1-2000, default 1000)" },
+          outputDir: { type: "string", description: "Optional output directory override" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renewals_verify",
+      description: "Verify a renewal snapshot manifest by recalculating artifact hashes and optional HMAC signature.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          manifestPath: { type: "string", description: "Absolute path to *.manifest.json" },
+        },
+        required: ["manifestPath"],
+      },
+    },
+    {
+      name: "erp_connector_trust_report",
+      description: "Build procurement-ready trust report from latest snapshot manifest, verification, and KPI deltas.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          outputDir: { type: "string", description: "Optional snapshot directory override" },
+          since: { type: "string", description: "Optional ISO lower bound for KPI comparison window" },
+          limit: { type: "number", description: "Snapshot generation limit when generateIfMissing=true (1-2000)" },
+          generateIfMissing: { type: "boolean", description: "Generate a new snapshot if no manifest exists (default true)" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_sales_packet",
+      description: "Build one-payload sales packet with trust report, connector KPIs, product KPIs, and latest snapshot artifacts.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          outputDir: { type: "string", description: "Optional snapshot directory override" },
+          since: { type: "string", description: "Optional ISO lower bound for KPI windows" },
+          limit: { type: "number", description: "Snapshot generation limit when generateIfMissing=true (1-2000)" },
+          generateIfMissing: { type: "boolean", description: "Generate a new snapshot if no manifest exists (default true)" },
+          products: { type: "array", items: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] } },
+          format: { type: "string", enum: ["full", "brief", "email"], description: "Output detail level (default: full)" },
+        },
+      },
+    },
+    {
+      name: "erp_pilot_readiness",
+      description: "Evaluate pilot go-live readiness against trust, manifest validity, connector health, and renewal backlog gates.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          outputDir: { type: "string", description: "Optional snapshot directory override" },
+          since: { type: "string", description: "Optional ISO lower bound for KPI windows" },
+          limit: { type: "number", description: "Snapshot generation limit when generateIfMissing=true (1-2000)" },
+          generateIfMissing: { type: "boolean", description: "Generate a new snapshot if none exists (default true)" },
+          requiredTrustScore: { type: "number", description: "Minimum trust score required (0-100, default 80)" },
+          requireProcurementReady: { type: "boolean", description: "Require procurementReady=true in trust report (default true)" },
+        },
+      },
+    },
+    {
+      name: "erp_launch_pilot",
+      description: "Run readiness gate and, if passed, auto-generate launch sales packet (email format).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          outputDir: { type: "string", description: "Optional snapshot directory override" },
+          since: { type: "string", description: "Optional ISO lower bound for KPI windows" },
+          limit: { type: "number", description: "Snapshot generation limit when generateIfMissing=true (1-2000)" },
+          generateIfMissing: { type: "boolean", description: "Generate a new snapshot if none exists (default true)" },
+          requiredTrustScore: { type: "number", description: "Minimum trust score required (0-100, default 80)" },
+          requireProcurementReady: { type: "boolean", description: "Require procurementReady=true in trust report (default true)" },
+          dryRun: { type: "boolean", description: "If true, validate readiness but do not generate packet" },
+        },
+      },
+    },
+    {
+      name: "erp_pilot_launches",
+      description: "List pilot launch attempts and outcomes with optional status/time filters.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          status: { type: "string", enum: ["blocked", "ready", "launched", "delivery_failed", "dry_run"] },
+          since: { type: "string", description: "Optional ISO lower bound for created_at" },
+          limit: { type: "number", description: "Maximum rows to return (1-200, default 50)" },
+        },
+      },
+    },
     // Metrics and observability
     {
       name: "get_metrics",
@@ -1984,6 +2483,11 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
     { uri: "a2a://audit", name: "Audit Log", description: "Recent audit log entries (enterprise)", mimeType: "application/json" },
     { uri: "a2a://license", name: "License", description: "Current license tier and skill gates", mimeType: "application/json" },
     { uri: "a2a://workspaces", name: "Workspaces", description: "Team workspaces and members", mimeType: "application/json" },
+    { uri: "a2a://agency-workflows", name: "Agency Workflows", description: "Packaged agency templates for reporting, approval, and handoff", mimeType: "application/json" },
+    { uri: "a2a://agency-roi", name: "Agency ROI", description: "Agency KPI snapshot for pilot performance and ROI", mimeType: "application/json" },
+    { uri: "a2a://connectors", name: "ERP Connectors", description: "Connector health and auth status for Odoo, Business Central, and Dynamics", mimeType: "application/json" },
+    { uri: "a2a://connectors-kpis", name: "ERP Connector KPIs", description: "Connector reliability and renewal KPI snapshot", mimeType: "application/json" },
+    { uri: "a2a://connector-renewals", name: "ERP Connector Renewals", description: "Recent connector renewal incidents (success/failure feed)", mimeType: "application/json" },
   ];
   for (const card of workerCards) {
     resources.push({
@@ -2057,6 +2561,59 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
   if (uri === "a2a://workspaces") {
     return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listWorkspaces(), null, 2) }] };
+  }
+
+  if (uri === "a2a://agency-workflows") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify({
+          summary: getAgencyProductSummary(),
+          templates: getAgencyWorkflowTemplates(),
+        }, null, 2),
+      }],
+    };
+  }
+
+  if (uri === "a2a://agency-roi") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(getAgencyRoiSnapshot(), null, 2),
+      }],
+    };
+  }
+
+  if (uri === "a2a://connectors") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(listConnectorStatuses(), null, 2),
+      }],
+    };
+  }
+
+  if (uri === "a2a://connectors-kpis") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(getConnectorKpis(), null, 2),
+      }],
+    };
+  }
+
+  if (uri === "a2a://connector-renewals") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(listConnectorRenewals({ limit: 50 }), null, 2),
+      }],
+    };
   }
 
   const workerMatch = uri.match(/^a2a:\/\/workers\/([^/]+)\/card$/);
@@ -2292,6 +2849,758 @@ async function pollWorkerHealth() {
   }
 }
 
+function randomJitterMs(maxJitterMs: number): number {
+  if (maxJitterMs <= 0) return 0;
+  return Math.floor(Math.random() * (maxJitterMs + 1));
+}
+
+function startConnectorRenewalScheduler(): () => void {
+  const enabled = CONFIG.erp.autoRenewEnabled;
+  const intervalMs = Math.max(60_000, CONFIG.erp.renewalSweepIntervalMs);
+  const jitterMs = Math.max(0, CONFIG.erp.renewalSweepJitterMs);
+  const breaker = getBreaker("erp-renewal:business-central", {
+    failureThreshold: 3,
+    cooldownMs: Math.max(intervalMs, 5 * 60 * 1000),
+    callTimeoutMs: Math.min(intervalMs, 120_000),
+    successThreshold: 1,
+  });
+
+  if (!enabled) {
+    process.stderr.write("[erp-renewal] scheduler disabled by config\n");
+    return () => {};
+  }
+
+  process.stderr.write(`[erp-renewal] scheduler enabled (interval=${intervalMs}ms, jitter<=${jitterMs}ms)\n`);
+
+  let stopped = false;
+  let inFlight = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const runSweep = async () => {
+    if (inFlight) {
+      process.stderr.write("[erp-renewal] previous sweep still in progress, skipping overlap\n");
+      return;
+    }
+    inFlight = true;
+    const startedAt = Date.now();
+    try {
+      const result = await breaker.call(() => renewDueConnectors());
+      process.stderr.write(
+        `[erp-renewal] sweep complete: scanned=${result.scanned} due=${result.due} renewed=${result.renewed} failed=${result.failed} skipped=${result.skipped} durationMs=${Date.now() - startedAt}\n`
+      );
+    } catch (err) {
+      if (err instanceof CircuitOpenError) {
+        process.stderr.write(`[erp-renewal] sweep blocked by circuit breaker (retryAfterMs=${err.retryAfterMs})\n`);
+      } else {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[erp-renewal] sweep failed: ${msg}\n`);
+      }
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const scheduleNext = () => {
+    if (stopped) return;
+    const delay = intervalMs + randomJitterMs(jitterMs);
+    timer = setTimeout(async () => {
+      await runSweep();
+      scheduleNext();
+    }, delay);
+    timer.unref?.();
+  };
+
+  scheduleNext();
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+}
+
+function pruneSnapshotExports(dir: string, retentionDays: number): void {
+  const maxAgeMs = Math.max(1, retentionDays) * 24 * 60 * 60 * 1000;
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    try {
+      const stats = statSync(fullPath);
+      if (!stats.isFile()) continue;
+      if (stats.mtimeMs < cutoff) unlinkSync(fullPath);
+    } catch {}
+  }
+}
+
+async function writeConnectorRenewalSnapshot(input: { since?: string; limit?: number; outputDir?: string } = {}): Promise<{
+  generatedAt: string;
+  csvPath: string;
+  jsonPath: string;
+  manifestPath: string;
+  csvSha256: string;
+  jsonSha256: string;
+  manifestSha256: string;
+  signature?: string;
+  rowCount: number;
+  failedCount: number;
+}> {
+  const outputDir = input.outputDir ?? CONFIG.erp.snapshotOutputDir;
+  const snapshot = buildConnectorRenewalSnapshot({
+    since: input.since,
+    limit: input.limit,
+  });
+  mkdirSync(outputDir, { recursive: true });
+  const stamp = snapshot.generatedAt.replaceAll(":", "-");
+  const csvPath = join(outputDir, `renewal-snapshot-${stamp}.csv`);
+  const jsonPath = join(outputDir, `renewal-snapshot-${stamp}.json`);
+  const manifestPath = join(outputDir, `renewal-snapshot-${stamp}.manifest.json`);
+  const jsonPayload = JSON.stringify({
+    generatedAt: snapshot.generatedAt,
+    since: snapshot.since,
+    limit: snapshot.limit,
+    rowCount: snapshot.rowCount,
+    failedCount: snapshot.failedCount,
+    kpis: snapshot.kpis,
+  }, null, 2);
+  const csvSha256 = createHash("sha256").update(snapshot.csv).digest("hex");
+  const jsonSha256 = createHash("sha256").update(jsonPayload).digest("hex");
+  const manifestBase: Record<string, unknown> = {
+    manifestVersion: "1.0",
+    generatedAt: snapshot.generatedAt,
+    generatedBy: {
+      service: "a2a-mcp-orchestrator",
+      version: ORCHESTRATOR_VERSION,
+    },
+    period: {
+      since: snapshot.since ?? null,
+      until: snapshot.generatedAt,
+    },
+    summary: {
+      rowCount: snapshot.rowCount,
+      failedCount: snapshot.failedCount,
+      limit: snapshot.limit,
+    },
+    artifacts: [
+      { type: "csv", path: csvPath, sha256: csvSha256 },
+      { type: "json", path: jsonPath, sha256: jsonSha256 },
+    ],
+  };
+  let signature: string | undefined;
+  if (CONFIG.erp.snapshotSigningKey) {
+    const canonical = JSON.stringify(manifestBase);
+    signature = createHmac("sha256", CONFIG.erp.snapshotSigningKey).update(canonical).digest("hex");
+    manifestBase.signature = {
+      algorithm: "hmac-sha256",
+      value: signature,
+    };
+  }
+  const manifestPayload = JSON.stringify(manifestBase, null, 2);
+  const manifestSha256 = createHash("sha256").update(manifestPayload).digest("hex");
+  await Bun.write(csvPath, snapshot.csv);
+  await Bun.write(jsonPath, jsonPayload);
+  await Bun.write(manifestPath, manifestPayload);
+  pruneSnapshotExports(outputDir, CONFIG.erp.snapshotRetentionDays);
+  return {
+    generatedAt: snapshot.generatedAt,
+    csvPath,
+    jsonPath,
+    manifestPath,
+    csvSha256,
+    jsonSha256,
+    manifestSha256,
+    signature,
+    rowCount: snapshot.rowCount,
+    failedCount: snapshot.failedCount,
+  };
+}
+
+async function verifyConnectorRenewalManifest(manifestPath: string): Promise<{
+  manifestPath: string;
+  valid: boolean;
+  hashValid: boolean;
+  signatureValid?: boolean;
+  errors: string[];
+}> {
+  const errors: string[] = [];
+  let manifestRaw = "";
+  try {
+    manifestRaw = await Bun.file(manifestPath).text();
+  } catch {
+    return { manifestPath, valid: false, hashValid: false, errors: ["manifest file not readable"] };
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(manifestRaw) as Record<string, unknown>;
+  } catch {
+    return { manifestPath, valid: false, hashValid: false, errors: ["manifest is not valid JSON"] };
+  }
+
+  const artifacts = Array.isArray(parsed.artifacts) ? parsed.artifacts as Array<Record<string, unknown>> : [];
+  let hashValid = true;
+  for (const artifact of artifacts) {
+    const path = typeof artifact.path === "string" ? artifact.path : "";
+    const expected = typeof artifact.sha256 === "string" ? artifact.sha256 : "";
+    if (!path || !expected) {
+      hashValid = false;
+      errors.push("artifact missing path or sha256");
+      continue;
+    }
+    let content = "";
+    try {
+      content = await Bun.file(path).text();
+    } catch {
+      hashValid = false;
+      errors.push(`artifact unreadable: ${path}`);
+      continue;
+    }
+    const actual = createHash("sha256").update(content).digest("hex");
+    if (actual !== expected) {
+      hashValid = false;
+      errors.push(`artifact hash mismatch: ${path}`);
+    }
+  }
+
+  const signatureObj = (typeof parsed.signature === "object" && parsed.signature !== null)
+    ? parsed.signature as Record<string, unknown>
+    : null;
+  let signatureValid: boolean | undefined;
+  if (signatureObj && typeof signatureObj.value === "string") {
+    if (!CONFIG.erp.snapshotSigningKey) {
+      signatureValid = false;
+      errors.push("signature present but A2A_ERP_SNAPSHOT_SIGNING_KEY is not configured");
+    } else {
+      const signatureValue = signatureObj.value;
+      const unsigned = { ...parsed };
+      delete unsigned.signature;
+      const canonical = JSON.stringify(unsigned);
+      const expectedSig = createHmac("sha256", CONFIG.erp.snapshotSigningKey).update(canonical).digest("hex");
+      signatureValid = signatureValue === expectedSig;
+      if (!signatureValid) {
+        errors.push("manifest signature mismatch");
+      }
+    }
+  }
+
+  const valid = hashValid && (signatureValid === undefined || signatureValid === true);
+  return { manifestPath, valid, hashValid, signatureValid, errors };
+}
+
+function findLatestManifestPath(outputDir: string): string | null {
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(outputDir);
+  } catch {
+    return null;
+  }
+  const manifests = entries
+    .filter(name => name.endsWith(".manifest.json"))
+    .map(name => join(outputDir, name));
+  if (manifests.length === 0) return null;
+  manifests.sort((a, b) => {
+    try {
+      return statSync(b).mtimeMs - statSync(a).mtimeMs;
+    } catch {
+      return 0;
+    }
+  });
+  return manifests[0] ?? null;
+}
+
+async function buildConnectorTrustReport(input: {
+  outputDir?: string;
+  since?: string;
+  limit?: number;
+  generateIfMissing?: boolean;
+} = {}): Promise<Record<string, unknown>> {
+  const outputDir = input.outputDir ?? CONFIG.erp.snapshotOutputDir;
+  const generateIfMissing = input.generateIfMissing !== false;
+  let manifestPath = findLatestManifestPath(outputDir);
+
+  if (!manifestPath && generateIfMissing) {
+    const snap = await writeConnectorRenewalSnapshot({
+      outputDir,
+      since: input.since,
+      limit: input.limit,
+    });
+    manifestPath = snap.manifestPath;
+  }
+
+  const currentKpis = getConnectorKpis({ since: input.since });
+
+  if (!manifestPath) {
+    return {
+      generatedAt: new Date().toISOString(),
+      outputDir,
+      snapshotFound: false,
+      verification: {
+        valid: false,
+        errors: ["No snapshot manifest found"],
+      },
+      currentKpis,
+      trustScore: 0,
+      procurementReady: false,
+      recommendations: [
+        "Generate a snapshot via /v1/connectors/renewals/snapshot before sharing trust evidence.",
+      ],
+    };
+  }
+
+  const verification = await verifyConnectorRenewalManifest(manifestPath);
+  let manifest: Record<string, unknown> = {};
+  try {
+    manifest = JSON.parse(await Bun.file(manifestPath).text()) as Record<string, unknown>;
+  } catch {}
+
+  const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts as Array<Record<string, unknown>> : [];
+  const jsonArtifactPath = artifacts.find(a => a.type === "json" && typeof a.path === "string")?.path as string | undefined;
+  let snapshotJson: Record<string, unknown> | null = null;
+  if (jsonArtifactPath) {
+    try {
+      snapshotJson = JSON.parse(await Bun.file(jsonArtifactPath).text()) as Record<string, unknown>;
+    } catch {
+      snapshotJson = null;
+    }
+  }
+
+  const currentConnectors = (currentKpis.connectors as Record<string, unknown> | undefined) ?? {};
+  const currentRenewals = (currentKpis.renewals as Record<string, unknown> | undefined) ?? {};
+  const snapshotKpis = (snapshotJson?.kpis as Record<string, unknown> | undefined) ?? {};
+  const prevConnectors = (snapshotKpis.connectors as Record<string, unknown> | undefined) ?? {};
+  const prevRenewals = (snapshotKpis.renewals as Record<string, unknown> | undefined) ?? {};
+
+  const toNum = (v: unknown): number | null => typeof v === "number" ? v : null;
+  const renewalDueDelta = (() => {
+    const curr = toNum(currentConnectors.renewalDue);
+    const prev = toNum(prevConnectors.renewalDue);
+    return curr !== null && prev !== null ? curr - prev : null;
+  })();
+  const failedRunsDelta = (() => {
+    const curr = toNum(currentRenewals.failedRuns);
+    const prev = toNum(prevRenewals.failedRuns);
+    return curr !== null && prev !== null ? curr - prev : null;
+  })();
+  const successRateDeltaPct = (() => {
+    const curr = toNum(currentRenewals.successRatePct);
+    const prev = toNum(prevRenewals.successRatePct);
+    return curr !== null && prev !== null ? Number((curr - prev).toFixed(1)) : null;
+  })();
+
+  const unhealthy = toNum(currentConnectors.unhealthy) ?? 0;
+  const degraded = toNum(currentConnectors.degraded) ?? 0;
+  const backlog = toNum(currentConnectors.renewalDue) ?? 0;
+  let trustScore = 100;
+  if (!verification.valid) trustScore -= 40;
+  if (unhealthy > 0) trustScore -= Math.min(30, unhealthy * 10);
+  if (degraded > 0) trustScore -= Math.min(20, degraded * 5);
+  if (backlog > 0) trustScore -= Math.min(20, backlog * 5);
+  trustScore = Math.max(0, trustScore);
+
+  const procurementReady = verification.valid && unhealthy === 0 && backlog === 0;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    outputDir,
+    snapshotFound: true,
+    latestManifestPath: manifestPath,
+    verification,
+    currentKpis,
+    snapshotKpis,
+    deltas: {
+      renewalDueDelta,
+      failedRunsDelta,
+      successRateDeltaPct,
+    },
+    trustScore,
+    procurementReady,
+  };
+}
+
+async function buildConnectorSalesPacket(input: {
+  outputDir?: string;
+  since?: string;
+  limit?: number;
+  generateIfMissing?: boolean;
+  products?: Array<"quote-to-order" | "lead-to-cash" | "collections">;
+  format?: "full" | "brief" | "email";
+} = {}): Promise<Record<string, unknown>> {
+  const trustReport = await buildConnectorTrustReport({
+    outputDir: input.outputDir,
+    since: input.since,
+    limit: input.limit,
+    generateIfMissing: input.generateIfMissing,
+  });
+
+  const selectedProducts = input.products && input.products.length > 0
+    ? input.products
+    : (["quote-to-order", "lead-to-cash", "collections"] as const);
+
+  const productKpis: Record<string, unknown> = {};
+  for (const product of selectedProducts) {
+    productKpis[product] = getProductKpis(product, { since: input.since });
+  }
+
+  const trust = trustReport as Record<string, unknown>;
+  const format = input.format ?? "full";
+  const latestManifestPath = typeof trust.latestManifestPath === "string" ? trust.latestManifestPath : undefined;
+  let artifacts: Array<Record<string, unknown>> = [];
+  if (latestManifestPath) {
+    try {
+      const manifest = JSON.parse(await Bun.file(latestManifestPath).text()) as Record<string, unknown>;
+      if (Array.isArray(manifest.artifacts)) {
+        artifacts = manifest.artifacts as Array<Record<string, unknown>>;
+      }
+    } catch {}
+  }
+
+  const fullPacket = {
+    generatedAt: new Date().toISOString(),
+    packetType: "connector-sales-packet",
+    format,
+    timeframe: { since: input.since ?? "all_time" },
+    products: selectedProducts,
+    summary: {
+      trustScore: trust.trustScore ?? null,
+      procurementReady: trust.procurementReady ?? false,
+      latestManifestPath: latestManifestPath ?? null,
+    },
+    trustReport,
+    connectorKpis: getConnectorKpis({ since: input.since }),
+    productKpis,
+    artifacts,
+  };
+
+  if (format === "brief") {
+    const trustScore = typeof fullPacket.summary.trustScore === "number" ? fullPacket.summary.trustScore : 0;
+    const procurementReady = fullPacket.summary.procurementReady === true;
+    const renewalSuccessRate = (() => {
+      const renewals = (fullPacket.connectorKpis as Record<string, unknown>).renewals as Record<string, unknown> | undefined;
+      return renewals && typeof renewals.successRatePct === "number" ? renewals.successRatePct : null;
+    })();
+    const unhealthy = (() => {
+      const connectors = (fullPacket.connectorKpis as Record<string, unknown>).connectors as Record<string, unknown> | undefined;
+      return connectors && typeof connectors.unhealthy === "number" ? connectors.unhealthy : 0;
+    })();
+    const renewalDue = (() => {
+      const connectors = (fullPacket.connectorKpis as Record<string, unknown>).connectors as Record<string, unknown> | undefined;
+      return connectors && typeof connectors.renewalDue === "number" ? connectors.renewalDue : 0;
+    })();
+
+    const executiveSummary = [
+      `Trust score is ${trustScore}/100 and procurement readiness is ${procurementReady ? "YES" : "NO"}.`,
+      `Renewal reliability is ${renewalSuccessRate ?? 0}% with ${renewalDue} due renewals currently queued.`,
+      `Operational health shows ${unhealthy} unhealthy connector(s), guiding risk posture for rollout decisions.`,
+    ];
+    const nextActions = [
+      renewalDue > 0 ? "Run renewal sweep now to clear due backlog before buyer review." : "Keep automated renewal sweep running to preserve zero-backlog posture.",
+      unhealthy > 0 ? "Investigate unhealthy connectors and attach remediation ETA to the proposal." : "Highlight healthy connector state as a proof point in outbound proposals.",
+      procurementReady ? "Share this packet as primary due-diligence evidence." : "Regenerate packet after remediation to reach procurement-ready status.",
+    ];
+
+    return {
+      generatedAt: fullPacket.generatedAt,
+      packetType: fullPacket.packetType,
+      format,
+      timeframe: fullPacket.timeframe,
+      summary: fullPacket.summary,
+      executiveSummary,
+      verification: (trust.verification as Record<string, unknown> | undefined) ?? {},
+      deltas: (trust.deltas as Record<string, unknown> | undefined) ?? {},
+      connectorHighlights: {
+        renewals: (fullPacket.connectorKpis as Record<string, unknown>).renewals ?? {},
+        alerting: (fullPacket.connectorKpis as Record<string, unknown>).alerting ?? {},
+      },
+      productHighlights: Object.fromEntries(
+        Object.entries(productKpis).map(([product, kpi]) => [
+          product,
+          {
+            workflowRuns: (kpi as Record<string, unknown>).workflowRuns ?? {},
+            revenueSignal: (kpi as Record<string, unknown>).revenueSignal ?? {},
+          },
+        ]),
+      ),
+      artifactPaths: artifacts.map((a) => ({
+        type: a.type,
+        path: a.path,
+      })),
+      nextActions,
+    };
+  }
+
+  if (format === "email") {
+    const trustScore = typeof fullPacket.summary.trustScore === "number" ? fullPacket.summary.trustScore : 0;
+    const procurementReady = fullPacket.summary.procurementReady === true;
+    const verification = (trust.verification as Record<string, unknown> | undefined) ?? {};
+    const verificationValid = verification.valid === true;
+    const connectorKpis = fullPacket.connectorKpis as Record<string, unknown>;
+    const renewals = (connectorKpis.renewals as Record<string, unknown> | undefined) ?? {};
+    const alerts = (connectorKpis.alerting as Record<string, unknown> | undefined) ?? {};
+    const renewalSuccessRate = typeof renewals.successRatePct === "number" ? renewals.successRatePct : 0;
+    const failedRuns = typeof renewals.failedRuns === "number" ? renewals.failedRuns : 0;
+    const unhealthy = typeof alerts.unhealthyConnectors === "number" ? alerts.unhealthyConnectors : 0;
+    const degraded = typeof alerts.degradedConnectors === "number" ? alerts.degradedConnectors : 0;
+    const latestManifestPath = typeof fullPacket.summary.latestManifestPath === "string"
+      ? fullPacket.summary.latestManifestPath
+      : "(not generated)";
+
+    const subject = procurementReady
+      ? `ERP Reliability Packet: Procurement-Ready (${trustScore}/100)`
+      : `ERP Reliability Update: Trust Score ${trustScore}/100`;
+
+    const body = [
+      `## Executive Update`,
+      ``,
+      `Current trust score is **${trustScore}/100** and procurement readiness is **${procurementReady ? "YES" : "NO"}**.`,
+      `Manifest verification is **${verificationValid ? "VALID" : "NOT VALID"}** and renewal success rate is **${renewalSuccessRate}%**.`,
+      ``,
+      `## Operational Signals`,
+      ``,
+      `- Failed renewal runs: **${failedRuns}**`,
+      `- Unhealthy connectors: **${unhealthy}**`,
+      `- Degraded connectors: **${degraded}**`,
+      ``,
+      `## Evidence Artifacts`,
+      ``,
+      `- Latest manifest: \`${latestManifestPath}\``,
+      ...artifacts.map((a) => `- ${String(a.type)}: \`${String(a.path ?? "")}\``),
+      ``,
+      `## Recommended Next Step`,
+      ``,
+      procurementReady
+        ? `Proceed with buyer due diligence using this packet as primary operational evidence.`
+        : `Run remediation on unhealthy/degraded connectors, regenerate packet, and then reshare with buyer.`,
+    ].join("\n");
+
+    return {
+      generatedAt: fullPacket.generatedAt,
+      packetType: fullPacket.packetType,
+      format,
+      subject,
+      body,
+      summary: fullPacket.summary,
+      verification,
+      artifactPaths: artifacts.map((a) => ({
+        type: a.type,
+        path: a.path,
+      })),
+    };
+  }
+
+  return fullPacket;
+}
+
+async function buildPilotReadiness(input: {
+  outputDir?: string;
+  since?: string;
+  limit?: number;
+  generateIfMissing?: boolean;
+  requiredTrustScore?: number;
+  requireProcurementReady?: boolean;
+} = {}): Promise<Record<string, unknown>> {
+  const requiredTrustScore = input.requiredTrustScore ?? 80;
+  const requireProcurementReady = input.requireProcurementReady !== false;
+
+  const trustReport = await buildConnectorTrustReport({
+    outputDir: input.outputDir,
+    since: input.since,
+    limit: input.limit,
+    generateIfMissing: input.generateIfMissing,
+  });
+  const connectorStatuses = listConnectorStatuses();
+  const connectorKpis = getConnectorKpis({ since: input.since });
+  const trust = trustReport as Record<string, unknown>;
+
+  const trustScore = typeof trust.trustScore === "number" ? trust.trustScore : 0;
+  const procurementReady = trust.procurementReady === true;
+  const verification = (trust.verification as Record<string, unknown> | undefined) ?? {};
+  const manifestValid = verification.valid === true;
+  const enabledConnectors = connectorStatuses.filter(c => c.enabled);
+  const healthyEnabled = enabledConnectors.filter(c => c.health === "healthy");
+  const connectorsSummary = (connectorKpis.connectors as Record<string, unknown> | undefined) ?? {};
+  const renewalDue = typeof connectorsSummary.renewalDue === "number" ? connectorsSummary.renewalDue : 0;
+  const unhealthy = typeof connectorsSummary.unhealthy === "number" ? connectorsSummary.unhealthy : 0;
+
+  const checks = {
+    hasConnectedConnector: enabledConnectors.length > 0,
+    hasHealthyConnector: healthyEnabled.length > 0,
+    zeroRenewalBacklog: renewalDue === 0,
+    manifestValid,
+    trustScoreThresholdMet: trustScore >= requiredTrustScore,
+    procurementReady: requireProcurementReady ? procurementReady : true,
+    noUnhealthyConnectors: unhealthy === 0,
+  };
+  const ready = Object.values(checks).every(Boolean);
+
+  const blockers: string[] = [];
+  if (!checks.hasConnectedConnector) blockers.push("No connected ERP connector is enabled.");
+  if (!checks.hasHealthyConnector) blockers.push("No enabled connector is currently healthy.");
+  if (!checks.zeroRenewalBacklog) blockers.push(`Renewal backlog is ${renewalDue}; must be 0 for pilot launch.`);
+  if (!checks.manifestValid) blockers.push("Latest snapshot manifest is not valid.");
+  if (!checks.trustScoreThresholdMet) blockers.push(`Trust score ${trustScore} is below required threshold ${requiredTrustScore}.`);
+  if (!checks.procurementReady) blockers.push("Procurement readiness flag is false.");
+  if (!checks.noUnhealthyConnectors) blockers.push(`Unhealthy connectors detected: ${unhealthy}.`);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    ready,
+    requiredTrustScore,
+    requireProcurementReady,
+    checks,
+    blockers,
+    trustReport,
+    connectorKpis,
+    connectors: connectorStatuses,
+  };
+}
+
+async function launchPilot(input: {
+  outputDir?: string;
+  since?: string;
+  limit?: number;
+  generateIfMissing?: boolean;
+  requiredTrustScore?: number;
+  requireProcurementReady?: boolean;
+  dryRun?: boolean;
+} = {}): Promise<Record<string, unknown>> {
+  const readiness = await buildPilotReadiness({
+    outputDir: input.outputDir,
+    since: input.since,
+    limit: input.limit,
+    generateIfMissing: input.generateIfMissing,
+    requiredTrustScore: input.requiredTrustScore,
+    requireProcurementReady: input.requireProcurementReady,
+  });
+
+  const ready = (readiness.ready === true);
+  if (!ready) {
+    const launchRunId = createPilotLaunchRun({
+      status: "blocked",
+      readiness,
+      error: "Pilot readiness checks did not pass",
+    });
+    return {
+      launched: false,
+      status: "blocked",
+      launchRunId,
+      reason: "Pilot readiness checks did not pass",
+      readiness,
+      blockers: Array.isArray(readiness.blockers) ? readiness.blockers : [],
+    };
+  }
+
+  if (input.dryRun === true) {
+    const launchRunId = createPilotLaunchRun({
+      status: "dry_run",
+      readiness,
+      delivery: { mode: "dry_run" },
+    });
+    return {
+      launched: false,
+      status: "dry_run",
+      launchRunId,
+      dryRun: true,
+      readiness,
+      message: "Pilot is launch-ready. Dry-run mode skipped packet generation.",
+    };
+  }
+
+  const launchRunId = createPilotLaunchRun({
+    status: "ready",
+    readiness,
+  });
+
+  try {
+    const packet = await buildConnectorSalesPacket({
+      outputDir: input.outputDir,
+      since: input.since,
+      limit: input.limit,
+      generateIfMissing: input.generateIfMissing,
+      format: "email",
+    });
+
+    updatePilotLaunchRun(launchRunId, {
+      status: "launched",
+      salesPacket: packet,
+      delivery: { channel: "email", delivered: true },
+      error: undefined,
+    });
+
+    return {
+      launched: true,
+      status: "launched",
+      launchRunId,
+      launchedAt: new Date().toISOString(),
+      readiness,
+      salesPacket: packet,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    updatePilotLaunchRun(launchRunId, {
+      status: "delivery_failed",
+      delivery: { channel: "email", delivered: false },
+      error: message,
+    });
+    return {
+      launched: false,
+      status: "delivery_failed",
+      launchRunId,
+      readiness,
+      error: message,
+    };
+  }
+}
+
+function startConnectorRenewalSnapshotScheduler(): () => void {
+  if (!CONFIG.erp.snapshotExportEnabled) {
+    process.stderr.write("[erp-snapshot] scheduler disabled by config\n");
+    return () => {};
+  }
+  const intervalMs = Math.max(60_000, CONFIG.erp.snapshotExportIntervalMs);
+  const jitterMs = Math.max(0, CONFIG.erp.renewalSweepJitterMs);
+  process.stderr.write(`[erp-snapshot] scheduler enabled (interval=${intervalMs}ms, jitter<=${jitterMs}ms, dir=${CONFIG.erp.snapshotOutputDir})\n`);
+
+  let stopped = false;
+  let inFlight = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const run = async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const out = await writeConnectorRenewalSnapshot();
+      process.stderr.write(`[erp-snapshot] exported renewal snapshot rows=${out.rowCount} failed=${out.failedCount} csv=${out.csvPath} manifest=${out.manifestPath}\n`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[erp-snapshot] snapshot export failed: ${msg}\n`);
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const scheduleNext = () => {
+    if (stopped) return;
+    const delay = intervalMs + randomJitterMs(jitterMs);
+    timer = setTimeout(async () => {
+      await run();
+      scheduleNext();
+    }, delay);
+    timer.unref?.();
+  };
+  scheduleNext();
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+}
+
 // ── A2A HTTP Server ─────────────────────────────────────────────
 async function startHttpServer() {
   const app = Fastify({ logger: false, connectionTimeout: 300_000 });
@@ -2341,11 +3650,13 @@ async function startHttpServer() {
     for (const w of WORKERS) {
       workerStatus[w.name] = workerHealth.get(w.name)?.healthy ?? false;
     }
+    const connectorKpis = getConnectorKpis();
     return {
       status: "ok",
       uptime: process.uptime(),
       workers: workerStatus,
       tasks: { total: listTasks().length, active: listTasks("working").length },
+      connectors: connectorKpis,
     };
   });
 
@@ -2584,6 +3895,351 @@ async function startHttpServer() {
     }
   });
 
+  // ── ERP Expansion APIs ───────────────────────────────────────
+  app.post<{ Params: { type: string }; Body: unknown }>("/v1/connectors/:type/connect", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const status = connectConnector(request.params.type, request.body);
+      return { status: "connected", connector: status };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { type: string }; Body: unknown }>("/v1/connectors/:type/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const result = await syncConnector(request.params.type, request.body);
+      return result;
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { type: string } }>("/v1/connectors/:type/status", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getConnectorStatus(request.params.type);
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get("/v1/connectors/status", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    return listConnectorStatuses();
+  });
+
+  app.post<{ Body: { webhookExpiresAt?: string; notificationUrl?: string; resource?: string } }>("/v1/connectors/business-central/renew", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await renewBusinessCentralSubscription({
+        webhookExpiresAt: request.body?.webhookExpiresAt,
+        notificationUrl: request.body?.notificationUrl,
+        resource: request.body?.resource,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { dryRun?: boolean } }>("/v1/connectors/renew-due", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await renewDueConnectors({ dryRun: request.body?.dryRun === true });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { since?: string } }>("/v1/connectors/kpis", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getConnectorKpis({ since: request.query?.since });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { connector?: string; status?: string; since?: string; before?: string; limit?: string } }>("/v1/connectors/renewals", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listConnectorRenewals({
+        connector: request.query?.connector,
+        status: request.query?.status,
+        since: request.query?.since,
+        before: request.query?.before,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { connector?: string; status?: string; since?: string; before?: string; limit?: string } }>("/v1/connectors/renewals/export.csv", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      const csv = exportConnectorRenewalsCsv({
+        connector: request.query?.connector,
+        status: request.query?.status,
+        since: request.query?.since,
+        before: request.query?.before,
+        limit,
+      });
+      reply.header("Content-Type", "text/csv; charset=utf-8");
+      reply.header("Content-Disposition", "attachment; filename=\"connector-renewals.csv\"");
+      return csv;
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { since?: string; limit?: number; outputDir?: string } }>("/v1/connectors/renewals/snapshot", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await writeConnectorRenewalSnapshot({
+        since: request.body?.since,
+        limit: request.body?.limit,
+        outputDir: request.body?.outputDir,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { manifestPath: string } }>("/v1/connectors/renewals/verify", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await verifyConnectorRenewalManifest(request.body?.manifestPath);
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { outputDir?: string; since?: string; limit?: string; generateIfMissing?: string } }>("/v1/connectors/trust-report", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      const genRaw = request.query?.generateIfMissing;
+      const generateIfMissing = genRaw === undefined ? undefined : genRaw !== "false";
+      return await buildConnectorTrustReport({
+        outputDir: request.query?.outputDir,
+        since: request.query?.since,
+        limit,
+        generateIfMissing,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { outputDir?: string; since?: string; limit?: string; generateIfMissing?: string; products?: string; format?: string } }>("/v1/connectors/sales-packet", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      const genRaw = request.query?.generateIfMissing;
+      const generateIfMissing = genRaw === undefined ? undefined : genRaw !== "false";
+      const formatRaw = request.query?.format;
+      const format = formatRaw === undefined
+        ? undefined
+        : (formatRaw === "full" || formatRaw === "brief" || formatRaw === "email" ? formatRaw : null);
+      if (format === null) {
+        throw new Error("Invalid format. Use 'full', 'brief', or 'email'.");
+      }
+      const products = typeof request.query?.products === "string" && request.query.products.length > 0
+        ? request.query.products.split(",").map(s => s.trim()).filter(Boolean) as Array<"quote-to-order" | "lead-to-cash" | "collections">
+        : undefined;
+      return await buildConnectorSalesPacket({
+        outputDir: request.query?.outputDir,
+        since: request.query?.since,
+        limit,
+        generateIfMissing,
+        products,
+        format: format as "full" | "brief" | "email" | undefined,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { outputDir?: string; since?: string; limit?: string; generateIfMissing?: string; requiredTrustScore?: string; requireProcurementReady?: string } }>("/v1/connectors/pilot-readiness", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      const genRaw = request.query?.generateIfMissing;
+      const generateIfMissing = genRaw === undefined ? undefined : genRaw !== "false";
+      const requiredTrustScoreRaw = request.query?.requiredTrustScore;
+      const requiredTrustScore = typeof requiredTrustScoreRaw === "string" && requiredTrustScoreRaw.length > 0
+        ? Number(requiredTrustScoreRaw)
+        : undefined;
+      const reqProcRaw = request.query?.requireProcurementReady;
+      const requireProcurementReady = reqProcRaw === undefined ? undefined : reqProcRaw !== "false";
+      return await buildPilotReadiness({
+        outputDir: request.query?.outputDir,
+        since: request.query?.since,
+        limit,
+        generateIfMissing,
+        requiredTrustScore,
+        requireProcurementReady,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { outputDir?: string; since?: string; limit?: number; generateIfMissing?: boolean; requiredTrustScore?: number; requireProcurementReady?: boolean; dryRun?: boolean } }>("/v1/connectors/launch-pilot", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await launchPilot({
+        outputDir: request.body?.outputDir,
+        since: request.body?.since,
+        limit: request.body?.limit,
+        generateIfMissing: request.body?.generateIfMissing,
+        requiredTrustScore: request.body?.requiredTrustScore,
+        requireProcurementReady: request.body?.requireProcurementReady,
+        dryRun: request.body?.dryRun,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { status?: string; since?: string; limit?: string } }>("/v1/connectors/pilot-launches", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listPilotLaunchRuns({
+        status: request.query?.status,
+        since: request.query?.since,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { product: string }; Body: Record<string, unknown> }>("/v1/workflows/:product/run", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const product = validateProductType(request.params.product);
+      const context = (request.body?.context as Record<string, unknown> | undefined) ?? {};
+      const workflow = workflowDefinitionFor(product, context);
+
+      const task = createTask({ skillId: `erp:${product}` });
+      markWorking(task.id);
+      const workflowRunId = recordWorkflowRun(product, "running", task.id, context);
+
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+          updateWorkflowRun(workflowRunId, "completed");
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch {}
+          updateWorkflowRun(workflowRunId, "failed", msg);
+        }
+      })();
+
+      return { status: "accepted", product, workflowRunId, taskId: task.id };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { product: string }; Querystring: { since?: string } }>("/v1/kpis/:product", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const product = validateProductType(request.params.product);
+      return getProductKpis(product, { since: request.query?.since });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   // ── Metrics HTTP endpoint ─────────────────────────────────────
   app.get("/metrics", async () => getMetricsSnapshot());
 
@@ -2737,7 +4393,9 @@ async function main() {
 
   // Register graceful shutdown handlers
   installShutdownHandlers();
-  onShutdown(async () => { flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
+  const stopRenewalScheduler = startConnectorRenewalScheduler();
+  const stopSnapshotScheduler = startConnectorRenewalSnapshotScheduler();
+  onShutdown(async () => { stopRenewalScheduler(); stopSnapshotScheduler(); flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
 
   // Start periodic health checks (every 30s)
   pollWorkerHealth().catch(() => {});
