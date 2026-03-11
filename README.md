@@ -273,6 +273,8 @@ The orchestrator exposes 35 tools via the MCP stdio interface. These are the too
 | `erp_onboarding_capture` | Capture onboarding KPI snapshot (`baseline` or `current`) from tracked ERP data |
 | `erp_onboarding_report` | Build baseline-vs-current onboarding report with ROI deltas |
 | `erp_onboarding_list` | List onboarding sessions by status |
+| `erp_commercial_event_record` | Record funnel events (`qualified_call`, `proposal_sent`, `pilot_signed`) |
+| `erp_commercial_kpis` | Track commercial acceptance KPIs against wave targets (10/3/1) |
 
 ### Collaboration
 
@@ -433,6 +435,8 @@ Shared connector core for Odoo, Business Central, and Dynamics CRM with two-way 
 | `GET` | `/v1/onboarding/sessions` | List onboarding sessions (`status`, `limit`) |
 | `POST` | `/v1/onboarding/sessions/{id}/capture` | Capture onboarding snapshot from tracked ERP runs (`phase=baseline|current`) |
 | `GET` | `/v1/onboarding/sessions/{id}/report` | Build onboarding report with baseline/current deltas and expansion recommendation |
+| `POST` | `/v1/commercial/events` | Record commercial funnel event for a product |
+| `GET` | `/v1/commercial/kpis` | Retrieve funnel conversion and target progress KPIs (`product`, `since`) |
 
 Auto-renew scheduler defaults: enabled, hourly sweep interval, up to 5-minute jitter. Override via env:
 `A2A_ERP_AUTO_RENEW_ENABLED`, `A2A_ERP_SWEEP_INTERVAL_MS`, `A2A_ERP_SWEEP_JITTER_MS`.

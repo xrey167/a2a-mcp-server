@@ -80,6 +80,21 @@ const OnboardingListSchema = z.object({
   limit: z.number().int().min(1).max(200).optional().default(50),
 }).strict();
 
+const CommercialEventSchema = z.object({
+  product: ProductTypeSchema,
+  stage: z.enum(["qualified_call", "proposal_sent", "pilot_signed"]),
+  customerName: z.string().min(1),
+  onboardingId: z.string().optional(),
+  valueEur: z.number().nonnegative().optional(),
+  notes: z.string().optional(),
+  occurredAt: z.string().optional(),
+}).strict();
+
+const CommercialKpiFilterSchema = z.object({
+  product: ProductTypeSchema.optional(),
+  since: z.string().optional(),
+}).strict();
+
 interface ConnectorRow {
   type: ConnectorType;
   auth_mode: "oauth" | "api-key";
@@ -162,6 +177,18 @@ interface OnboardingSnapshotRow {
   phase: "baseline" | "current";
   since: string | null;
   metrics_json: string;
+  created_at: string;
+}
+
+interface CommercialPipelineEventRow {
+  id: string;
+  product: ProductType;
+  stage: "qualified_call" | "proposal_sent" | "pilot_signed";
+  customer_name: string;
+  onboarding_id: string | null;
+  value_eur: number | null;
+  notes: string | null;
+  occurred_at: string;
   created_at: string;
 }
 
@@ -270,6 +297,18 @@ export interface OnboardingSnapshot {
   createdAt: string;
 }
 
+export interface CommercialPipelineEvent {
+  id: string;
+  product: ProductType;
+  stage: "qualified_call" | "proposal_sent" | "pilot_signed";
+  customerName: string;
+  onboardingId?: string;
+  valueEur?: number;
+  notes?: string;
+  occurredAt: string;
+  createdAt: string;
+}
+
 const dbPath = process.env.A2A_ERP_DB ?? join(homedir(), ".a2a-mcp", "erp-platform.db");
 const db = new Database(dbPath);
 db.run("PRAGMA journal_mode=WAL");
@@ -366,6 +405,19 @@ db.run(`CREATE TABLE IF NOT EXISTS onboarding_snapshots (
 )`);
 db.run("CREATE INDEX IF NOT EXISTS idx_onboarding_sessions_created ON onboarding_sessions(created_at DESC)");
 db.run("CREATE INDEX IF NOT EXISTS idx_onboarding_snapshots_session_created ON onboarding_snapshots(onboarding_id, created_at DESC)");
+db.run(`CREATE TABLE IF NOT EXISTS commercial_pipeline_events (
+  id TEXT PRIMARY KEY,
+  product TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  customer_name TEXT NOT NULL,
+  onboarding_id TEXT,
+  value_eur REAL,
+  notes TEXT,
+  occurred_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`);
+db.run("CREATE INDEX IF NOT EXISTS idx_commercial_events_product_stage ON commercial_pipeline_events(product, stage)");
+db.run("CREATE INDEX IF NOT EXISTS idx_commercial_events_occurred ON commercial_pipeline_events(occurred_at DESC)");
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -1654,6 +1706,113 @@ export function buildOnboardingReport(input: { onboardingId: string; autoCapture
   };
 }
 
+function toCommercialEvent(row: CommercialPipelineEventRow): CommercialPipelineEvent {
+  return {
+    id: row.id,
+    product: row.product,
+    stage: row.stage,
+    customerName: row.customer_name,
+    onboardingId: row.onboarding_id ?? undefined,
+    valueEur: row.value_eur ?? undefined,
+    notes: row.notes ?? undefined,
+    occurredAt: row.occurred_at,
+    createdAt: row.created_at,
+  };
+}
+
+export function recordCommercialEvent(input: unknown): CommercialPipelineEvent {
+  const parsed = CommercialEventSchema.parse(input);
+  const id = randomUUID();
+  const now = nowIso();
+  const occurredAt = parsed.occurredAt ? new Date(parsed.occurredAt).toISOString() : now;
+  db.run(
+    `INSERT INTO commercial_pipeline_events
+     (id, product, stage, customer_name, onboarding_id, value_eur, notes, occurred_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      parsed.product,
+      parsed.stage,
+      parsed.customerName,
+      parsed.onboardingId ?? null,
+      parsed.valueEur ?? null,
+      parsed.notes ?? null,
+      occurredAt,
+      now,
+    ],
+  );
+  const row = db.query<CommercialPipelineEventRow, [string]>(
+    `SELECT id, product, stage, customer_name, onboarding_id, value_eur, notes, occurred_at, created_at
+     FROM commercial_pipeline_events WHERE id = ?`
+  ).get(id);
+  if (!row) throw new Error("Failed to persist commercial event");
+  return toCommercialEvent(row);
+}
+
+export function getCommercialKpis(filtersInput: unknown = {}): Record<string, unknown> {
+  const filters = CommercialKpiFilterSchema.parse(filtersInput);
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (filters.product) {
+    where.push("product = ?");
+    params.push(filters.product);
+  }
+  if (filters.since) {
+    where.push("occurred_at >= ?");
+    params.push(filters.since);
+  }
+  const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+
+  const rows = db.query<{
+    stage: "qualified_call" | "proposal_sent" | "pilot_signed";
+    cnt: number;
+    pipelineValueEur: number | null;
+  }, unknown[]>(
+    `SELECT stage, COUNT(*) as cnt, SUM(COALESCE(value_eur, 0)) as pipelineValueEur
+     FROM commercial_pipeline_events
+     ${clause}
+     GROUP BY stage`
+  ).all(...params);
+
+  const stageCounts: Record<string, number> = {
+    qualified_call: 0,
+    proposal_sent: 0,
+    pilot_signed: 0,
+  };
+  let pipelineValueEur = 0;
+  for (const row of rows) {
+    stageCounts[row.stage] = row.cnt;
+    pipelineValueEur += num(row.pipelineValueEur);
+  }
+
+  const calls = stageCounts.qualified_call;
+  const proposals = stageCounts.proposal_sent;
+  const signed = stageCounts.pilot_signed;
+  const proposalRate = calls > 0 ? Number(((proposals / calls) * 100).toFixed(1)) : 0;
+  const winRate = proposals > 0 ? Number(((signed / proposals) * 100).toFixed(1)) : 0;
+
+  const targets = { qualifiedCalls: 10, pilotProposals: 3, signedPilots: 1 };
+  return {
+    timeframe: { since: filters.since ?? "all_time" },
+    product: filters.product ?? "all",
+    funnel: {
+      qualifiedCalls: calls,
+      proposalsSent: proposals,
+      pilotsSigned: signed,
+      proposalRatePct: proposalRate,
+      winRatePct: winRate,
+    },
+    targets,
+    progress: {
+      qualifiedCallsPct: Number(((calls / targets.qualifiedCalls) * 100).toFixed(1)),
+      pilotProposalsPct: Number(((proposals / targets.pilotProposals) * 100).toFixed(1)),
+      signedPilotsPct: Number(((signed / targets.signedPilots) * 100).toFixed(1)),
+      targetReached: calls >= targets.qualifiedCalls && proposals >= targets.pilotProposals && signed >= targets.signedPilots,
+    },
+    pipelineValueEur: Math.round(pipelineValueEur),
+  };
+}
+
 export function validateProductType(input: unknown): ProductType {
   return ProductTypeSchema.parse(input);
 }
@@ -1663,6 +1822,7 @@ export function validateConnectorType(input: unknown): ConnectorType {
 }
 
 export function resetErpPlatformForTests(): void {
+  db.run(`DELETE FROM commercial_pipeline_events`);
   db.run(`DELETE FROM onboarding_snapshots`);
   db.run(`DELETE FROM onboarding_sessions`);
   db.run(`DELETE FROM pilot_launch_runs`);

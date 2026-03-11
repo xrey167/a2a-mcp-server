@@ -59,9 +59,11 @@ import {
   createOnboardingSession,
   createPilotLaunchRun,
   exportConnectorRenewalsCsv,
+  getCommercialKpis,
   listOnboardingSessions,
   listConnectorRenewals,
   listPilotLaunchRuns,
+  recordCommercialEvent,
   getConnectorKpis,
   getConnectorStatus,
   getProductKpis,
@@ -776,6 +778,19 @@ const OrchestratorSchemas = {
     status: z.enum(["active", "completed", "paused"]).optional(),
     limit: z.number().int().min(1).max(200).optional().default(50),
   }).strict(),
+  erp_commercial_event_record: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]),
+    stage: z.enum(["qualified_call", "proposal_sent", "pilot_signed"]),
+    customerName: z.string().min(1),
+    onboardingId: z.string().optional(),
+    valueEur: z.number().nonnegative().optional(),
+    notes: z.string().optional(),
+    occurredAt: z.string().optional(),
+  }).strict(),
+  erp_commercial_kpis: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+    since: z.string().optional(),
+  }).strict(),
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -1230,6 +1245,16 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
     case "erp_onboarding_list": {
       const { status, limit } = validateOrchestrator("erp_onboarding_list", args);
       return JSON.stringify(listOnboardingSessions({ status, limit }), null, 2);
+    }
+
+    case "erp_commercial_event_record": {
+      const { product, stage, customerName, onboardingId, valueEur, notes, occurredAt } = validateOrchestrator("erp_commercial_event_record", args);
+      return JSON.stringify(recordCommercialEvent({ product, stage, customerName, onboardingId, valueEur, notes, occurredAt }), null, 2);
+    }
+
+    case "erp_commercial_kpis": {
+      const { product, since } = validateOrchestrator("erp_commercial_kpis", args);
+      return JSON.stringify(getCommercialKpis({ product, since }), null, 2);
     }
 
     // ── Metrics ─────────────────────────────────────────────────
@@ -2302,6 +2327,34 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         properties: {
           status: { type: "string", enum: ["active", "completed", "paused"] },
           limit: { type: "number", description: "Maximum rows to return (1-200, default 50)" },
+        },
+      },
+    },
+    {
+      name: "erp_commercial_event_record",
+      description: "Record a commercial pipeline event (qualified call, proposal sent, pilot signed).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          stage: { type: "string", enum: ["qualified_call", "proposal_sent", "pilot_signed"] },
+          customerName: { type: "string" },
+          onboardingId: { type: "string" },
+          valueEur: { type: "number" },
+          notes: { type: "string" },
+          occurredAt: { type: "string", description: "Optional ISO timestamp" },
+        },
+        required: ["product", "stage", "customerName"],
+      },
+    },
+    {
+      name: "erp_commercial_kpis",
+      description: "Get commercial funnel KPIs against wave targets (10 calls, 3 proposals, 1 signed pilot).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          since: { type: "string", description: "Optional ISO lower bound for occurred_at" },
         },
       },
     },
@@ -4347,6 +4400,43 @@ async function startHttpServer() {
       return buildOnboardingReport({
         onboardingId: request.params.id,
         autoCaptureCurrent,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { product: string; stage: string; customerName: string; onboardingId?: string; valueEur?: number; notes?: string; occurredAt?: string } }>("/v1/commercial/events", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return recordCommercialEvent({
+        product: request.body?.product,
+        stage: request.body?.stage,
+        customerName: request.body?.customerName,
+        onboardingId: request.body?.onboardingId,
+        valueEur: request.body?.valueEur,
+        notes: request.body?.notes,
+        occurredAt: request.body?.occurredAt,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/commercial/kpis", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getCommercialKpis({
+        product: request.query?.product,
+        since: request.query?.since,
       });
     } catch (err) {
       reply.code(400);

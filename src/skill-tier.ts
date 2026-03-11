@@ -42,10 +42,12 @@ const SKILL_TIERS: Record<string, Tier> = {
   erp_pilot_launches: "free",
   erp_onboarding_report: "free",
   erp_onboarding_list: "free",
+  erp_commercial_kpis: "free",
   erp_connector_renewals_snapshot: "pro",
   erp_launch_pilot: "pro",
   erp_onboarding_create: "pro",
   erp_onboarding_capture: "pro",
+  erp_commercial_event_record: "pro",
 
   // Pro tier — advanced workflows & collaboration
   workflow_execute: "pro",

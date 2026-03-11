@@ -7,12 +7,14 @@ import {
   createOnboardingSession,
   createPilotLaunchRun,
   exportConnectorRenewalsCsv,
+  getCommercialKpis,
   getConnectorKpis,
   getConnectorStatus,
   getProductKpis,
   listOnboardingSessions,
   listConnectorRenewals,
   listPilotLaunchRuns,
+  recordCommercialEvent,
   recordWorkflowRun,
   renewDueConnectors,
   renewBusinessCentralSubscription,
@@ -470,5 +472,37 @@ describe("erp-platform", () => {
     expect(report).toHaveProperty("delta");
     const sessions = listOnboardingSessions({ status: "active", limit: 10 });
     expect(sessions.items.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("commercial KPIs track wave funnel targets", () => {
+    for (let i = 0; i < 10; i += 1) {
+      recordCommercialEvent({
+        product: "quote-to-order",
+        stage: "qualified_call",
+        customerName: `Call-${i + 1}`,
+      });
+    }
+    for (let i = 0; i < 3; i += 1) {
+      recordCommercialEvent({
+        product: "quote-to-order",
+        stage: "proposal_sent",
+        customerName: `Proposal-${i + 1}`,
+        valueEur: 2500,
+      });
+    }
+    recordCommercialEvent({
+      product: "quote-to-order",
+      stage: "pilot_signed",
+      customerName: "Signed-1",
+      valueEur: 3000,
+    });
+
+    const kpis = getCommercialKpis({ product: "quote-to-order" });
+    const funnel = kpis.funnel as { qualifiedCalls: number; proposalsSent: number; pilotsSigned: number };
+    const progress = kpis.progress as { targetReached: boolean };
+    expect(funnel.qualifiedCalls).toBe(10);
+    expect(funnel.proposalsSent).toBe(3);
+    expect(funnel.pilotsSigned).toBe(1);
+    expect(progress.targetReached).toBe(true);
   });
 });
