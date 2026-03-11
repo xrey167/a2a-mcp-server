@@ -62,6 +62,24 @@ const ConnectorRenewalSnapshotFilterSchema = z.object({
   limit: z.number().int().min(1).max(2000).optional().default(1000),
 }).strict();
 
+const OnboardingCreateSchema = z.object({
+  customerName: z.string().min(1),
+  product: ProductTypeSchema,
+  connector: ConnectorTypeSchema.optional(),
+  metadata: z.record(z.string(), z.unknown()).optional().default({}),
+}).strict();
+
+const OnboardingCaptureSchema = z.object({
+  onboardingId: z.string().min(1),
+  phase: z.enum(["baseline", "current"]).optional().default("current"),
+  since: z.string().optional(),
+}).strict();
+
+const OnboardingListSchema = z.object({
+  status: z.enum(["active", "completed", "paused"]).optional(),
+  limit: z.number().int().min(1).max(200).optional().default(50),
+}).strict();
+
 interface ConnectorRow {
   type: ConnectorType;
   auth_mode: "oauth" | "api-key";
@@ -125,6 +143,26 @@ interface PilotLaunchRunRow {
   error: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface OnboardingSessionRow {
+  id: string;
+  customer_name: string;
+  product: ProductType;
+  connector_type: ConnectorType | null;
+  status: "active" | "completed" | "paused";
+  metadata_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface OnboardingSnapshotRow {
+  id: string;
+  onboarding_id: string;
+  phase: "baseline" | "current";
+  since: string | null;
+  metrics_json: string;
+  created_at: string;
 }
 
 export interface RetryableSyncError extends Error {
@@ -212,6 +250,26 @@ export interface PilotLaunchRun {
   updatedAt: string;
 }
 
+export interface OnboardingSession {
+  id: string;
+  customerName: string;
+  product: ProductType;
+  connector?: ConnectorType;
+  status: "active" | "completed" | "paused";
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OnboardingSnapshot {
+  id: string;
+  onboardingId: string;
+  phase: "baseline" | "current";
+  since?: string;
+  metrics: Record<string, unknown>;
+  createdAt: string;
+}
+
 const dbPath = process.env.A2A_ERP_DB ?? join(homedir(), ".a2a-mcp", "erp-platform.db");
 const db = new Database(dbPath);
 db.run("PRAGMA journal_mode=WAL");
@@ -288,6 +346,26 @@ db.run(`CREATE TABLE IF NOT EXISTS pilot_launch_runs (
   updated_at TEXT NOT NULL
 )`);
 db.run("CREATE INDEX IF NOT EXISTS idx_pilot_launch_runs_created ON pilot_launch_runs(created_at DESC)");
+db.run(`CREATE TABLE IF NOT EXISTS onboarding_sessions (
+  id TEXT PRIMARY KEY,
+  customer_name TEXT NOT NULL,
+  product TEXT NOT NULL,
+  connector_type TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  metadata_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`);
+db.run(`CREATE TABLE IF NOT EXISTS onboarding_snapshots (
+  id TEXT PRIMARY KEY,
+  onboarding_id TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  since TEXT,
+  metrics_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`);
+db.run("CREATE INDEX IF NOT EXISTS idx_onboarding_sessions_created ON onboarding_sessions(created_at DESC)");
+db.run("CREATE INDEX IF NOT EXISTS idx_onboarding_snapshots_session_created ON onboarding_snapshots(onboarding_id, created_at DESC)");
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -1354,6 +1432,228 @@ export function listPilotLaunchRuns(filtersInput: unknown = {}): { items: PilotL
   };
 }
 
+function toOnboardingSession(row: OnboardingSessionRow): OnboardingSession {
+  return {
+    id: row.id,
+    customerName: row.customer_name,
+    product: row.product,
+    connector: row.connector_type ?? undefined,
+    status: row.status,
+    metadata: parseMetadata(row.metadata_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toOnboardingSnapshot(row: OnboardingSnapshotRow): OnboardingSnapshot {
+  return {
+    id: row.id,
+    onboardingId: row.onboarding_id,
+    phase: row.phase,
+    since: row.since ?? undefined,
+    metrics: JSON.parse(row.metrics_json) as Record<string, unknown>,
+    createdAt: row.created_at,
+  };
+}
+
+function num(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function computeOnboardingDerivedMetrics(product: ProductType, productKpis: Record<string, unknown>): Record<string, unknown> {
+  const workflowRuns = (productKpis.workflowRuns as Record<string, unknown> | undefined) ?? {};
+  const sync = (productKpis.sync as Record<string, unknown> | undefined) ?? {};
+  const completed = num(workflowRuns.completed);
+  const failed = num(workflowRuns.failed);
+  const total = num(workflowRuns.total);
+  const syncSuccess = num(sync.successfulRuns);
+
+  const hoursPerRun = product === "quote-to-order" ? 1.6 : product === "lead-to-cash" ? 1.3 : 1.1;
+  const stepsPerRun = product === "quote-to-order" ? 4 : 3;
+  const failureRatePct = total > 0 ? Number(((failed / total) * 100).toFixed(1)) : 0;
+  const timeSavedHours = Number((completed * hoursPerRun).toFixed(1));
+  const manualStepsRemoved = Math.round(completed * stepsPerRun);
+  const estimatedValueEur = Math.round(timeSavedHours * 85);
+
+  return {
+    completedRuns: completed,
+    failedRuns: failed,
+    totalRuns: total,
+    failureRatePct,
+    successfulSyncs: syncSuccess,
+    manualStepsRemoved,
+    timeSavedHours,
+    estimatedValueEur,
+  };
+}
+
+function getOnboardingSessionRow(id: string): OnboardingSessionRow | null {
+  return db.query<OnboardingSessionRow, [string]>(
+    `SELECT id, customer_name, product, connector_type, status, metadata_json, created_at, updated_at
+     FROM onboarding_sessions WHERE id = ?`
+  ).get(id) ?? null;
+}
+
+export function createOnboardingSession(input: unknown): OnboardingSession {
+  const parsed = OnboardingCreateSchema.parse(input);
+  const id = randomUUID();
+  const now = nowIso();
+  db.run(
+    `INSERT INTO onboarding_sessions (id, customer_name, product, connector_type, status, metadata_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`,
+    [
+      id,
+      parsed.customerName,
+      parsed.product,
+      parsed.connector ?? null,
+      JSON.stringify(parsed.metadata),
+      now,
+      now,
+    ],
+  );
+  const row = getOnboardingSessionRow(id);
+  if (!row) throw new Error("Failed to create onboarding session");
+  return toOnboardingSession(row);
+}
+
+export function listOnboardingSessions(filtersInput: unknown = {}): { items: OnboardingSession[] } {
+  const filters = OnboardingListSchema.parse(filtersInput);
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (filters.status) {
+    where.push("status = ?");
+    params.push(filters.status);
+  }
+  const sql = `SELECT id, customer_name, product, connector_type, status, metadata_json, created_at, updated_at
+               FROM onboarding_sessions
+               ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+               ORDER BY created_at DESC
+               LIMIT ?`;
+  params.push(filters.limit);
+  const rows = db.query<OnboardingSessionRow, unknown[]>(sql).all(...params);
+  return { items: rows.map(toOnboardingSession) };
+}
+
+export function captureOnboardingSnapshot(input: unknown): OnboardingSnapshot {
+  const parsed = OnboardingCaptureSchema.parse(input);
+  const session = getOnboardingSessionRow(parsed.onboardingId);
+  if (!session) throw new Error(`Onboarding session '${parsed.onboardingId}' not found`);
+
+  const since = parsed.since ?? session.created_at;
+  const productKpis = getProductKpis(session.product, { since });
+  const connectorKpis = getConnectorKpis({ since });
+  const connectors = listConnectorStatuses();
+  const derived = computeOnboardingDerivedMetrics(session.product, productKpis);
+
+  const metrics = {
+    capturedAt: nowIso(),
+    since,
+    product: session.product,
+    connectorScope: session.connector_type ?? "all",
+    productKpis,
+    connectorKpis,
+    connectors,
+    derived,
+  };
+
+  const id = randomUUID();
+  db.run(
+    `INSERT INTO onboarding_snapshots (id, onboarding_id, phase, since, metrics_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, session.id, parsed.phase, parsed.since ?? null, JSON.stringify(metrics), nowIso()],
+  );
+
+  const row = db.query<OnboardingSnapshotRow, [string]>(
+    `SELECT id, onboarding_id, phase, since, metrics_json, created_at
+     FROM onboarding_snapshots WHERE id = ?`
+  ).get(id);
+  if (!row) throw new Error("Failed to persist onboarding snapshot");
+  return toOnboardingSnapshot(row);
+}
+
+function deltaNumber(current: number, baseline: number): { current: number; baseline: number; deltaAbs: number; deltaPct: number | null } {
+  const deltaAbs = Number((current - baseline).toFixed(2));
+  if (baseline === 0) return { current, baseline, deltaAbs, deltaPct: null };
+  return {
+    current,
+    baseline,
+    deltaAbs,
+    deltaPct: Number((((current - baseline) / baseline) * 100).toFixed(1)),
+  };
+}
+
+export function buildOnboardingReport(input: { onboardingId: string; autoCaptureCurrent?: boolean } | unknown): Record<string, unknown> {
+  const schema = z.object({
+    onboardingId: z.string().min(1),
+    autoCaptureCurrent: z.boolean().optional().default(true),
+  }).strict();
+  const parsed = schema.parse(input);
+  const row = getOnboardingSessionRow(parsed.onboardingId);
+  if (!row) throw new Error(`Onboarding session '${parsed.onboardingId}' not found`);
+  const session = toOnboardingSession(row);
+
+  const baselineRow = db.query<OnboardingSnapshotRow, [string]>(
+    `SELECT id, onboarding_id, phase, since, metrics_json, created_at
+     FROM onboarding_snapshots
+     WHERE onboarding_id = ? AND phase = 'baseline'
+     ORDER BY created_at ASC
+     LIMIT 1`
+  ).get(parsed.onboardingId) ?? null;
+
+  let currentRow = db.query<OnboardingSnapshotRow, [string]>(
+    `SELECT id, onboarding_id, phase, since, metrics_json, created_at
+     FROM onboarding_snapshots
+     WHERE onboarding_id = ? AND phase = 'current'
+     ORDER BY created_at DESC
+     LIMIT 1`
+  ).get(parsed.onboardingId) ?? null;
+
+  if (!currentRow && parsed.autoCaptureCurrent) {
+    captureOnboardingSnapshot({ onboardingId: parsed.onboardingId, phase: "current" });
+    currentRow = db.query<OnboardingSnapshotRow, [string]>(
+      `SELECT id, onboarding_id, phase, since, metrics_json, created_at
+       FROM onboarding_snapshots
+       WHERE onboarding_id = ? AND phase = 'current'
+       ORDER BY created_at DESC
+       LIMIT 1`
+    ).get(parsed.onboardingId) ?? null;
+  }
+
+  const baseline = baselineRow ? toOnboardingSnapshot(baselineRow) : null;
+  const current = currentRow ? toOnboardingSnapshot(currentRow) : null;
+  const baselineDerived = ((baseline?.metrics.derived as Record<string, unknown> | undefined) ?? {});
+  const currentDerived = ((current?.metrics.derived as Record<string, unknown> | undefined) ?? {});
+
+  const delta = current
+    ? {
+        completedRuns: deltaNumber(num(currentDerived.completedRuns), num(baselineDerived.completedRuns)),
+        failureRatePct: deltaNumber(num(currentDerived.failureRatePct), num(baselineDerived.failureRatePct)),
+        manualStepsRemoved: deltaNumber(num(currentDerived.manualStepsRemoved), num(baselineDerived.manualStepsRemoved)),
+        timeSavedHours: deltaNumber(num(currentDerived.timeSavedHours), num(baselineDerived.timeSavedHours)),
+        estimatedValueEur: deltaNumber(num(currentDerived.estimatedValueEur), num(baselineDerived.estimatedValueEur)),
+      }
+    : null;
+
+  const readyForExpansion = current
+    ? num(currentDerived.completedRuns) >= 5 &&
+      num(currentDerived.failureRatePct) <= 20 &&
+      num(currentDerived.timeSavedHours) >= 8
+    : false;
+
+  return {
+    session,
+    baseline,
+    current,
+    delta,
+    recommendation: {
+      readyForExpansion,
+      nextAction: readyForExpansion
+        ? "Offer second workflow module and annual contract path."
+        : "Continue optimization and run weekly KPI review until thresholds are met.",
+    },
+  };
+}
+
 export function validateProductType(input: unknown): ProductType {
   return ProductTypeSchema.parse(input);
 }
@@ -1363,6 +1663,8 @@ export function validateConnectorType(input: unknown): ConnectorType {
 }
 
 export function resetErpPlatformForTests(): void {
+  db.run(`DELETE FROM onboarding_snapshots`);
+  db.run(`DELETE FROM onboarding_sessions`);
   db.run(`DELETE FROM pilot_launch_runs`);
   db.run(`DELETE FROM connector_dead_letters`);
   db.run(`DELETE FROM connector_renewal_runs`);

@@ -269,6 +269,10 @@ The orchestrator exposes 35 tools via the MCP stdio interface. These are the too
 | `erp_pilot_readiness` | Evaluate pilot go-live readiness gates |
 | `erp_launch_pilot` | Execute launch gate and generate outbound pilot packet |
 | `erp_pilot_launches` | List pilot launch attempts with status filters |
+| `erp_onboarding_create` | Create onboarding session for customer/product KPI tracking |
+| `erp_onboarding_capture` | Capture onboarding KPI snapshot (`baseline` or `current`) from tracked ERP data |
+| `erp_onboarding_report` | Build baseline-vs-current onboarding report with ROI deltas |
+| `erp_onboarding_list` | List onboarding sessions by status |
 
 ### Collaboration
 
@@ -425,6 +429,10 @@ Shared connector core for Odoo, Business Central, and Dynamics CRM with two-way 
 | `GET` | `/v1/connectors/pilot-readiness` | Evaluate pilot readiness (trust score, manifest validity, connector health, zero renewal backlog) |
 | `POST` | `/v1/connectors/launch-pilot` | Run readiness gate and generate launch packet (or return blockers) |
 | `GET` | `/v1/connectors/pilot-launches` | List pilot launch attempts (`status`, `since`, `limit`) with persisted outcomes |
+| `POST` | `/v1/onboarding/sessions` | Create onboarding session (customer + product + optional connector scope) |
+| `GET` | `/v1/onboarding/sessions` | List onboarding sessions (`status`, `limit`) |
+| `POST` | `/v1/onboarding/sessions/{id}/capture` | Capture onboarding snapshot from tracked ERP runs (`phase=baseline|current`) |
+| `GET` | `/v1/onboarding/sessions/{id}/report` | Build onboarding report with baseline/current deltas and expansion recommendation |
 
 Auto-renew scheduler defaults: enabled, hourly sweep interval, up to 5-minute jitter. Override via env:
 `A2A_ERP_AUTO_RENEW_ENABLED`, `A2A_ERP_SWEEP_INTERVAL_MS`, `A2A_ERP_SWEEP_JITTER_MS`.

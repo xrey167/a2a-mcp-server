@@ -52,10 +52,14 @@ import { recordTokenSaving, getTokenStats } from "./token-tracker.js";
 import { teeOutput, readTee, pruneTeeFiles, listTeeFiles } from "./tee.js";
 import { getAgencyProductSummary, getAgencyRoiSnapshot, getAgencyWorkflowTemplates } from "./agency-product.js";
 import {
+  buildOnboardingReport,
   buildConnectorRenewalSnapshot,
+  captureOnboardingSnapshot,
   connectConnector,
+  createOnboardingSession,
   createPilotLaunchRun,
   exportConnectorRenewalsCsv,
+  listOnboardingSessions,
   listConnectorRenewals,
   listPilotLaunchRuns,
   getConnectorKpis,
@@ -753,6 +757,25 @@ const OrchestratorSchemas = {
     since: z.string().optional(),
     limit: z.number().int().min(1).max(200).optional().default(50),
   }).strict(),
+  erp_onboarding_create: z.object({
+    customerName: z.string().min(1),
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]),
+    connector: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_onboarding_capture: z.object({
+    onboardingId: z.string().min(1),
+    phase: z.enum(["baseline", "current"]).optional().default("current"),
+    since: z.string().optional(),
+  }).strict(),
+  erp_onboarding_report: z.object({
+    onboardingId: z.string().min(1),
+    autoCaptureCurrent: z.boolean().optional().default(true),
+  }).strict(),
+  erp_onboarding_list: z.object({
+    status: z.enum(["active", "completed", "paused"]).optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict(),
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -1187,6 +1210,26 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
     case "erp_pilot_launches": {
       const { status, since, limit } = validateOrchestrator("erp_pilot_launches", args);
       return JSON.stringify(listPilotLaunchRuns({ status, since, limit }), null, 2);
+    }
+
+    case "erp_onboarding_create": {
+      const { customerName, product, connector, metadata } = validateOrchestrator("erp_onboarding_create", args);
+      return JSON.stringify(createOnboardingSession({ customerName, product, connector, metadata }), null, 2);
+    }
+
+    case "erp_onboarding_capture": {
+      const { onboardingId, phase, since } = validateOrchestrator("erp_onboarding_capture", args);
+      return JSON.stringify(captureOnboardingSnapshot({ onboardingId, phase, since }), null, 2);
+    }
+
+    case "erp_onboarding_report": {
+      const { onboardingId, autoCaptureCurrent } = validateOrchestrator("erp_onboarding_report", args);
+      return JSON.stringify(buildOnboardingReport({ onboardingId, autoCaptureCurrent }), null, 2);
+    }
+
+    case "erp_onboarding_list": {
+      const { status, limit } = validateOrchestrator("erp_onboarding_list", args);
+      return JSON.stringify(listOnboardingSessions({ status, limit }), null, 2);
     }
 
     // ── Metrics ─────────────────────────────────────────────────
@@ -2208,6 +2251,56 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         properties: {
           status: { type: "string", enum: ["blocked", "ready", "launched", "delivery_failed", "dry_run"] },
           since: { type: "string", description: "Optional ISO lower bound for created_at" },
+          limit: { type: "number", description: "Maximum rows to return (1-200, default 50)" },
+        },
+      },
+    },
+    {
+      name: "erp_onboarding_create",
+      description: "Create an onboarding session that auto-tracks ERP workflow/sync KPIs for one customer/product.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          customerName: { type: "string", description: "Customer or workspace display name" },
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          connector: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          metadata: { type: "object", description: "Optional structured metadata (owner, segment, notes)" },
+        },
+        required: ["customerName", "product"],
+      },
+    },
+    {
+      name: "erp_onboarding_capture",
+      description: "Capture onboarding KPI snapshot from tracked ERP data (baseline/current).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          onboardingId: { type: "string" },
+          phase: { type: "string", enum: ["baseline", "current"] },
+          since: { type: "string", description: "Optional ISO lower bound for KPI window" },
+        },
+        required: ["onboardingId"],
+      },
+    },
+    {
+      name: "erp_onboarding_report",
+      description: "Build onboarding report with baseline vs current deltas and expansion recommendation.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          onboardingId: { type: "string" },
+          autoCaptureCurrent: { type: "boolean", description: "Auto-capture current snapshot if missing (default true)" },
+        },
+        required: ["onboardingId"],
+      },
+    },
+    {
+      name: "erp_onboarding_list",
+      description: "List onboarding sessions and their status.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          status: { type: "string", enum: ["active", "completed", "paused"] },
           limit: { type: "number", description: "Maximum rows to return (1-200, default 50)" },
         },
       },
@@ -4182,6 +4275,78 @@ async function startHttpServer() {
         status: request.query?.status,
         since: request.query?.since,
         limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { customerName: string; product: string; connector?: string; metadata?: Record<string, unknown> } }>("/v1/onboarding/sessions", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return createOnboardingSession({
+        customerName: request.body?.customerName,
+        product: request.body?.product,
+        connector: request.body?.connector,
+        metadata: request.body?.metadata,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { status?: string; limit?: string } }>("/v1/onboarding/sessions", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listOnboardingSessions({
+        status: request.query?.status,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { phase?: string; since?: string } }>("/v1/onboarding/sessions/:id/capture", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return captureOnboardingSnapshot({
+        onboardingId: request.params.id,
+        phase: request.body?.phase,
+        since: request.body?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { autoCaptureCurrent?: string } }>("/v1/onboarding/sessions/:id/report", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const autoCaptureCurrent = request.query?.autoCaptureCurrent === undefined
+        ? undefined
+        : request.query.autoCaptureCurrent !== "false";
+      return buildOnboardingReport({
+        onboardingId: request.params.id,
+        autoCaptureCurrent,
       });
     } catch (err) {
       reply.code(400);

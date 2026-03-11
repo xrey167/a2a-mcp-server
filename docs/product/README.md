@@ -24,3 +24,8 @@ This directory contains the productized commercial and operational assets for th
 - [6-Week Pilot Playbook](./sales/pilot-playbook.md)
 - [Case Study Template](./sales/case-study-template.md)
 - [ROI Calculator Template (CSV)](./sales/roi-calculator-template.csv)
+
+## Onboarding
+- [Onboarding System](./onboarding/README.md)
+- [Onboarding Process](./onboarding/onboarding-process.md)
+- [Kickoff Checklist](./onboarding/kickoff-checklist.md)

@@ -1,19 +1,25 @@
 import { describe, expect, test, beforeEach } from "bun:test";
 import {
+  buildOnboardingReport,
   buildConnectorRenewalSnapshot,
+  captureOnboardingSnapshot,
   connectConnector,
+  createOnboardingSession,
   createPilotLaunchRun,
   exportConnectorRenewalsCsv,
   getConnectorKpis,
   getConnectorStatus,
   getProductKpis,
+  listOnboardingSessions,
   listConnectorRenewals,
   listPilotLaunchRuns,
+  recordWorkflowRun,
   renewDueConnectors,
   renewBusinessCentralSubscription,
   resetErpPlatformForTests,
   syncConnector,
   updatePilotLaunchRun,
+  updateWorkflowRun,
   workflowDefinitionFor,
 } from "../erp-platform.js";
 
@@ -423,5 +429,46 @@ describe("erp-platform", () => {
     expect(launched.items.length).toBe(1);
     expect(launched.items[0].id).toBe(id);
     expect(launched.items[0].salesPacket).toHaveProperty("format", "email");
+  });
+
+  test("onboarding report captures baseline/current from tracked ERP data", async () => {
+    const session = createOnboardingSession({
+      customerName: "Acme GmbH",
+      product: "lead-to-cash",
+      connector: "dynamics",
+    });
+    const baseline = captureOnboardingSnapshot({
+      onboardingId: session.id,
+      phase: "baseline",
+    });
+    expect(baseline.phase).toBe("baseline");
+
+    connectConnector("dynamics", {
+      authMode: "oauth",
+      config: { clientId: "id" },
+      metadata: {},
+    });
+
+    const runId = recordWorkflowRun("lead-to-cash", "running", null, { customerName: "Acme GmbH" });
+    updateWorkflowRun(runId, "completed");
+    await syncConnector("dynamics", {
+      direction: "ingest",
+      entityType: "lead",
+      externalId: "L-42",
+      payload: { source: "web" },
+      maxRetries: 1,
+    }, async () => ({ ok: true }));
+
+    const report = buildOnboardingReport({
+      onboardingId: session.id,
+      autoCaptureCurrent: true,
+    });
+
+    expect((report.session as { id: string }).id).toBe(session.id);
+    expect(report).toHaveProperty("baseline");
+    expect(report).toHaveProperty("current");
+    expect(report).toHaveProperty("delta");
+    const sessions = listOnboardingSessions({ status: "active", limit: 10 });
+    expect(sessions.items.length).toBeGreaterThanOrEqual(1);
   });
 });
