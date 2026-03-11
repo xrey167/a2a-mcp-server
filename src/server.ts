@@ -58,17 +58,27 @@ import {
   connectConnector,
   createOnboardingSession,
   createPilotLaunchRun,
+  decideQuoteToOrderApproval,
+  getExecutiveAnalytics,
+  getOpsAnalytics,
+  getQuoteToOrderPipeline,
   exportConnectorRenewalsCsv,
   getCommercialKpis,
   listOnboardingSessions,
   listConnectorRenewals,
+  listMasterDataMappings,
   listPilotLaunchRuns,
   listWorkflowSlaIncidents,
   recordCommercialEvent,
+  syncMasterDataEntity,
+  syncQuoteToOrderOrder,
+  syncQuoteToOrderQuote,
   escalateWorkflowSlaBreaches,
   getConnectorKpis,
   getConnectorStatus,
   getWorkflowSlaStatus,
+  updateMasterDataMapping,
+  updateWorkflowSlaIncidentStatus,
   getProductKpis,
   listConnectorStatuses,
   recordWorkflowRun,
@@ -78,6 +88,7 @@ import {
   updatePilotLaunchRun,
   updateWorkflowRun,
   validateConnectorType,
+  validateMasterDataEntity,
   validateProductType,
   workflowDefinitionFor,
 } from "./erp-platform.js";
@@ -805,8 +816,83 @@ const OrchestratorSchemas = {
   }).strict(),
   erp_workflow_sla_incidents: z.object({
     product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
-    status: z.enum(["open", "resolved"]).optional(),
+    status: z.enum(["open", "acknowledged", "resolved"]).optional(),
     limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict(),
+  erp_workflow_sla_incident_update: z.object({
+    incidentId: z.string().min(1),
+    status: z.enum(["acknowledged", "resolved"]),
+  }).strict(),
+  erp_q2o_quote_sync: z.object({
+    workspaceId: z.string().min(1),
+    connectorType: z.enum(["odoo", "business-central", "dynamics"]),
+    quoteExternalId: z.string().min(1),
+    approvalExternalId: z.string().optional(),
+    customerExternalId: z.string().optional(),
+    amount: z.number().nonnegative().optional(),
+    currency: z.string().optional(),
+    state: z.enum(["draft", "submitted", "approved", "rejected", "converted_to_order", "fulfilled"]).optional(),
+    approvalDeadlineAt: z.string().optional(),
+    conversionDeadlineAt: z.string().optional(),
+    expectedVersion: z.number().int().min(1).optional(),
+    idempotencyKey: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_q2o_order_sync: z.object({
+    workspaceId: z.string().min(1),
+    connectorType: z.enum(["odoo", "business-central", "dynamics"]),
+    quoteExternalId: z.string().min(1),
+    orderExternalId: z.string().min(1),
+    amount: z.number().nonnegative().optional(),
+    currency: z.string().optional(),
+    state: z.enum(["converted_to_order", "fulfilled"]).optional(),
+    expectedVersion: z.number().int().min(1).optional(),
+    idempotencyKey: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_q2o_approval_decision: z.object({
+    workspaceId: z.string().min(1),
+    approvalId: z.string().min(1),
+    decision: z.enum(["approved", "rejected"]),
+    decidedBy: z.string().optional(),
+    quoteExternalId: z.string().optional(),
+    idempotencyKey: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_q2o_pipeline: z.object({
+    workspaceId: z.string().min(1),
+    since: z.string().optional(),
+  }).strict(),
+  erp_master_data_sync: z.object({
+    workspaceId: z.string().min(1),
+    entity: z.enum(["customer", "product", "price", "tax"]),
+    connectorType: z.enum(["odoo", "business-central", "dynamics"]),
+    idempotencyKey: z.string().optional(),
+    records: z.array(z.object({
+      externalId: z.string().min(1),
+      payload: z.record(z.string(), z.unknown()).optional().default({}),
+    }).strict()).optional().default([]),
+    externalId: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
+  }).strict(),
+  erp_master_data_mappings: z.object({
+    workspaceId: z.string().min(1),
+    connectorType: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+    entity: z.enum(["customer", "product", "price", "tax"]).optional(),
+    limit: z.number().int().min(1).max(500).optional().default(200),
+  }).strict(),
+  erp_master_data_mapping_update: z.object({
+    mappingId: z.string().min(1),
+    unifiedField: z.string().optional(),
+    externalField: z.string().optional(),
+    driftStatus: z.enum(["ok", "changed"]).optional(),
+  }).strict(),
+  erp_analytics_executive: z.object({
+    workspaceId: z.string().optional(),
+    since: z.string().optional(),
+  }).strict(),
+  erp_analytics_ops: z.object({
+    since: z.string().optional(),
   }).strict(),
 } as const;
 
@@ -1287,6 +1373,56 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
     case "erp_workflow_sla_incidents": {
       const { product, status, limit } = validateOrchestrator("erp_workflow_sla_incidents", args);
       return JSON.stringify(listWorkflowSlaIncidents({ product, status, limit }), null, 2);
+    }
+
+    case "erp_workflow_sla_incident_update": {
+      const { incidentId, status } = validateOrchestrator("erp_workflow_sla_incident_update", args);
+      return JSON.stringify(updateWorkflowSlaIncidentStatus(incidentId, status), null, 2);
+    }
+
+    case "erp_q2o_quote_sync": {
+      const { workspaceId, ...rest } = validateOrchestrator("erp_q2o_quote_sync", args);
+      return JSON.stringify(syncQuoteToOrderQuote(workspaceId, rest), null, 2);
+    }
+
+    case "erp_q2o_order_sync": {
+      const { workspaceId, ...rest } = validateOrchestrator("erp_q2o_order_sync", args);
+      return JSON.stringify(syncQuoteToOrderOrder(workspaceId, rest), null, 2);
+    }
+
+    case "erp_q2o_approval_decision": {
+      const { workspaceId, approvalId, ...rest } = validateOrchestrator("erp_q2o_approval_decision", args);
+      return JSON.stringify(decideQuoteToOrderApproval(workspaceId, approvalId, rest), null, 2);
+    }
+
+    case "erp_q2o_pipeline": {
+      const { workspaceId, since } = validateOrchestrator("erp_q2o_pipeline", args);
+      return JSON.stringify(getQuoteToOrderPipeline(workspaceId, { since }), null, 2);
+    }
+
+    case "erp_master_data_sync": {
+      const { workspaceId, entity, ...rest } = validateOrchestrator("erp_master_data_sync", args);
+      return JSON.stringify(syncMasterDataEntity(workspaceId, entity, rest), null, 2);
+    }
+
+    case "erp_master_data_mappings": {
+      const { workspaceId, connectorType, entity, limit } = validateOrchestrator("erp_master_data_mappings", args);
+      return JSON.stringify(listMasterDataMappings({ workspaceId, connectorType, entity, limit }), null, 2);
+    }
+
+    case "erp_master_data_mapping_update": {
+      const { mappingId, unifiedField, externalField, driftStatus } = validateOrchestrator("erp_master_data_mapping_update", args);
+      return JSON.stringify(updateMasterDataMapping(mappingId, { unifiedField, externalField, driftStatus }), null, 2);
+    }
+
+    case "erp_analytics_executive": {
+      const { workspaceId, since } = validateOrchestrator("erp_analytics_executive", args);
+      return JSON.stringify(getExecutiveAnalytics({ workspaceId, since }), null, 2);
+    }
+
+    case "erp_analytics_ops": {
+      const { since } = validateOrchestrator("erp_analytics_ops", args);
+      return JSON.stringify(getOpsAnalytics({ since }), null, 2);
     }
 
     // ── Metrics ─────────────────────────────────────────────────
@@ -2420,8 +2556,168 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         type: "object" as const,
         properties: {
           product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
-          status: { type: "string", enum: ["open", "resolved"] },
+          status: { type: "string", enum: ["open", "acknowledged", "resolved"] },
           limit: { type: "number", description: "Maximum rows (1-200, default 50)" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_sla_incident_update",
+      description: "Update SLA incident lifecycle state (acknowledged/resolved).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          incidentId: { type: "string" },
+          status: { type: "string", enum: ["acknowledged", "resolved"] },
+        },
+        required: ["incidentId", "status"],
+      },
+    },
+    {
+      name: "erp_q2o_quote_sync",
+      description: "Upsert quote state into Quote-to-Order Command Center with traceability and optimistic concurrency checks.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          connectorType: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          quoteExternalId: { type: "string" },
+          approvalExternalId: { type: "string" },
+          customerExternalId: { type: "string" },
+          amount: { type: "number" },
+          currency: { type: "string" },
+          state: { type: "string", enum: ["draft", "submitted", "approved", "rejected", "converted_to_order", "fulfilled"] },
+          approvalDeadlineAt: { type: "string" },
+          conversionDeadlineAt: { type: "string" },
+          expectedVersion: { type: "number" },
+          idempotencyKey: { type: "string" },
+          payload: { type: "object" },
+        },
+        required: ["workspaceId", "connectorType", "quoteExternalId"],
+      },
+    },
+    {
+      name: "erp_q2o_order_sync",
+      description: "Upsert order conversion/fulfillment state for a quote.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          connectorType: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          quoteExternalId: { type: "string" },
+          orderExternalId: { type: "string" },
+          amount: { type: "number" },
+          currency: { type: "string" },
+          state: { type: "string", enum: ["converted_to_order", "fulfilled"] },
+          expectedVersion: { type: "number" },
+          idempotencyKey: { type: "string" },
+          payload: { type: "object" },
+        },
+        required: ["workspaceId", "connectorType", "quoteExternalId", "orderExternalId"],
+      },
+    },
+    {
+      name: "erp_q2o_approval_decision",
+      description: "Apply approval decision on a quote approval item.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          approvalId: { type: "string" },
+          decision: { type: "string", enum: ["approved", "rejected"] },
+          decidedBy: { type: "string" },
+          quoteExternalId: { type: "string" },
+          idempotencyKey: { type: "string" },
+          payload: { type: "object" },
+        },
+        required: ["workspaceId", "approvalId", "decision"],
+      },
+    },
+    {
+      name: "erp_q2o_pipeline",
+      description: "Get quote-to-order pipeline health and business metrics for a workspace.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          since: { type: "string" },
+        },
+        required: ["workspaceId"],
+      },
+    },
+    {
+      name: "erp_master_data_sync",
+      description: "Sync master data entity payloads and detect mapping drift.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          entity: { type: "string", enum: ["customer", "product", "price", "tax"] },
+          connectorType: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          idempotencyKey: { type: "string" },
+          records: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                externalId: { type: "string" },
+                payload: { type: "object" },
+              },
+              required: ["externalId"],
+            },
+          },
+          externalId: { type: "string" },
+          payload: { type: "object" },
+        },
+        required: ["workspaceId", "entity", "connectorType"],
+      },
+    },
+    {
+      name: "erp_master_data_mappings",
+      description: "List ERP master-data field mappings for workspace scope.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          connectorType: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          entity: { type: "string", enum: ["customer", "product", "price", "tax"] },
+          limit: { type: "number" },
+        },
+        required: ["workspaceId"],
+      },
+    },
+    {
+      name: "erp_master_data_mapping_update",
+      description: "Update one master-data mapping and bump mapping version.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          mappingId: { type: "string" },
+          unifiedField: { type: "string" },
+          externalField: { type: "string" },
+          driftStatus: { type: "string", enum: ["ok", "changed"] },
+        },
+        required: ["mappingId"],
+      },
+    },
+    {
+      name: "erp_analytics_executive",
+      description: "Executive KPI dashboard metrics for quote-to-order performance and ROI.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          since: { type: "string" },
+        },
+      },
+    },
+    {
+      name: "erp_analytics_ops",
+      description: "Operations analytics dashboard metrics (sync reliability, DLQ/replay, SLA timeline, MTTR).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string" },
         },
       },
     },
@@ -4556,6 +4852,165 @@ async function startHttpServer() {
         product: request.query?.product,
         status: request.query?.status,
         limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.patch<{ Params: { id: string }; Body: { status: string } }>("/v1/workflows/sla/incidents/:id", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return updateWorkflowSlaIncidentStatus(request.params.id, request.body?.status);
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/quotes/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return syncQuoteToOrderQuote(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/orders/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return syncQuoteToOrderOrder(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; approvalId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/approvals/:approvalId/decision", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return decideQuoteToOrderApproval(request.params.id, request.params.approvalId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { since?: string } }>("/v1/quote-to-order/workspaces/:id/pipeline", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getQuoteToOrderPipeline(request.params.id, { since: request.query?.since });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { entity: string }; Body: Record<string, unknown> }>("/v1/erp/master-data/:entity/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const workspaceId = typeof request.body?.workspaceId === "string" ? request.body.workspaceId : "default";
+      const entity = validateMasterDataEntity(request.params.entity);
+      return syncMasterDataEntity(workspaceId, entity, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { workspaceId?: string; connectorType?: string; entity?: string; limit?: string } }>("/v1/erp/master-data/mappings", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const workspaceId = request.query?.workspaceId ?? "default";
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listMasterDataMappings({
+        workspaceId,
+        connectorType: request.query?.connectorType,
+        entity: request.query?.entity,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/erp/master-data/mappings/:id", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return updateMasterDataMapping(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { workspaceId?: string; since?: string } }>("/v1/analytics/executive", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getExecutiveAnalytics({
+        workspaceId: request.query?.workspaceId,
+        since: request.query?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { since?: string } }>("/v1/analytics/ops", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getOpsAnalytics({ since: request.query?.since });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { sessionId: string } }>("/v1/analytics/onboarding/:sessionId/report", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return buildOnboardingReport({
+        onboardingId: request.params.sessionId,
+        autoCaptureCurrent: true,
       });
     } catch (err) {
       reply.code(400);

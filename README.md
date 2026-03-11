@@ -278,6 +278,16 @@ The orchestrator exposes 35 tools via the MCP stdio interface. These are the too
 | `erp_workflow_sla_status` | Evaluate SLA health for all workflow modules |
 | `erp_workflow_sla_escalate` | Create SLA incidents for breached modules with dedupe |
 | `erp_workflow_sla_incidents` | List workflow SLA incidents for operations follow-up |
+| `erp_workflow_sla_incident_update` | Update SLA incident lifecycle state (`acknowledged`/`resolved`) |
+| `erp_q2o_quote_sync` | Upsert quote records into Quote-to-Order state machine with traceability |
+| `erp_q2o_order_sync` | Upsert order conversion/fulfillment state linked to quote |
+| `erp_q2o_approval_decision` | Apply approval decision on quote approval items |
+| `erp_q2o_pipeline` | Return quote-to-order pipeline metrics and revenue-at-risk |
+| `erp_master_data_sync` | Sync master data (`customer`,`product`,`price`,`tax`) with drift detection |
+| `erp_master_data_mappings` | List field mappings per workspace/connector/entity |
+| `erp_master_data_mapping_update` | Update mapping and bump version |
+| `erp_analytics_executive` | Executive KPI view (conversion, approval time, revenue-at-risk, ROI) |
+| `erp_analytics_ops` | Ops KPI view (throughput/failures, retry/DLQ/replay, SLA timeline, MTTR) |
 
 ### Collaboration
 
@@ -443,6 +453,17 @@ Shared connector core for Odoo, Business Central, and Dynamics CRM with two-way 
 | `GET` | `/v1/workflows/sla/status` | SLA status for `quote-to-order`, `lead-to-cash`, and `collections` |
 | `POST` | `/v1/workflows/sla/escalate` | Create SLA incidents for breached modules |
 | `GET` | `/v1/workflows/sla/incidents` | List SLA incidents (`product`, `status`, `limit`) |
+| `PATCH` | `/v1/workflows/sla/incidents/{id}` | Update incident lifecycle state (`acknowledged`, `resolved`) |
+| `POST` | `/v1/quote-to-order/workspaces/{id}/quotes/sync` | Sync quote lifecycle state into command center |
+| `POST` | `/v1/quote-to-order/workspaces/{id}/orders/sync` | Sync order conversion/fulfillment against quote |
+| `POST` | `/v1/quote-to-order/workspaces/{id}/approvals/{approvalId}/decision` | Apply approval decision and transition state |
+| `GET` | `/v1/quote-to-order/workspaces/{id}/pipeline` | Quote-to-order pipeline metrics and risk values |
+| `POST` | `/v1/erp/master-data/{entity}/sync` | Sync master data entity (`customer|product|price|tax`) |
+| `GET` | `/v1/erp/master-data/mappings` | List master-data field mappings |
+| `PUT` | `/v1/erp/master-data/mappings/{id}` | Update one mapping and mapping version |
+| `GET` | `/v1/analytics/executive` | Executive dashboard metrics |
+| `GET` | `/v1/analytics/ops` | Operations dashboard metrics |
+| `GET` | `/v1/analytics/onboarding/{sessionId}/report` | Onboarding baseline-vs-current analytics report |
 
 Auto-renew scheduler defaults: enabled, hourly sweep interval, up to 5-minute jitter. Override via env:
 `A2A_ERP_AUTO_RENEW_ENABLED`, `A2A_ERP_SWEEP_INTERVAL_MS`, `A2A_ERP_SWEEP_JITTER_MS`.

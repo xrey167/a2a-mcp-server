@@ -15,15 +15,25 @@ import {
   getWorkflowSlaStatus,
   listOnboardingSessions,
   listConnectorRenewals,
+  listMasterDataMappings,
   listPilotLaunchRuns,
   listWorkflowSlaIncidents,
+  decideQuoteToOrderApproval,
+  getExecutiveAnalytics,
+  getOpsAnalytics,
+  getQuoteToOrderPipeline,
   recordCommercialEvent,
   recordWorkflowRun,
   renewDueConnectors,
   renewBusinessCentralSubscription,
   resetErpPlatformForTests,
+  syncMasterDataEntity,
+  syncQuoteToOrderOrder,
+  syncQuoteToOrderQuote,
   syncConnector,
+  updateMasterDataMapping,
   updatePilotLaunchRun,
+  updateWorkflowSlaIncidentStatus,
   updateWorkflowRun,
   workflowDefinitionFor,
 } from "../erp-platform.js";
@@ -527,5 +537,92 @@ describe("erp-platform", () => {
 
     const incidents = listWorkflowSlaIncidents({ product: "quote-to-order", status: "open", limit: 20 });
     expect(incidents.items.length).toBeGreaterThan(0);
+  });
+
+  test("quote-to-order state machine supports quote->approval->order->fulfilled flow", () => {
+    const q = syncQuoteToOrderQuote("ws-1", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-100",
+      approvalExternalId: "APR-1",
+      amount: 1200,
+      state: "submitted",
+      approvalDeadlineAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      conversionDeadlineAt: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+      idempotencyKey: "q100-v1",
+      payload: { owner: "alice" },
+    });
+    expect((q as { duplicate: boolean }).duplicate).toBe(false);
+
+    const approval = decideQuoteToOrderApproval("ws-1", "APR-1", {
+      decision: "approved",
+      idempotencyKey: "q100-approval",
+    });
+    expect((approval as { record: { state: string } }).record.state).toBe("approved");
+
+    const order = syncQuoteToOrderOrder("ws-1", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-100",
+      orderExternalId: "SO-100",
+      state: "converted_to_order",
+      idempotencyKey: "q100-order",
+    });
+    expect((order as { record: { state: string } }).record.state).toBe("converted_to_order");
+
+    syncQuoteToOrderOrder("ws-1", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-100",
+      orderExternalId: "SO-100",
+      state: "fulfilled",
+      idempotencyKey: "q100-fulfilled",
+    });
+    const pipeline = getQuoteToOrderPipeline("ws-1");
+    const metrics = pipeline.metrics as { quoteToOrderConversionRatePct: number; valueRecoveredFromStalledQuotes: number };
+    expect(metrics.quoteToOrderConversionRatePct).toBeGreaterThan(0);
+    expect(metrics.valueRecoveredFromStalledQuotes).toBeGreaterThanOrEqual(0);
+  });
+
+  test("master data sync detects drift and mappings can be updated", () => {
+    const syncResult = syncMasterDataEntity("ws-md", "customer", {
+      connectorType: "odoo",
+      records: [
+        {
+          externalId: "C-1",
+          payload: {
+            company_name: "Acme",
+            vat_no: "DE123",
+          },
+        },
+      ],
+      idempotencyKey: "md-1",
+    });
+    expect((syncResult as { syncedRecords: number }).syncedRecords).toBe(1);
+    expect((syncResult as { driftDetected: boolean }).driftDetected).toBe(true);
+
+    const mappings = listMasterDataMappings({ workspaceId: "ws-md", entity: "customer", connectorType: "odoo" });
+    expect(mappings.items.length).toBeGreaterThan(0);
+    const first = mappings.items[0];
+    const updated = updateMasterDataMapping(first.id, { unifiedField: "customer_name", driftStatus: "ok" });
+    expect(updated.mappingVersion).toBeGreaterThan(first.mappingVersion);
+  });
+
+  test("incident lifecycle update and dashboards include new metrics", () => {
+    syncQuoteToOrderQuote("ws-life", {
+      connectorType: "business-central",
+      quoteExternalId: "Q-LIFE",
+      state: "submitted",
+      approvalDeadlineAt: new Date(Date.now() - 60_000).toISOString(),
+      idempotencyKey: "life-q",
+    });
+    const esc = escalateWorkflowSlaBreaches({ product: "quote-to-order", minIntervalMinutes: 1 });
+    const created = (esc.created as Array<{ id: string }>);
+    expect(created.length).toBeGreaterThan(0);
+    const incident = updateWorkflowSlaIncidentStatus(created[0].id, "resolved");
+    expect(incident.status).toBe("resolved");
+
+    const exec = getExecutiveAnalytics({ workspaceId: "ws-life" });
+    expect(exec).toHaveProperty("quoteToOrderConversionRatePct");
+    const ops = getOpsAnalytics({});
+    expect(ops).toHaveProperty("reliability");
+    expect(ops).toHaveProperty("sla");
   });
 });

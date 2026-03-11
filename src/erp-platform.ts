@@ -7,6 +7,8 @@ import type { WorkflowDefinition } from "./workflow-engine.js";
 
 export type ConnectorType = "odoo" | "business-central" | "dynamics";
 export type ProductType = "quote-to-order" | "lead-to-cash" | "collections";
+export type QuoteToOrderState = "draft" | "submitted" | "approved" | "rejected" | "converted_to_order" | "fulfilled";
+export type MasterDataEntity = "customer" | "product" | "price" | "tax";
 
 const ConnectorTypeSchema = z.enum(["odoo", "business-central", "dynamics"]);
 const ProductTypeSchema = z.enum(["quote-to-order", "lead-to-cash", "collections"]);
@@ -104,6 +106,67 @@ const WorkflowSlaEscalateSchema = z.object({
   product: ProductTypeSchema.optional(),
   since: z.string().optional(),
   minIntervalMinutes: z.number().int().min(1).max(24 * 60).optional().default(60),
+}).strict();
+
+const QuoteToOrderQuoteSyncSchema = z.object({
+  connectorType: ConnectorTypeSchema,
+  quoteExternalId: z.string().min(1),
+  approvalExternalId: z.string().optional(),
+  customerExternalId: z.string().optional(),
+  amount: z.number().nonnegative().optional().default(0),
+  currency: z.string().optional().default("EUR"),
+  state: z.enum(["draft", "submitted", "approved", "rejected", "converted_to_order", "fulfilled"]).optional().default("draft"),
+  approvalDeadlineAt: z.string().optional(),
+  conversionDeadlineAt: z.string().optional(),
+  expectedVersion: z.number().int().min(1).optional(),
+  idempotencyKey: z.string().optional(),
+  payload: z.record(z.string(), z.unknown()).optional().default({}),
+}).strict();
+
+const QuoteToOrderOrderSyncSchema = z.object({
+  connectorType: ConnectorTypeSchema,
+  quoteExternalId: z.string().min(1),
+  orderExternalId: z.string().min(1),
+  amount: z.number().nonnegative().optional(),
+  currency: z.string().optional(),
+  state: z.enum(["converted_to_order", "fulfilled"]).optional().default("converted_to_order"),
+  expectedVersion: z.number().int().min(1).optional(),
+  idempotencyKey: z.string().optional(),
+  payload: z.record(z.string(), z.unknown()).optional().default({}),
+}).strict();
+
+const QuoteToOrderApprovalDecisionSchema = z.object({
+  decision: z.enum(["approved", "rejected"]),
+  decidedBy: z.string().optional(),
+  quoteExternalId: z.string().optional(),
+  idempotencyKey: z.string().optional(),
+  payload: z.record(z.string(), z.unknown()).optional().default({}),
+}).strict();
+
+const MasterDataEntitySchema = z.enum(["customer", "product", "price", "tax"]);
+
+const MasterDataSyncSchema = z.object({
+  connectorType: ConnectorTypeSchema,
+  idempotencyKey: z.string().optional(),
+  records: z.array(z.object({
+    externalId: z.string().min(1),
+    payload: z.record(z.string(), z.unknown()).default({}),
+  }).strict()).optional().default([]),
+  externalId: z.string().optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
+}).strict();
+
+const MasterDataMappingListSchema = z.object({
+  workspaceId: z.string().min(1),
+  connectorType: ConnectorTypeSchema.optional(),
+  entity: MasterDataEntitySchema.optional(),
+  limit: z.number().int().min(1).max(500).optional().default(200),
+}).strict();
+
+const MasterDataMappingUpdateSchema = z.object({
+  unifiedField: z.string().min(1).optional(),
+  externalField: z.string().min(1).optional(),
+  driftStatus: z.enum(["ok", "changed"]).optional(),
 }).strict();
 
 interface ConnectorRow {
@@ -209,7 +272,80 @@ interface WorkflowSlaIncidentRow {
   severity: "warning" | "critical";
   reason: string;
   fingerprint: string;
-  status: "open" | "resolved";
+  status: "open" | "acknowledged" | "resolved";
+  created_at: string;
+  resolved_at: string | null;
+}
+
+interface QuoteToOrderRecordRow {
+  id: string;
+  workspace_id: string;
+  source_system: ConnectorType;
+  quote_external_id: string;
+  order_external_id: string | null;
+  approval_external_id: string | null;
+  customer_external_id: string | null;
+  state: QuoteToOrderState;
+  amount: number;
+  currency: string;
+  external_id: string;
+  sync_state: "success" | "failed" | "conflict";
+  last_synced_at: string | null;
+  last_sync_error: string | null;
+  conflict_marker: string | null;
+  payload_json: string;
+  approval_deadline_at: string | null;
+  approval_decided_at: string | null;
+  conversion_deadline_at: string | null;
+  converted_at: string | null;
+  fulfilled_at: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface QuoteToOrderEventRow {
+  id: string;
+  workspace_id: string;
+  event_type: "quote_sync" | "order_sync" | "approval_decision" | "master_data_sync";
+  idempotency_key: string;
+  status: "applied" | "ignored";
+  created_at: string;
+}
+
+interface MasterDataMappingRow {
+  id: string;
+  workspace_id: string;
+  connector_type: ConnectorType;
+  entity: MasterDataEntity;
+  external_field: string;
+  unified_field: string;
+  mapping_version: number;
+  drift_status: "ok" | "changed";
+  created_at: string;
+  updated_at: string;
+}
+
+interface MasterDataRecordRow {
+  id: string;
+  workspace_id: string;
+  connector_type: ConnectorType;
+  entity: MasterDataEntity;
+  external_id: string;
+  source_system: ConnectorType;
+  sync_state: "success" | "failed";
+  last_synced_at: string | null;
+  last_sync_error: string | null;
+  schema_hash: string | null;
+  payload_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ConnectorReplayRow {
+  id: string;
+  run_id: string;
+  connector_type: ConnectorType;
   created_at: string;
 }
 
@@ -345,6 +481,7 @@ export interface WorkflowSlaStatusItem {
   breach: boolean;
   severity: "ok" | "warning" | "critical";
   reasons: string[];
+  breachBreakdown: Array<{ type: "approval_overdue" | "conversion_stalled" | "sync_failure_burst"; count: number }>;
 }
 
 export interface WorkflowSlaIncident {
@@ -352,8 +489,52 @@ export interface WorkflowSlaIncident {
   product: ProductType;
   severity: "warning" | "critical";
   reason: string;
-  status: "open" | "resolved";
+  status: "open" | "acknowledged" | "resolved";
   createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface QuoteToOrderRecord {
+  id: string;
+  workspaceId: string;
+  sourceSystem: ConnectorType;
+  quoteExternalId: string;
+  orderExternalId?: string;
+  approvalExternalId?: string;
+  customerExternalId?: string;
+  state: QuoteToOrderState;
+  amount: number;
+  currency: string;
+  traceability: {
+    source_system: string;
+    external_id: string;
+    sync_state: "success" | "failed" | "conflict";
+    last_synced_at: string | null;
+    last_sync_error: string | null;
+  };
+  conflictMarker?: string;
+  approvalDeadlineAt?: string;
+  approvalDecidedAt?: string;
+  conversionDeadlineAt?: string;
+  convertedAt?: string;
+  fulfilledAt?: string;
+  version: number;
+  payload: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MasterDataMapping {
+  id: string;
+  workspaceId: string;
+  connectorType: ConnectorType;
+  entity: MasterDataEntity;
+  externalField: string;
+  unifiedField: string;
+  mappingVersion: number;
+  driftStatus: "ok" | "changed";
+  createdAt: string;
+  updatedAt: string;
 }
 
 const dbPath = process.env.A2A_ERP_DB ?? join(homedir(), ".a2a-mcp", "erp-platform.db");
@@ -476,6 +657,89 @@ db.run(`CREATE TABLE IF NOT EXISTS workflow_sla_incidents (
 )`);
 db.run("CREATE INDEX IF NOT EXISTS idx_workflow_sla_incidents_product_created ON workflow_sla_incidents(product, created_at DESC)");
 db.run("CREATE INDEX IF NOT EXISTS idx_workflow_sla_incidents_fingerprint ON workflow_sla_incidents(fingerprint)");
+db.run(`CREATE TABLE IF NOT EXISTS quote_to_order_records (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  source_system TEXT NOT NULL,
+  quote_external_id TEXT NOT NULL,
+  order_external_id TEXT,
+  approval_external_id TEXT,
+  customer_external_id TEXT,
+  state TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL DEFAULT 'EUR',
+  external_id TEXT NOT NULL,
+  sync_state TEXT NOT NULL DEFAULT 'success',
+  last_synced_at TEXT,
+  last_sync_error TEXT,
+  conflict_marker TEXT,
+  payload_json TEXT NOT NULL,
+  approval_deadline_at TEXT,
+  approval_decided_at TEXT,
+  conversion_deadline_at TEXT,
+  converted_at TEXT,
+  fulfilled_at TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(workspace_id, quote_external_id)
+)`);
+db.run("CREATE INDEX IF NOT EXISTS idx_q2o_workspace_state ON quote_to_order_records(workspace_id, state)");
+db.run("CREATE INDEX IF NOT EXISTS idx_q2o_conversion_deadline ON quote_to_order_records(conversion_deadline_at)");
+db.run(`CREATE TABLE IF NOT EXISTS quote_to_order_events (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`);
+db.run(`CREATE TABLE IF NOT EXISTS erp_master_data_mappings (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  connector_type TEXT NOT NULL,
+  entity TEXT NOT NULL,
+  external_field TEXT NOT NULL,
+  unified_field TEXT NOT NULL,
+  mapping_version INTEGER NOT NULL DEFAULT 1,
+  drift_status TEXT NOT NULL DEFAULT 'ok',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`);
+db.run("CREATE INDEX IF NOT EXISTS idx_master_data_mapping_scope ON erp_master_data_mappings(workspace_id, connector_type, entity)");
+db.run(`CREATE TABLE IF NOT EXISTS erp_master_data_records (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  connector_type TEXT NOT NULL,
+  entity TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  source_system TEXT NOT NULL,
+  sync_state TEXT NOT NULL,
+  last_synced_at TEXT,
+  last_sync_error TEXT,
+  schema_hash TEXT,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(workspace_id, connector_type, entity, external_id)
+)`);
+db.run("CREATE INDEX IF NOT EXISTS idx_master_data_records_scope ON erp_master_data_records(workspace_id, connector_type, entity)");
+db.run(`CREATE TABLE IF NOT EXISTS connector_replay_runs (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  connector_type TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`);
+db.run("CREATE INDEX IF NOT EXISTS idx_connector_replay_runs_created ON connector_replay_runs(created_at DESC)");
+
+function ensureColumn(table: string, column: string, alterSql: string): void {
+  const cols = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.run(alterSql);
+  }
+}
+
+ensureColumn("workflow_sla_incidents", "resolved_at", "ALTER TABLE workflow_sla_incidents ADD COLUMN resolved_at TEXT");
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -1107,7 +1371,564 @@ export function replayDeadLetter(runId: string): { found: boolean; payload?: Rec
     `SELECT connector_type, payload_json FROM connector_dead_letters WHERE run_id = ? ORDER BY created_at DESC LIMIT 1`
   ).get(runId);
   if (!row) return { found: false };
+  db.run(
+    `INSERT INTO connector_replay_runs (id, run_id, connector_type, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [randomUUID(), runId, row.connector_type, nowIso()],
+  );
   return { found: true, payload: JSON.parse(row.payload_json) as Record<string, unknown>, connectorType: row.connector_type };
+}
+
+function toQuoteToOrderRecord(row: QuoteToOrderRecordRow): QuoteToOrderRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    sourceSystem: row.source_system,
+    quoteExternalId: row.quote_external_id,
+    orderExternalId: row.order_external_id ?? undefined,
+    approvalExternalId: row.approval_external_id ?? undefined,
+    customerExternalId: row.customer_external_id ?? undefined,
+    state: row.state,
+    amount: row.amount,
+    currency: row.currency,
+    traceability: {
+      source_system: row.source_system,
+      external_id: row.external_id,
+      sync_state: row.sync_state,
+      last_synced_at: row.last_synced_at,
+      last_sync_error: row.last_sync_error,
+    },
+    conflictMarker: row.conflict_marker ?? undefined,
+    approvalDeadlineAt: row.approval_deadline_at ?? undefined,
+    approvalDecidedAt: row.approval_decided_at ?? undefined,
+    conversionDeadlineAt: row.conversion_deadline_at ?? undefined,
+    convertedAt: row.converted_at ?? undefined,
+    fulfilledAt: row.fulfilled_at ?? undefined,
+    version: row.version,
+    payload: parseMetadata(row.payload_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toMasterDataMapping(row: MasterDataMappingRow): MasterDataMapping {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    connectorType: row.connector_type,
+    entity: row.entity,
+    externalField: row.external_field,
+    unifiedField: row.unified_field,
+    mappingVersion: row.mapping_version,
+    driftStatus: row.drift_status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function registerQ2oEvent(workspaceId: string, eventType: QuoteToOrderEventRow["event_type"] | "master_data_sync", idempotencyKey?: string): boolean {
+  if (!idempotencyKey || idempotencyKey.length === 0) return false;
+  const existing = db.query<QuoteToOrderEventRow, [string]>(
+    `SELECT id, workspace_id, event_type, idempotency_key, status, created_at
+     FROM quote_to_order_events WHERE idempotency_key = ?`
+  ).get(idempotencyKey);
+  if (existing) return true;
+  db.run(
+    `INSERT INTO quote_to_order_events (id, workspace_id, event_type, idempotency_key, status, created_at)
+     VALUES (?, ?, ?, ?, 'applied', ?)`,
+    [randomUUID(), workspaceId, eventType, idempotencyKey, nowIso()],
+  );
+  return false;
+}
+
+function getQ2oRow(workspaceId: string, quoteExternalId: string): QuoteToOrderRecordRow | null {
+  return db.query<QuoteToOrderRecordRow, [string, string]>(
+    `SELECT id, workspace_id, source_system, quote_external_id, order_external_id, approval_external_id, customer_external_id, state, amount, currency,
+            external_id, sync_state, last_synced_at, last_sync_error, conflict_marker, payload_json, approval_deadline_at, approval_decided_at,
+            conversion_deadline_at, converted_at, fulfilled_at, version, created_at, updated_at
+     FROM quote_to_order_records
+     WHERE workspace_id = ? AND quote_external_id = ?`
+  ).get(workspaceId, quoteExternalId) ?? null;
+}
+
+function isValidQ2oTransition(from: QuoteToOrderState, to: QuoteToOrderState): boolean {
+  if (from === to) return true;
+  const transitions: Record<QuoteToOrderState, QuoteToOrderState[]> = {
+    draft: ["submitted", "rejected"],
+    submitted: ["approved", "rejected"],
+    approved: ["converted_to_order"],
+    rejected: [],
+    converted_to_order: ["fulfilled"],
+    fulfilled: [],
+  };
+  return transitions[from].includes(to);
+}
+
+function mergePayload(existingRaw: string, incoming: Record<string, unknown>): string {
+  const existing = parseMetadata(existingRaw);
+  return JSON.stringify({ ...existing, ...incoming });
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) return Number(((sorted[mid - 1] + sorted[mid]) / 2).toFixed(2));
+  return Number(sorted[mid].toFixed(2));
+}
+
+export function syncQuoteToOrderQuote(workspaceIdInput: unknown, bodyInput: unknown): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const body = QuoteToOrderQuoteSyncSchema.parse(bodyInput);
+  const duplicate = registerQ2oEvent(workspaceId, "quote_sync", body.idempotencyKey);
+  if (duplicate) {
+    return { duplicate: true, workspaceId, quoteExternalId: body.quoteExternalId };
+  }
+
+  const existing = getQ2oRow(workspaceId, body.quoteExternalId);
+  const now = nowIso();
+  if (!existing) {
+    const id = randomUUID();
+    db.run(
+      `INSERT INTO quote_to_order_records (
+         id, workspace_id, source_system, quote_external_id, order_external_id, approval_external_id, customer_external_id, state, amount, currency,
+         external_id, sync_state, last_synced_at, last_sync_error, conflict_marker, payload_json, approval_deadline_at, approval_decided_at,
+         conversion_deadline_at, converted_at, fulfilled_at, version, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'success', ?, NULL, NULL, ?, ?, NULL, ?, NULL, NULL, 1, ?, ?)`,
+      [
+        id,
+        workspaceId,
+        body.connectorType,
+        body.quoteExternalId,
+        body.approvalExternalId ?? null,
+        body.customerExternalId ?? null,
+        body.state,
+        body.amount,
+        body.currency,
+        body.quoteExternalId,
+        now,
+        JSON.stringify(body.payload),
+        body.approvalDeadlineAt ?? null,
+        body.conversionDeadlineAt ?? null,
+        now,
+        now,
+      ],
+    );
+    const row = getQ2oRow(workspaceId, body.quoteExternalId);
+    if (!row) throw new Error("Failed to persist quote");
+    return { duplicate: false, record: toQuoteToOrderRecord(row) };
+  }
+
+  if (body.expectedVersion !== undefined && existing.version !== body.expectedVersion) {
+    const marker = `version_conflict:${body.expectedVersion}->${existing.version}`;
+    db.run(
+      `UPDATE quote_to_order_records
+       SET sync_state = 'conflict', conflict_marker = ?, last_sync_error = ?, last_synced_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [marker, marker, now, now, existing.id],
+    );
+    return { duplicate: false, conflict: true, conflictMarker: marker, record: toQuoteToOrderRecord({ ...existing, sync_state: "conflict", conflict_marker: marker, last_sync_error: marker, last_synced_at: now, updated_at: now }) };
+  }
+
+  if (!isValidQ2oTransition(existing.state, body.state)) {
+    const marker = `invalid_transition:${existing.state}->${body.state}`;
+    db.run(
+      `UPDATE quote_to_order_records
+       SET sync_state = 'conflict', conflict_marker = ?, last_sync_error = ?, last_synced_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [marker, marker, now, now, existing.id],
+    );
+    return { duplicate: false, conflict: true, conflictMarker: marker, record: toQuoteToOrderRecord({ ...existing, sync_state: "conflict", conflict_marker: marker, last_sync_error: marker, last_synced_at: now, updated_at: now }) };
+  }
+
+  const approvalDecidedAt = body.state === "approved" || body.state === "rejected"
+    ? (existing.approval_decided_at ?? now)
+    : existing.approval_decided_at;
+  const convertedAt = body.state === "converted_to_order" || body.state === "fulfilled"
+    ? (existing.converted_at ?? now)
+    : existing.converted_at;
+  const fulfilledAt = body.state === "fulfilled" ? (existing.fulfilled_at ?? now) : existing.fulfilled_at;
+  db.run(
+    `UPDATE quote_to_order_records
+     SET source_system = ?, approval_external_id = COALESCE(?, approval_external_id), customer_external_id = COALESCE(?, customer_external_id),
+         state = ?, amount = ?, currency = ?, sync_state = 'success', last_synced_at = ?, last_sync_error = NULL, conflict_marker = NULL,
+         payload_json = ?, approval_deadline_at = COALESCE(?, approval_deadline_at), approval_decided_at = ?, conversion_deadline_at = COALESCE(?, conversion_deadline_at),
+         converted_at = ?, fulfilled_at = ?, version = version + 1, updated_at = ?
+     WHERE id = ?`,
+    [
+      body.connectorType,
+      body.approvalExternalId ?? null,
+      body.customerExternalId ?? null,
+      body.state,
+      body.amount,
+      body.currency,
+      now,
+      mergePayload(existing.payload_json, body.payload),
+      body.approvalDeadlineAt ?? null,
+      approvalDecidedAt,
+      body.conversionDeadlineAt ?? null,
+      convertedAt,
+      fulfilledAt,
+      now,
+      existing.id,
+    ],
+  );
+  const row = getQ2oRow(workspaceId, body.quoteExternalId);
+  if (!row) throw new Error("Failed to update quote");
+  return { duplicate: false, record: toQuoteToOrderRecord(row) };
+}
+
+export function syncQuoteToOrderOrder(workspaceIdInput: unknown, bodyInput: unknown): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const body = QuoteToOrderOrderSyncSchema.parse(bodyInput);
+  const duplicate = registerQ2oEvent(workspaceId, "order_sync", body.idempotencyKey);
+  if (duplicate) {
+    return { duplicate: true, workspaceId, quoteExternalId: body.quoteExternalId, orderExternalId: body.orderExternalId };
+  }
+  const existing = getQ2oRow(workspaceId, body.quoteExternalId);
+  const now = nowIso();
+  if (!existing) {
+    if (body.state === "fulfilled") {
+      throw new Error("Cannot fulfill quote without prior conversion state");
+    }
+    const id = randomUUID();
+    db.run(
+      `INSERT INTO quote_to_order_records (
+         id, workspace_id, source_system, quote_external_id, order_external_id, approval_external_id, customer_external_id, state, amount, currency,
+         external_id, sync_state, last_synced_at, last_sync_error, conflict_marker, payload_json, approval_deadline_at, approval_decided_at,
+         conversion_deadline_at, converted_at, fulfilled_at, version, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, 'success', ?, NULL, NULL, ?, NULL, NULL, NULL, ?, NULL, 1, ?, ?)`,
+      [
+        id,
+        workspaceId,
+        body.connectorType,
+        body.quoteExternalId,
+        body.orderExternalId,
+        body.state,
+        body.amount ?? 0,
+        body.currency ?? "EUR",
+        body.quoteExternalId,
+        now,
+        JSON.stringify(body.payload),
+        now,
+        now,
+        now,
+      ],
+    );
+    const row = getQ2oRow(workspaceId, body.quoteExternalId);
+    if (!row) throw new Error("Failed to persist order sync");
+    return { duplicate: false, record: toQuoteToOrderRecord(row) };
+  }
+
+  if (body.expectedVersion !== undefined && existing.version !== body.expectedVersion) {
+    const marker = `version_conflict:${body.expectedVersion}->${existing.version}`;
+    db.run(
+      `UPDATE quote_to_order_records
+       SET sync_state = 'conflict', conflict_marker = ?, last_sync_error = ?, last_synced_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [marker, marker, now, now, existing.id],
+    );
+    return { duplicate: false, conflict: true, conflictMarker: marker };
+  }
+
+  if (!isValidQ2oTransition(existing.state, body.state)) {
+    const marker = `invalid_transition:${existing.state}->${body.state}`;
+    db.run(
+      `UPDATE quote_to_order_records
+       SET sync_state = 'conflict', conflict_marker = ?, last_sync_error = ?, last_synced_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [marker, marker, now, now, existing.id],
+    );
+    return { duplicate: false, conflict: true, conflictMarker: marker };
+  }
+
+  const convertedAt = existing.converted_at ?? now;
+  const fulfilledAt = body.state === "fulfilled" ? (existing.fulfilled_at ?? now) : existing.fulfilled_at;
+  db.run(
+    `UPDATE quote_to_order_records
+     SET source_system = ?, order_external_id = ?, state = ?, amount = COALESCE(?, amount), currency = COALESCE(?, currency),
+         sync_state = 'success', last_synced_at = ?, last_sync_error = NULL, conflict_marker = NULL, payload_json = ?,
+         converted_at = ?, fulfilled_at = ?, version = version + 1, updated_at = ?
+     WHERE id = ?`,
+    [
+      body.connectorType,
+      body.orderExternalId,
+      body.state,
+      body.amount ?? null,
+      body.currency ?? null,
+      now,
+      mergePayload(existing.payload_json, body.payload),
+      convertedAt,
+      fulfilledAt,
+      now,
+      existing.id,
+    ],
+  );
+  const row = getQ2oRow(workspaceId, body.quoteExternalId);
+  if (!row) throw new Error("Failed to update order sync");
+  return { duplicate: false, record: toQuoteToOrderRecord(row) };
+}
+
+export function decideQuoteToOrderApproval(workspaceIdInput: unknown, approvalExternalIdInput: unknown, bodyInput: unknown): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const approvalExternalId = z.string().min(1).parse(approvalExternalIdInput);
+  const body = QuoteToOrderApprovalDecisionSchema.parse(bodyInput);
+  const duplicate = registerQ2oEvent(workspaceId, "approval_decision", body.idempotencyKey);
+  if (duplicate) return { duplicate: true, approvalExternalId };
+
+  const byApproval = db.query<QuoteToOrderRecordRow, [string, string]>(
+    `SELECT id, workspace_id, source_system, quote_external_id, order_external_id, approval_external_id, customer_external_id, state, amount, currency,
+            external_id, sync_state, last_synced_at, last_sync_error, conflict_marker, payload_json, approval_deadline_at, approval_decided_at,
+            conversion_deadline_at, converted_at, fulfilled_at, version, created_at, updated_at
+     FROM quote_to_order_records WHERE workspace_id = ? AND approval_external_id = ?`
+  ).get(workspaceId, approvalExternalId);
+  const existing = byApproval ?? (body.quoteExternalId ? getQ2oRow(workspaceId, body.quoteExternalId) : null);
+  if (!existing) throw new Error(`Approval '${approvalExternalId}' not found for workspace '${workspaceId}'`);
+
+  const targetState: QuoteToOrderState = body.decision === "approved" ? "approved" : "rejected";
+  if (!isValidQ2oTransition(existing.state, targetState)) {
+    const marker = `invalid_transition:${existing.state}->${targetState}`;
+    db.run(
+      `UPDATE quote_to_order_records
+       SET sync_state = 'conflict', conflict_marker = ?, last_sync_error = ?, last_synced_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [marker, marker, nowIso(), nowIso(), existing.id],
+    );
+    return { duplicate: false, conflict: true, conflictMarker: marker };
+  }
+
+  const decidedAt = nowIso();
+  db.run(
+    `UPDATE quote_to_order_records
+     SET state = ?, approval_external_id = COALESCE(?, approval_external_id), approval_decided_at = ?,
+         sync_state = 'success', last_synced_at = ?, last_sync_error = NULL, conflict_marker = NULL,
+         payload_json = ?, version = version + 1, updated_at = ?
+     WHERE id = ?`,
+    [
+      targetState,
+      approvalExternalId,
+      decidedAt,
+      decidedAt,
+      mergePayload(existing.payload_json, { ...body.payload, decidedBy: body.decidedBy, decision: body.decision, decisionAt: decidedAt }),
+      decidedAt,
+      existing.id,
+    ],
+  );
+  const updated = getQ2oRow(workspaceId, existing.quote_external_id);
+  if (!updated) throw new Error("Failed to update approval decision");
+  return { duplicate: false, record: toQuoteToOrderRecord(updated) };
+}
+
+export function getQuoteToOrderPipeline(workspaceIdInput: unknown, filtersInput: unknown = {}): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const filters = z.object({ since: z.string().optional() }).strict().parse(filtersInput);
+  const params: unknown[] = [workspaceId];
+  const whereSince = filters.since ? "AND created_at >= ?" : "";
+  if (filters.since) params.push(filters.since);
+
+  const stateRows = db.query<{ state: QuoteToOrderState; cnt: number; amount: number | null }, unknown[]>(
+    `SELECT state, COUNT(*) as cnt, SUM(amount) as amount
+     FROM quote_to_order_records
+     WHERE workspace_id = ? ${whereSince}
+     GROUP BY state`
+  ).all(...params);
+  const states: Record<QuoteToOrderState, { count: number; amount: number }> = {
+    draft: { count: 0, amount: 0 },
+    submitted: { count: 0, amount: 0 },
+    approved: { count: 0, amount: 0 },
+    rejected: { count: 0, amount: 0 },
+    converted_to_order: { count: 0, amount: 0 },
+    fulfilled: { count: 0, amount: 0 },
+  };
+  for (const row of stateRows) states[row.state] = { count: row.cnt, amount: num(row.amount) };
+
+  const submitted = states.submitted.count + states.approved.count + states.converted_to_order.count + states.fulfilled.count + states.rejected.count;
+  const converted = states.converted_to_order.count + states.fulfilled.count;
+  const conversionRatePct = submitted > 0 ? Number(((converted / submitted) * 100).toFixed(1)) : 0;
+  const revenueAtRisk = states.submitted.amount + states.approved.amount;
+
+  const approvalRows = db.query<{ mins: number }, unknown[]>(
+    `SELECT ((julianday(approval_decided_at) - julianday(created_at)) * 24 * 60) as mins
+     FROM quote_to_order_records
+     WHERE workspace_id = ? AND approval_decided_at IS NOT NULL ${whereSince}`
+  ).all(...params);
+  const medianApprovalMinutes = median(approvalRows.map((r) => num(r.mins)).filter((v) => v > 0));
+
+  const first = db.query<{ submittedAt: string | null; convertedAt: string | null }, [string]>(
+    `SELECT MIN(created_at) as submittedAt, MIN(converted_at) as convertedAt
+     FROM quote_to_order_records
+     WHERE workspace_id = ? AND converted_at IS NOT NULL`
+  ).get(workspaceId);
+  const timeToFirstOrderConversionHours = first?.submittedAt && first?.convertedAt
+    ? Number((((Date.parse(first.convertedAt) - Date.parse(first.submittedAt)) / 3600000)).toFixed(2))
+    : null;
+
+  const stalledRecovered = db.query<{ value: number | null }, [string]>(
+    `SELECT SUM(amount) as value
+     FROM quote_to_order_records
+     WHERE workspace_id = ? AND converted_at IS NOT NULL AND conversion_deadline_at IS NOT NULL AND converted_at > conversion_deadline_at`
+  ).get(workspaceId);
+
+  return {
+    workspaceId,
+    timeframe: { since: filters.since ?? "all_time" },
+    states,
+    metrics: {
+      quoteToOrderConversionRatePct: conversionRatePct,
+      medianApprovalTimeMinutes: medianApprovalMinutes,
+      revenueAtRisk: Math.round(revenueAtRisk),
+      timeToFirstOrderConversionHours,
+      valueRecoveredFromStalledQuotes: Math.round(num(stalledRecovered?.value)),
+    },
+  };
+}
+
+function detectSchemaDrift(payload: Record<string, unknown>, mappings: MasterDataMappingRow[]): { drift: boolean; unmappedFields: string[] } {
+  const mapped = new Set(mappings.map((m) => m.external_field));
+  const fields = Object.keys(payload);
+  const unmapped = fields.filter((f) => !mapped.has(f));
+  return { drift: unmapped.length > 0, unmappedFields: unmapped };
+}
+
+function currentMappingVersion(workspaceId: string, connectorType: ConnectorType, entity: MasterDataEntity): number {
+  const row = db.query<{ maxVersion: number | null }, [string, ConnectorType, MasterDataEntity]>(
+    `SELECT MAX(mapping_version) as maxVersion
+     FROM erp_master_data_mappings
+     WHERE workspace_id = ? AND connector_type = ? AND entity = ?`
+  ).get(workspaceId, connectorType, entity);
+  return Math.max(1, num(row?.maxVersion));
+}
+
+export function syncMasterDataEntity(workspaceIdInput: unknown, entityInput: unknown, bodyInput: unknown): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const entity = MasterDataEntitySchema.parse(entityInput);
+  const body = MasterDataSyncSchema.parse(bodyInput);
+  const duplicate = registerQ2oEvent(workspaceId, "master_data_sync", body.idempotencyKey);
+  if (duplicate) return { duplicate: true, workspaceId, entity };
+
+  const inputRecords = body.records.length > 0
+    ? body.records
+    : (body.externalId && body.payload ? [{ externalId: body.externalId, payload: body.payload }] : []);
+  if (inputRecords.length === 0) {
+    throw new Error("No master data records provided. Use records[] or externalId+payload.");
+  }
+
+  const now = nowIso();
+  const mappings = db.query<MasterDataMappingRow, [string, ConnectorType, MasterDataEntity]>(
+    `SELECT id, workspace_id, connector_type, entity, external_field, unified_field, mapping_version, drift_status, created_at, updated_at
+     FROM erp_master_data_mappings
+     WHERE workspace_id = ? AND connector_type = ? AND entity = ?`
+  ).all(workspaceId, body.connectorType, entity);
+
+  let driftDetected = false;
+  const driftFields = new Set<string>();
+  for (const item of inputRecords) {
+    const payload = item.payload;
+    const schemaHash = Bun.hash(Object.keys(payload).sort().join("|")).toString(16);
+    const drift = detectSchemaDrift(payload, mappings);
+    if (drift.drift) {
+      driftDetected = true;
+      for (const f of drift.unmappedFields) driftFields.add(f);
+      const version = currentMappingVersion(workspaceId, body.connectorType, entity);
+      for (const field of drift.unmappedFields) {
+        db.run(
+          `INSERT INTO erp_master_data_mappings (id, workspace_id, connector_type, entity, external_field, unified_field, mapping_version, drift_status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'changed', ?, ?)`,
+          [randomUUID(), workspaceId, body.connectorType, entity, field, field, version, now, now],
+        );
+      }
+    }
+    db.run(
+      `INSERT INTO erp_master_data_records (
+         id, workspace_id, connector_type, entity, external_id, source_system, sync_state, last_synced_at, last_sync_error, schema_hash, payload_json, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 'success', ?, NULL, ?, ?, ?, ?)
+       ON CONFLICT(workspace_id, connector_type, entity, external_id) DO UPDATE SET
+         sync_state = 'success',
+         last_synced_at = excluded.last_synced_at,
+         last_sync_error = NULL,
+         schema_hash = excluded.schema_hash,
+         payload_json = excluded.payload_json,
+         updated_at = excluded.updated_at`,
+      [
+        randomUUID(),
+        workspaceId,
+        body.connectorType,
+        entity,
+        item.externalId,
+        body.connectorType,
+        now,
+        schemaHash,
+        JSON.stringify(payload),
+        now,
+        now,
+      ],
+    );
+  }
+
+  return {
+    duplicate: false,
+    workspaceId,
+    connectorType: body.connectorType,
+    entity,
+    syncedRecords: inputRecords.length,
+    driftDetected,
+    driftFields: Array.from(driftFields.values()),
+    mappingVersion: currentMappingVersion(workspaceId, body.connectorType, entity),
+  };
+}
+
+export function listMasterDataMappings(filtersInput: unknown): { items: MasterDataMapping[] } {
+  const filters = MasterDataMappingListSchema.parse(filtersInput);
+  const where: string[] = ["workspace_id = ?"];
+  const params: unknown[] = [filters.workspaceId];
+  if (filters.connectorType) {
+    where.push("connector_type = ?");
+    params.push(filters.connectorType);
+  }
+  if (filters.entity) {
+    where.push("entity = ?");
+    params.push(filters.entity);
+  }
+  const sql = `SELECT id, workspace_id, connector_type, entity, external_field, unified_field, mapping_version, drift_status, created_at, updated_at
+               FROM erp_master_data_mappings
+               WHERE ${where.join(" AND ")}
+               ORDER BY updated_at DESC
+               LIMIT ?`;
+  params.push(filters.limit);
+  const rows = db.query<MasterDataMappingRow, unknown[]>(sql).all(...params);
+  return { items: rows.map(toMasterDataMapping) };
+}
+
+export function updateMasterDataMapping(mappingIdInput: unknown, bodyInput: unknown): MasterDataMapping {
+  const mappingId = z.string().min(1).parse(mappingIdInput);
+  const body = MasterDataMappingUpdateSchema.parse(bodyInput);
+  const existing = db.query<MasterDataMappingRow, [string]>(
+    `SELECT id, workspace_id, connector_type, entity, external_field, unified_field, mapping_version, drift_status, created_at, updated_at
+     FROM erp_master_data_mappings WHERE id = ?`
+  ).get(mappingId);
+  if (!existing) throw new Error(`Master data mapping '${mappingId}' not found`);
+
+  const nextVersion = existing.mapping_version + 1;
+  const now = nowIso();
+  db.run(
+    `UPDATE erp_master_data_mappings
+     SET external_field = ?, unified_field = ?, mapping_version = ?, drift_status = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      body.externalField ?? existing.external_field,
+      body.unifiedField ?? existing.unified_field,
+      nextVersion,
+      body.driftStatus ?? "ok",
+      now,
+      mappingId,
+    ],
+  );
+  const updated = db.query<MasterDataMappingRow, [string]>(
+    `SELECT id, workspace_id, connector_type, entity, external_field, unified_field, mapping_version, drift_status, created_at, updated_at
+     FROM erp_master_data_mappings WHERE id = ?`
+  ).get(mappingId);
+  if (!updated) throw new Error("Failed to update master data mapping");
+  return toMasterDataMapping(updated);
 }
 
 export function workflowDefinitionFor(productInput: unknown, context: Record<string, unknown> = {}): WorkflowDefinition {
@@ -1850,6 +2671,26 @@ export function getCommercialKpis(filtersInput: unknown = {}): Record<string, un
   const winRate = proposals > 0 ? Number(((signed / proposals) * 100).toFixed(1)) : 0;
 
   const targets = { qualifiedCalls: 10, pilotProposals: 3, signedPilots: 1 };
+  const conversionRow = db.query<{ submittedAt: string | null; convertedAt: string | null }, []>(
+    `SELECT MIN(created_at) as submittedAt, MIN(converted_at) as convertedAt
+     FROM quote_to_order_records
+     WHERE converted_at IS NOT NULL`
+  ).get();
+  const timeToFirstOrderConversionHours = conversionRow?.submittedAt && conversionRow?.convertedAt
+    ? Number(((Date.parse(conversionRow.convertedAt) - Date.parse(conversionRow.submittedAt)) / 3600000).toFixed(2))
+    : null;
+  const recoveredRow = db.query<{ value: number | null }, []>(
+    `SELECT SUM(amount) as value
+     FROM quote_to_order_records
+     WHERE converted_at IS NOT NULL AND conversion_deadline_at IS NOT NULL AND converted_at > conversion_deadline_at`
+  ).get();
+  const resolvedBreaches = db.query<{ cnt: number }, []>(
+    `SELECT COUNT(*) as cnt
+     FROM workflow_sla_incidents
+     WHERE status = 'resolved'`
+  ).get();
+  const breachCostAvoided = num(resolvedBreaches?.cnt) * 150;
+
   return {
     timeframe: { since: filters.since ?? "all_time" },
     product: filters.product ?? "all",
@@ -1868,6 +2709,140 @@ export function getCommercialKpis(filtersInput: unknown = {}): Record<string, un
       targetReached: calls >= targets.qualifiedCalls && proposals >= targets.pilotProposals && signed >= targets.signedPilots,
     },
     pipelineValueEur: Math.round(pipelineValueEur),
+    mustHaveMetrics: {
+      timeToFirstOrderConversionHours,
+      valueRecoveredFromStalledQuotes: Math.round(num(recoveredRow?.value)),
+      breachCostAvoidedEur: breachCostAvoided,
+    },
+  };
+}
+
+export function getExecutiveAnalytics(filtersInput: unknown = {}): Record<string, unknown> {
+  const filters = z.object({
+    workspaceId: z.string().optional(),
+    since: z.string().optional(),
+  }).strict().parse(filtersInput);
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (filters.workspaceId) {
+    where.push("workspace_id = ?");
+    params.push(filters.workspaceId);
+  }
+  if (filters.since) {
+    where.push("created_at >= ?");
+    params.push(filters.since);
+  }
+  const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+
+  const totals = db.query<{ submitted: number; converted: number; revenueRisk: number | null }, unknown[]>(
+    `SELECT
+       SUM(CASE WHEN state IN ('submitted','approved','converted_to_order','fulfilled','rejected') THEN 1 ELSE 0 END) as submitted,
+       SUM(CASE WHEN state IN ('converted_to_order','fulfilled') THEN 1 ELSE 0 END) as converted,
+       SUM(CASE WHEN state IN ('submitted','approved') THEN amount ELSE 0 END) as revenueRisk
+     FROM quote_to_order_records
+     ${clause}`
+  ).get(...params);
+  const approvalRows = db.query<{ mins: number }, unknown[]>(
+    `SELECT ((julianday(approval_decided_at) - julianday(created_at)) * 24 * 60) as mins
+     FROM quote_to_order_records
+     ${clause.length > 0 ? `${clause} AND approval_decided_at IS NOT NULL` : "WHERE approval_decided_at IS NOT NULL"}`
+  ).all(...params);
+  const conversionRate = num(totals?.submitted) > 0 ? Number(((num(totals?.converted) / num(totals?.submitted)) * 100).toFixed(1)) : 0;
+
+  const onboardingRows = db.query<{ metrics_json: string }, []>(
+    `SELECT metrics_json
+     FROM onboarding_snapshots
+     WHERE phase = 'current'
+     ORDER BY created_at DESC`
+  ).all();
+  let timeSavedHours = 0;
+  let manualStepsRemoved = 0;
+  let estimatedValue = 0;
+  for (const row of onboardingRows) {
+    const parsed = parseMetadata(row.metrics_json);
+    const derived = (parsed.derived as Record<string, unknown> | undefined) ?? {};
+    timeSavedHours += num(derived.timeSavedHours);
+    manualStepsRemoved += num(derived.manualStepsRemoved);
+    estimatedValue += num(derived.estimatedValueEur);
+  }
+
+  return {
+    timeframe: { since: filters.since ?? "all_time" },
+    workspaceId: filters.workspaceId ?? "all",
+    quoteToOrderConversionRatePct: conversionRate,
+    medianApprovalTimeMinutes: median(approvalRows.map((r) => num(r.mins)).filter((v) => v > 0)),
+    revenueAtRiskEur: Math.round(num(totals?.revenueRisk)),
+    timeSavedHours: Number(timeSavedHours.toFixed(1)),
+    manualStepsRemoved: Math.round(manualStepsRemoved),
+    estimatedValueEur: Math.round(estimatedValue),
+  };
+}
+
+export function getOpsAnalytics(filtersInput: unknown = {}): Record<string, unknown> {
+  const filters = z.object({
+    since: z.string().optional(),
+  }).strict().parse(filtersInput);
+  const params: unknown[] = [];
+  const where = filters.since ? "WHERE created_at >= ?" : "";
+  if (filters.since) params.push(filters.since);
+
+  const throughput = db.query<{
+    connector_type: ConnectorType;
+    entity_type: "lead" | "deal" | "invoice" | "quote" | "order";
+    total: number;
+    failed: number;
+  }, unknown[]>(
+    `SELECT connector_type, entity_type, COUNT(*) as total,
+            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+     FROM connector_sync_runs
+     ${where}
+     GROUP BY connector_type, entity_type`
+  ).all(...params).map((row) => ({
+    connectorType: row.connector_type,
+    entityType: row.entity_type,
+    totalRuns: row.total,
+    failedRuns: row.failed,
+    failureRatePct: row.total > 0 ? Number(((row.failed / row.total) * 100).toFixed(1)) : 0,
+  }));
+
+  const retryRow = db.query<{ retries: number }, unknown[]>(
+    `SELECT COUNT(*) as retries
+     FROM connector_sync_runs
+     ${where.length > 0 ? `${where} AND attempts > 1` : "WHERE attempts > 1"}`
+  ).get(...params);
+  const deadLetterRow = db.query<{ cnt: number }, unknown[]>(
+    `SELECT COUNT(*) as cnt FROM connector_dead_letters ${where}`
+  ).get(...params);
+  const replayRow = db.query<{ cnt: number }, unknown[]>(
+    `SELECT COUNT(*) as cnt FROM connector_replay_runs ${where}`
+  ).get(...params);
+  const incidentTimeline = db.query<{ day: string; openCnt: number; resolvedCnt: number }, unknown[]>(
+    `SELECT substr(created_at, 1, 10) as day,
+            SUM(CASE WHEN status IN ('open','acknowledged') THEN 1 ELSE 0 END) as openCnt,
+            SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolvedCnt
+     FROM workflow_sla_incidents
+     ${where}
+     GROUP BY substr(created_at, 1, 10)
+     ORDER BY day ASC`
+  ).all(...params);
+  const mttrRows = db.query<{ mins: number }, []>(
+    `SELECT ((julianday(resolved_at) - julianday(created_at)) * 24 * 60) as mins
+     FROM workflow_sla_incidents
+     WHERE status = 'resolved' AND resolved_at IS NOT NULL`
+  ).all();
+
+  return {
+    timeframe: { since: filters.since ?? "all_time" },
+    syncThroughput: throughput,
+    reliability: {
+      retries: num(retryRow?.retries),
+      deadLetters: num(deadLetterRow?.cnt),
+      replays: num(replayRow?.cnt),
+    },
+    sla: {
+      breachTimeline: incidentTimeline,
+      mttrMinutes: median(mttrRows.map((r) => num(r.mins)).filter((v) => v > 0)),
+    },
   };
 }
 
@@ -1901,6 +2876,7 @@ function computeWorkflowSlaStatus(product: ProductType, since?: string): Workflo
   const thresholds = WORKFLOW_SLA_TARGETS[product];
 
   const reasons: string[] = [];
+  const breachBreakdown: WorkflowSlaStatusItem["breachBreakdown"] = [];
   if (totalRuns > 0 && failureRatePct > thresholds.maxFailureRatePct) {
     reasons.push(`Failure rate ${failureRatePct}% exceeds SLA max ${thresholds.maxFailureRatePct}%.`);
   }
@@ -1911,10 +2887,53 @@ function computeWorkflowSlaStatus(product: ProductType, since?: string): Workflo
     reasons.push("No workflow runs observed in selected timeframe.");
   }
 
+  if (product === "quote-to-order") {
+    const approvalOverdue = db.query<{ cnt: number }, [string]>(
+      `SELECT COUNT(*) as cnt
+       FROM quote_to_order_records
+       WHERE state = 'submitted'
+         AND approval_deadline_at IS NOT NULL
+         AND approval_decided_at IS NULL
+         AND approval_deadline_at < ?`
+    ).get(nowIso());
+    const conversionStalled = db.query<{ cnt: number }, [string]>(
+      `SELECT COUNT(*) as cnt
+       FROM quote_to_order_records
+       WHERE state = 'approved'
+         AND conversion_deadline_at IS NOT NULL
+         AND converted_at IS NULL
+         AND conversion_deadline_at < ?`
+    ).get(nowIso());
+    const approvalCnt = num(approvalOverdue?.cnt);
+    const stalledCnt = num(conversionStalled?.cnt);
+    if (approvalCnt > 0) {
+      breachBreakdown.push({ type: "approval_overdue", count: approvalCnt });
+      reasons.push(`approval_overdue detected (${approvalCnt})`);
+    }
+    if (stalledCnt > 0) {
+      breachBreakdown.push({ type: "conversion_stalled", count: stalledCnt });
+      reasons.push(`conversion_stalled detected (${stalledCnt})`);
+    }
+  }
+
+  const syncParams: unknown[] = [];
+  const syncWhere = since ? "AND created_at >= ?" : "";
+  if (since) syncParams.push(since);
+  const syncFailure = db.query<{ cnt: number }, unknown[]>(
+    `SELECT COUNT(*) as cnt
+     FROM connector_sync_runs
+     WHERE status = 'failed' AND entity_type IN ('quote', 'order') ${syncWhere}`
+  ).get(...syncParams);
+  const syncFailureCnt = num(syncFailure?.cnt);
+  if (syncFailureCnt >= 3) {
+    breachBreakdown.push({ type: "sync_failure_burst", count: syncFailureCnt });
+    reasons.push(`sync_failure_burst detected (${syncFailureCnt})`);
+  }
+
   const breach = reasons.length > 0;
   const severity: "ok" | "warning" | "critical" = !breach
     ? "ok"
-    : (failureRatePct > thresholds.maxFailureRatePct + 10 || completedRuns === 0) ? "critical" : "warning";
+    : (failureRatePct > thresholds.maxFailureRatePct + 10 || completedRuns === 0 || breachBreakdown.some((b) => b.type !== "sync_failure_burst")) ? "critical" : "warning";
 
   return {
     product,
@@ -1923,6 +2942,7 @@ function computeWorkflowSlaStatus(product: ProductType, since?: string): Workflo
     breach,
     severity,
     reasons,
+    breachBreakdown,
   };
 }
 
@@ -1950,6 +2970,7 @@ function toWorkflowIncident(row: WorkflowSlaIncidentRow): WorkflowSlaIncident {
     reason: row.reason,
     status: row.status,
     createdAt: row.created_at,
+    resolvedAt: row.resolved_at ?? undefined,
   };
 }
 
@@ -1966,7 +2987,7 @@ export function escalateWorkflowSlaBreaches(input: unknown = {}): Record<string,
     for (const reason of item.reasons) {
       const fingerprint = hashFingerprint(`${item.product}:${reason}`);
       const recent = db.query<WorkflowSlaIncidentRow, [ProductType, string, string]>(
-        `SELECT id, product, severity, reason, fingerprint, status, created_at
+        `SELECT id, product, severity, reason, fingerprint, status, created_at, resolved_at
          FROM workflow_sla_incidents
          WHERE product = ? AND fingerprint = ? AND status = 'open' AND created_at >= ?
          ORDER BY created_at DESC
@@ -2000,7 +3021,7 @@ export function escalateWorkflowSlaBreaches(input: unknown = {}): Record<string,
 export function listWorkflowSlaIncidents(filtersInput: unknown = {}): { items: WorkflowSlaIncident[] } {
   const schema = z.object({
     product: ProductTypeSchema.optional(),
-    status: z.enum(["open", "resolved"]).optional(),
+    status: z.enum(["open", "acknowledged", "resolved"]).optional(),
     limit: z.number().int().min(1).max(200).optional().default(50),
   }).strict();
   const filters = schema.parse(filtersInput);
@@ -2014,7 +3035,7 @@ export function listWorkflowSlaIncidents(filtersInput: unknown = {}): { items: W
     where.push("status = ?");
     params.push(filters.status);
   }
-  const sql = `SELECT id, product, severity, reason, fingerprint, status, created_at
+  const sql = `SELECT id, product, severity, reason, fingerprint, status, created_at, resolved_at
                FROM workflow_sla_incidents
                ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
                ORDER BY created_at DESC
@@ -2022,6 +3043,29 @@ export function listWorkflowSlaIncidents(filtersInput: unknown = {}): { items: W
   params.push(filters.limit);
   const rows = db.query<WorkflowSlaIncidentRow, unknown[]>(sql).all(...params);
   return { items: rows.map(toWorkflowIncident) };
+}
+
+export function updateWorkflowSlaIncidentStatus(incidentIdInput: unknown, statusInput: unknown): WorkflowSlaIncident {
+  const incidentId = z.string().min(1).parse(incidentIdInput);
+  const status = z.enum(["acknowledged", "resolved"]).parse(statusInput);
+  const existing = db.query<WorkflowSlaIncidentRow, [string]>(
+    `SELECT id, product, severity, reason, fingerprint, status, created_at, resolved_at
+     FROM workflow_sla_incidents WHERE id = ?`
+  ).get(incidentId);
+  if (!existing) throw new Error(`SLA incident '${incidentId}' not found`);
+  const resolvedAt = status === "resolved" ? nowIso() : existing.resolved_at;
+  db.run(
+    `UPDATE workflow_sla_incidents
+     SET status = ?, resolved_at = ?
+     WHERE id = ?`,
+    [status, resolvedAt ?? null, incidentId],
+  );
+  const updated = db.query<WorkflowSlaIncidentRow, [string]>(
+    `SELECT id, product, severity, reason, fingerprint, status, created_at, resolved_at
+     FROM workflow_sla_incidents WHERE id = ?`
+  ).get(incidentId);
+  if (!updated) throw new Error("Failed to update incident");
+  return toWorkflowIncident(updated);
 }
 
 export function validateProductType(input: unknown): ProductType {
@@ -2032,7 +3076,16 @@ export function validateConnectorType(input: unknown): ConnectorType {
   return ConnectorTypeSchema.parse(input);
 }
 
+export function validateMasterDataEntity(input: unknown): MasterDataEntity {
+  return MasterDataEntitySchema.parse(input);
+}
+
 export function resetErpPlatformForTests(): void {
+  db.run(`DELETE FROM connector_replay_runs`);
+  db.run(`DELETE FROM erp_master_data_records`);
+  db.run(`DELETE FROM erp_master_data_mappings`);
+  db.run(`DELETE FROM quote_to_order_events`);
+  db.run(`DELETE FROM quote_to_order_records`);
   db.run(`DELETE FROM workflow_sla_incidents`);
   db.run(`DELETE FROM commercial_pipeline_events`);
   db.run(`DELETE FROM onboarding_snapshots`);
