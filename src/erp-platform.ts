@@ -95,6 +95,17 @@ const CommercialKpiFilterSchema = z.object({
   since: z.string().optional(),
 }).strict();
 
+const WorkflowSlaFilterSchema = z.object({
+  product: ProductTypeSchema.optional(),
+  since: z.string().optional(),
+}).strict();
+
+const WorkflowSlaEscalateSchema = z.object({
+  product: ProductTypeSchema.optional(),
+  since: z.string().optional(),
+  minIntervalMinutes: z.number().int().min(1).max(24 * 60).optional().default(60),
+}).strict();
+
 interface ConnectorRow {
   type: ConnectorType;
   auth_mode: "oauth" | "api-key";
@@ -189,6 +200,16 @@ interface CommercialPipelineEventRow {
   value_eur: number | null;
   notes: string | null;
   occurred_at: string;
+  created_at: string;
+}
+
+interface WorkflowSlaIncidentRow {
+  id: string;
+  product: ProductType;
+  severity: "warning" | "critical";
+  reason: string;
+  fingerprint: string;
+  status: "open" | "resolved";
   created_at: string;
 }
 
@@ -309,6 +330,32 @@ export interface CommercialPipelineEvent {
   createdAt: string;
 }
 
+export interface WorkflowSlaStatusItem {
+  product: ProductType;
+  thresholds: {
+    maxFailureRatePct: number;
+    minCompletedRuns: number;
+  };
+  stats: {
+    totalRuns: number;
+    completedRuns: number;
+    failedRuns: number;
+    failureRatePct: number;
+  };
+  breach: boolean;
+  severity: "ok" | "warning" | "critical";
+  reasons: string[];
+}
+
+export interface WorkflowSlaIncident {
+  id: string;
+  product: ProductType;
+  severity: "warning" | "critical";
+  reason: string;
+  status: "open" | "resolved";
+  createdAt: string;
+}
+
 const dbPath = process.env.A2A_ERP_DB ?? join(homedir(), ".a2a-mcp", "erp-platform.db");
 const db = new Database(dbPath);
 db.run("PRAGMA journal_mode=WAL");
@@ -418,6 +465,17 @@ db.run(`CREATE TABLE IF NOT EXISTS commercial_pipeline_events (
 )`);
 db.run("CREATE INDEX IF NOT EXISTS idx_commercial_events_product_stage ON commercial_pipeline_events(product, stage)");
 db.run("CREATE INDEX IF NOT EXISTS idx_commercial_events_occurred ON commercial_pipeline_events(occurred_at DESC)");
+db.run(`CREATE TABLE IF NOT EXISTS workflow_sla_incidents (
+  id TEXT PRIMARY KEY,
+  product TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TEXT NOT NULL
+)`);
+db.run("CREATE INDEX IF NOT EXISTS idx_workflow_sla_incidents_product_created ON workflow_sla_incidents(product, created_at DESC)");
+db.run("CREATE INDEX IF NOT EXISTS idx_workflow_sla_incidents_fingerprint ON workflow_sla_incidents(fingerprint)");
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -1813,6 +1871,159 @@ export function getCommercialKpis(filtersInput: unknown = {}): Record<string, un
   };
 }
 
+const WORKFLOW_SLA_TARGETS: Record<ProductType, { maxFailureRatePct: number; minCompletedRuns: number }> = {
+  "quote-to-order": { maxFailureRatePct: 15, minCompletedRuns: 3 },
+  "lead-to-cash": { maxFailureRatePct: 20, minCompletedRuns: 3 },
+  collections: { maxFailureRatePct: 25, minCompletedRuns: 2 },
+};
+
+function hashFingerprint(value: string): string {
+  return Bun.hash(value).toString(16);
+}
+
+function computeWorkflowSlaStatus(product: ProductType, since?: string): WorkflowSlaStatusItem {
+  const params: unknown[] = [product];
+  const whereSince = since ? "AND created_at >= ?" : "";
+  if (since) params.push(since);
+
+  const row = db.query<{ total: number; completed: number; failed: number }, unknown[]>(
+    `SELECT COUNT(*) as total,
+            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+     FROM product_workflow_runs
+     WHERE product = ? ${whereSince}`
+  ).get(...params) ?? { total: 0, completed: 0, failed: 0 };
+
+  const totalRuns = num(row.total);
+  const completedRuns = num(row.completed);
+  const failedRuns = num(row.failed);
+  const failureRatePct = totalRuns > 0 ? Number(((failedRuns / totalRuns) * 100).toFixed(1)) : 0;
+  const thresholds = WORKFLOW_SLA_TARGETS[product];
+
+  const reasons: string[] = [];
+  if (totalRuns > 0 && failureRatePct > thresholds.maxFailureRatePct) {
+    reasons.push(`Failure rate ${failureRatePct}% exceeds SLA max ${thresholds.maxFailureRatePct}%.`);
+  }
+  if (totalRuns > 0 && completedRuns < thresholds.minCompletedRuns) {
+    reasons.push(`Completed runs ${completedRuns} below SLA minimum ${thresholds.minCompletedRuns}.`);
+  }
+  if (totalRuns === 0) {
+    reasons.push("No workflow runs observed in selected timeframe.");
+  }
+
+  const breach = reasons.length > 0;
+  const severity: "ok" | "warning" | "critical" = !breach
+    ? "ok"
+    : (failureRatePct > thresholds.maxFailureRatePct + 10 || completedRuns === 0) ? "critical" : "warning";
+
+  return {
+    product,
+    thresholds,
+    stats: { totalRuns, completedRuns, failedRuns, failureRatePct },
+    breach,
+    severity,
+    reasons,
+  };
+}
+
+export function getWorkflowSlaStatus(filtersInput: unknown = {}): Record<string, unknown> {
+  const filters = WorkflowSlaFilterSchema.parse(filtersInput);
+  const products = filters.product ? [filters.product] : (["quote-to-order", "lead-to-cash", "collections"] as ProductType[]);
+  const items = products.map((p) => computeWorkflowSlaStatus(p, filters.since));
+  const breaches = items.filter((i) => i.breach);
+  return {
+    timeframe: { since: filters.since ?? "all_time" },
+    items,
+    summary: {
+      totalProducts: items.length,
+      breachedProducts: breaches.length,
+      criticalBreaches: breaches.filter((b) => b.severity === "critical").length,
+    },
+  };
+}
+
+function toWorkflowIncident(row: WorkflowSlaIncidentRow): WorkflowSlaIncident {
+  return {
+    id: row.id,
+    product: row.product,
+    severity: row.severity,
+    reason: row.reason,
+    status: row.status,
+    createdAt: row.created_at,
+  };
+}
+
+export function escalateWorkflowSlaBreaches(input: unknown = {}): Record<string, unknown> {
+  const parsed = WorkflowSlaEscalateSchema.parse(input);
+  const status = getWorkflowSlaStatus({ product: parsed.product, since: parsed.since });
+  const items = (status.items as WorkflowSlaStatusItem[]).filter((i) => i.breach);
+  const now = Date.now();
+  const minTs = new Date(now - parsed.minIntervalMinutes * 60_000).toISOString();
+  const created: WorkflowSlaIncident[] = [];
+  const skipped: Array<{ product: ProductType; reason: string }> = [];
+
+  for (const item of items) {
+    for (const reason of item.reasons) {
+      const fingerprint = hashFingerprint(`${item.product}:${reason}`);
+      const recent = db.query<WorkflowSlaIncidentRow, [ProductType, string, string]>(
+        `SELECT id, product, severity, reason, fingerprint, status, created_at
+         FROM workflow_sla_incidents
+         WHERE product = ? AND fingerprint = ? AND status = 'open' AND created_at >= ?
+         ORDER BY created_at DESC
+         LIMIT 1`
+      ).get(item.product, fingerprint, minTs);
+      if (recent) {
+        skipped.push({ product: item.product, reason });
+        continue;
+      }
+      const id = randomUUID();
+      const createdAt = nowIso();
+      const severity = item.severity === "critical" ? "critical" : "warning";
+      db.run(
+        `INSERT INTO workflow_sla_incidents (id, product, severity, reason, fingerprint, status, created_at)
+         VALUES (?, ?, ?, ?, ?, 'open', ?)`,
+        [id, item.product, severity, reason, fingerprint, createdAt],
+      );
+      created.push({ id, product: item.product, severity, reason, status: "open", createdAt });
+    }
+  }
+
+  return {
+    created,
+    skipped,
+    escalatedCount: created.length,
+    skippedCount: skipped.length,
+    minIntervalMinutes: parsed.minIntervalMinutes,
+  };
+}
+
+export function listWorkflowSlaIncidents(filtersInput: unknown = {}): { items: WorkflowSlaIncident[] } {
+  const schema = z.object({
+    product: ProductTypeSchema.optional(),
+    status: z.enum(["open", "resolved"]).optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict();
+  const filters = schema.parse(filtersInput);
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (filters.product) {
+    where.push("product = ?");
+    params.push(filters.product);
+  }
+  if (filters.status) {
+    where.push("status = ?");
+    params.push(filters.status);
+  }
+  const sql = `SELECT id, product, severity, reason, fingerprint, status, created_at
+               FROM workflow_sla_incidents
+               ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+               ORDER BY created_at DESC
+               LIMIT ?`;
+  params.push(filters.limit);
+  const rows = db.query<WorkflowSlaIncidentRow, unknown[]>(sql).all(...params);
+  return { items: rows.map(toWorkflowIncident) };
+}
+
 export function validateProductType(input: unknown): ProductType {
   return ProductTypeSchema.parse(input);
 }
@@ -1822,6 +2033,7 @@ export function validateConnectorType(input: unknown): ConnectorType {
 }
 
 export function resetErpPlatformForTests(): void {
+  db.run(`DELETE FROM workflow_sla_incidents`);
   db.run(`DELETE FROM commercial_pipeline_events`);
   db.run(`DELETE FROM onboarding_snapshots`);
   db.run(`DELETE FROM onboarding_sessions`);

@@ -45,7 +45,7 @@ const ROLE_PERMISSIONS: Record<Role, Set<string>> = {
     "delegate", "list_agents", "register_agent", "unregister_agent",
     "sandbox_execute", "sandbox_vars", "workflow_execute",
     "agency_workflow_templates", "agency_roi_snapshot",
-    "erp_connector_connect", "erp_connector_sync", "erp_connector_status", "erp_connector_renew", "erp_connector_renew_due", "erp_workflow_run", "erp_kpis", "erp_connector_kpis", "erp_connector_renewals", "erp_connector_renewals_export", "erp_connector_renewals_snapshot", "erp_connector_renewals_verify", "erp_connector_trust_report", "erp_connector_sales_packet", "erp_pilot_readiness", "erp_launch_pilot", "erp_pilot_launches", "erp_onboarding_create", "erp_onboarding_capture", "erp_onboarding_report", "erp_onboarding_list", "erp_commercial_event_record", "erp_commercial_kpis",
+    "erp_connector_connect", "erp_connector_sync", "erp_connector_status", "erp_connector_renew", "erp_connector_renew_due", "erp_workflow_run", "erp_kpis", "erp_connector_kpis", "erp_connector_renewals", "erp_connector_renewals_export", "erp_connector_renewals_snapshot", "erp_connector_renewals_verify", "erp_connector_trust_report", "erp_connector_sales_packet", "erp_pilot_readiness", "erp_launch_pilot", "erp_pilot_launches", "erp_onboarding_create", "erp_onboarding_capture", "erp_onboarding_report", "erp_onboarding_list", "erp_commercial_event_record", "erp_commercial_kpis", "erp_workflow_sla_status", "erp_workflow_sla_escalate", "erp_workflow_sla_incidents",
     "compose_pipeline", "execute_pipeline", "list_pipelines",
     "collaborate", "event_publish", "event_subscribe", "event_replay",
     "cache_stats", "cache_invalidate", "cache_configure",
@@ -56,7 +56,7 @@ const ROLE_PERMISSIONS: Record<Role, Set<string>> = {
   viewer: new Set([
     "delegate", "list_agents",
     "agency_workflow_templates", "agency_roi_snapshot",
-    "erp_connector_status", "erp_kpis", "erp_connector_kpis", "erp_connector_renewals", "erp_connector_renewals_export", "erp_connector_renewals_verify", "erp_connector_trust_report", "erp_connector_sales_packet", "erp_pilot_readiness", "erp_pilot_launches", "erp_onboarding_report", "erp_onboarding_list", "erp_commercial_kpis",
+    "erp_connector_status", "erp_kpis", "erp_connector_kpis", "erp_connector_renewals", "erp_connector_renewals_export", "erp_connector_renewals_verify", "erp_connector_trust_report", "erp_connector_sales_packet", "erp_pilot_readiness", "erp_pilot_launches", "erp_onboarding_report", "erp_onboarding_list", "erp_commercial_kpis", "erp_workflow_sla_status", "erp_workflow_sla_incidents",
     "get_metrics", "list_traces", "get_trace", "search_traces",
     "cache_stats", "list_capabilities", "capability_stats",
     "recall",

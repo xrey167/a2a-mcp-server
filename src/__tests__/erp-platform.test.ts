@@ -6,14 +6,17 @@ import {
   connectConnector,
   createOnboardingSession,
   createPilotLaunchRun,
+  escalateWorkflowSlaBreaches,
   exportConnectorRenewalsCsv,
   getCommercialKpis,
   getConnectorKpis,
   getConnectorStatus,
   getProductKpis,
+  getWorkflowSlaStatus,
   listOnboardingSessions,
   listConnectorRenewals,
   listPilotLaunchRuns,
+  listWorkflowSlaIncidents,
   recordCommercialEvent,
   recordWorkflowRun,
   renewDueConnectors,
@@ -504,5 +507,25 @@ describe("erp-platform", () => {
     expect(funnel.proposalsSent).toBe(3);
     expect(funnel.pilotsSigned).toBe(1);
     expect(progress.targetReached).toBe(true);
+  });
+
+  test("workflow SLA status/escalation works across modules", () => {
+    const q1 = recordWorkflowRun("quote-to-order", "running", null, {});
+    updateWorkflowRun(q1, "failed", "approval timeout");
+    const q2 = recordWorkflowRun("quote-to-order", "running", null, {});
+    updateWorkflowRun(q2, "failed", "erp sync failed");
+    const q3 = recordWorkflowRun("quote-to-order", "running", null, {});
+    updateWorkflowRun(q3, "completed");
+
+    const status = getWorkflowSlaStatus({ product: "quote-to-order" });
+    const item = (status.items as Array<{ breach: boolean; severity: string }>)[0];
+    expect(item.breach).toBe(true);
+    expect(item.severity).not.toBe("ok");
+
+    const escalation = escalateWorkflowSlaBreaches({ product: "quote-to-order", minIntervalMinutes: 120 });
+    expect((escalation as { escalatedCount: number }).escalatedCount).toBeGreaterThan(0);
+
+    const incidents = listWorkflowSlaIncidents({ product: "quote-to-order", status: "open", limit: 20 });
+    expect(incidents.items.length).toBeGreaterThan(0);
   });
 });

@@ -275,6 +275,9 @@ The orchestrator exposes 35 tools via the MCP stdio interface. These are the too
 | `erp_onboarding_list` | List onboarding sessions by status |
 | `erp_commercial_event_record` | Record funnel events (`qualified_call`, `proposal_sent`, `pilot_signed`) |
 | `erp_commercial_kpis` | Track commercial acceptance KPIs against wave targets (10/3/1) |
+| `erp_workflow_sla_status` | Evaluate SLA health for all workflow modules |
+| `erp_workflow_sla_escalate` | Create SLA incidents for breached modules with dedupe |
+| `erp_workflow_sla_incidents` | List workflow SLA incidents for operations follow-up |
 
 ### Collaboration
 
@@ -437,6 +440,9 @@ Shared connector core for Odoo, Business Central, and Dynamics CRM with two-way 
 | `GET` | `/v1/onboarding/sessions/{id}/report` | Build onboarding report with baseline/current deltas and expansion recommendation |
 | `POST` | `/v1/commercial/events` | Record commercial funnel event for a product |
 | `GET` | `/v1/commercial/kpis` | Retrieve funnel conversion and target progress KPIs (`product`, `since`) |
+| `GET` | `/v1/workflows/sla/status` | SLA status for `quote-to-order`, `lead-to-cash`, and `collections` |
+| `POST` | `/v1/workflows/sla/escalate` | Create SLA incidents for breached modules |
+| `GET` | `/v1/workflows/sla/incidents` | List SLA incidents (`product`, `status`, `limit`) |
 
 Auto-renew scheduler defaults: enabled, hourly sweep interval, up to 5-minute jitter. Override via env:
 `A2A_ERP_AUTO_RENEW_ENABLED`, `A2A_ERP_SWEEP_INTERVAL_MS`, `A2A_ERP_SWEEP_JITTER_MS`.

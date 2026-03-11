@@ -63,9 +63,12 @@ import {
   listOnboardingSessions,
   listConnectorRenewals,
   listPilotLaunchRuns,
+  listWorkflowSlaIncidents,
   recordCommercialEvent,
+  escalateWorkflowSlaBreaches,
   getConnectorKpis,
   getConnectorStatus,
+  getWorkflowSlaStatus,
   getProductKpis,
   listConnectorStatuses,
   recordWorkflowRun,
@@ -791,6 +794,20 @@ const OrchestratorSchemas = {
     product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
     since: z.string().optional(),
   }).strict(),
+  erp_workflow_sla_status: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+    since: z.string().optional(),
+  }).strict(),
+  erp_workflow_sla_escalate: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+    since: z.string().optional(),
+    minIntervalMinutes: z.number().int().min(1).max(24 * 60).optional().default(60),
+  }).strict(),
+  erp_workflow_sla_incidents: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+    status: z.enum(["open", "resolved"]).optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict(),
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -1255,6 +1272,21 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
     case "erp_commercial_kpis": {
       const { product, since } = validateOrchestrator("erp_commercial_kpis", args);
       return JSON.stringify(getCommercialKpis({ product, since }), null, 2);
+    }
+
+    case "erp_workflow_sla_status": {
+      const { product, since } = validateOrchestrator("erp_workflow_sla_status", args);
+      return JSON.stringify(getWorkflowSlaStatus({ product, since }), null, 2);
+    }
+
+    case "erp_workflow_sla_escalate": {
+      const { product, since, minIntervalMinutes } = validateOrchestrator("erp_workflow_sla_escalate", args);
+      return JSON.stringify(escalateWorkflowSlaBreaches({ product, since, minIntervalMinutes }), null, 2);
+    }
+
+    case "erp_workflow_sla_incidents": {
+      const { product, status, limit } = validateOrchestrator("erp_workflow_sla_incidents", args);
+      return JSON.stringify(listWorkflowSlaIncidents({ product, status, limit }), null, 2);
     }
 
     // ── Metrics ─────────────────────────────────────────────────
@@ -2355,6 +2387,41 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         properties: {
           product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
           since: { type: "string", description: "Optional ISO lower bound for occurred_at" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_sla_status",
+      description: "Evaluate SLA status for workflow modules (quote-to-order, lead-to-cash, collections).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          since: { type: "string", description: "Optional ISO lower bound for workflow runs" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_sla_escalate",
+      description: "Create SLA incidents for breached modules with dedupe interval.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          since: { type: "string", description: "Optional ISO lower bound for workflow runs" },
+          minIntervalMinutes: { type: "number", description: "Dedupe interval for repeated incident creation (default 60)" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_sla_incidents",
+      description: "List SLA incidents for workflow modules.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          status: { type: "string", enum: ["open", "resolved"] },
+          limit: { type: "number", description: "Maximum rows (1-200, default 50)" },
         },
       },
     },
@@ -4437,6 +4504,58 @@ async function startHttpServer() {
       return getCommercialKpis({
         product: request.query?.product,
         since: request.query?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/workflows/sla/status", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getWorkflowSlaStatus({
+        product: request.query?.product,
+        since: request.query?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { product?: string; since?: string; minIntervalMinutes?: number } }>("/v1/workflows/sla/escalate", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return escalateWorkflowSlaBreaches({
+        product: request.body?.product,
+        since: request.body?.since,
+        minIntervalMinutes: request.body?.minIntervalMinutes,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { product?: string; status?: string; limit?: string } }>("/v1/workflows/sla/incidents", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listWorkflowSlaIncidents({
+        product: request.query?.product,
+        status: request.query?.status,
+        limit,
       });
     } catch (err) {
       reply.code(400);
