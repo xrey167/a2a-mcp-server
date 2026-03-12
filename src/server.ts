@@ -176,6 +176,9 @@ const WEBHOOK_BLOCKED_SKILLS = new Set([
   "search_files",
   "query_sqlite",
   "workflow_execute",
+  // OSINT skills that accept user-supplied URLs (SSRF prevention)
+  "fetch_rss",
+  "aggregate_feeds",
 ]);
 
 function sanitizeUrlForLog(url: string): string {
