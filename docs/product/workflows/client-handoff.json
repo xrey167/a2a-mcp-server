@@ -1,0 +1,40 @@
+{
+  "id": "client-handoff-template",
+  "name": "Client Handoff",
+  "description": "Bundle final output, store handoff note, and notify stakeholders.",
+  "maxConcurrency": 3,
+  "steps": [
+    {
+      "id": "summarize_final_output",
+      "skillId": "ask_claude",
+      "label": "Summarize final output",
+      "args": {
+        "prompt": "Summarize final deliverable for client handoff. Include scope, outcomes, and follow-up tasks."
+      }
+    },
+    {
+      "id": "store_handoff_note",
+      "skillId": "create_note",
+      "label": "Store handoff note",
+      "dependsOn": ["summarize_final_output"],
+      "args": {
+        "title": "Client Handoff - {{summarize_final_output.result}}",
+        "content": "{{summarize_final_output.result}}"
+      }
+    },
+    {
+      "id": "emit_handoff_event",
+      "skillId": "event_publish",
+      "label": "Emit handoff completed event",
+      "dependsOn": ["store_handoff_note"],
+      "args": {
+        "topic": "user.handoff.completed",
+        "data": {
+          "workflow": "client-handoff-template",
+          "status": "completed",
+          "artifactRef": "{{store_handoff_note.result}}"
+        }
+      }
+    }
+  ]
+}

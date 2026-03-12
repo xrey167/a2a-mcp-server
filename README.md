@@ -5,21 +5,22 @@
   <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
   <img src="https://img.shields.io/badge/protocol-ACP_(Zed)-ef4444" alt="ACP" />
   <img src="https://img.shields.io/badge/agents-8_workers-f59e0b" alt="Agents" />
-  <img src="https://img.shields.io/badge/MCP_tools-27-8b5cf6" alt="Tools" />
+  <img src="https://img.shields.io/badge/MCP_tools-35-8b5cf6" alt="Tools" />
   <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
 </p>
 
 # A2A-MCP Server
 
-**A multi-protocol AI agent orchestrator** that bridges Google's Agent-to-Agent (A2A) protocol, Anthropic's Model Context Protocol (MCP), and IBM's Agent Communication Protocol (ACP) into a single, production-ready runtime.
+**A managed-cloud automation runtime for agencies** that need recurring, auditable client delivery workflows.
 
-Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, provides 27 MCP tools, supports DAG-based workflows, multi-agent collaboration strategies, federated peer discovery, enterprise RBAC, RTK-style token savings, and a full project generation factory with quality gates.
+Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, provides 35 MCP tools, supports DAG workflows, enterprise RBAC/audit, token savings, packaged agency workflows, and ERP connector product APIs.
 
 ---
 
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
+- [Agency Product Mode](#agency-product-mode)
 - [Quick Start](#quick-start)
 - [CLI Commands](#cli-commands)
 - [Worker Agents](#worker-agents)
@@ -27,6 +28,7 @@ Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, pr
 - [MCP Resources](#mcp-resources)
 - [MCP Prompts](#mcp-prompts)
 - [A2A HTTP Endpoints](#a2a-http-endpoints)
+- [ERP Expansion APIs](#erp-expansion-apis)
 - [ACP Integration (Zed IDE)](#acp-integration-zed-ide)
 - [Skills System](#skills-system)
 - [Workflow Engine](#workflow-engine)
@@ -46,6 +48,26 @@ Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, pr
 - [Deployment](#deployment)
 - [Development](#development)
 - [License](#license)
+
+---
+
+## Agency Product Mode
+
+The default commercial posture is now outcome-first:
+
+- **Core outcome:** cut recurring client-delivery ops time in 30 days
+- **Primary ICP:** agencies and consultancies
+- **Packaged v1 workflows:** client reporting, approval gate, and handoff
+- **Commercial offer:** managed onboarding + managed cloud + weekly optimization
+- **Price anchor:** EUR 1.5k-EUR 3k / month + one-time setup fee
+
+Use these productized interfaces:
+
+- MCP tool `agency_workflow_templates` for ready-to-adapt workflow JSON
+- MCP tool `agency_roi_snapshot` for KPI output (runs, failure rate, time saved)
+- MCP resources `a2a://agency-workflows` and `a2a://agency-roi`
+
+Operational and sales playbooks live in [`docs/product/`](docs/product/README.md).
 
 ---
 
@@ -204,7 +226,7 @@ a2a-mcp-server install github-agent
 
 ## MCP Tools
 
-The orchestrator exposes 27 tools via the MCP stdio interface. These are the tools available to any MCP client (Claude Desktop, Cursor, Windsurf, etc.):
+The orchestrator exposes 35 tools via the MCP stdio interface. These are the tools available to any MCP client (Claude Desktop, Cursor, Windsurf, etc.):
 
 ### Core Delegation
 
@@ -228,6 +250,44 @@ The orchestrator exposes 27 tools via the MCP stdio interface. These are the too
 | `execute_pipeline` | Execute a composed pipeline by ID |
 | `design_workflow` | Full design pipeline: suggest screens, create project, generate each screen (async, returns taskId) |
 | `factory_workflow` | Full project generation pipeline: normalize, scaffold, codegen, quality gate (async, returns taskId) |
+| `agency_workflow_templates` | Return packaged agency workflow templates: reporting, approval gate, and handoff |
+| `agency_roi_snapshot` | Return KPI snapshot for runs completed, failure rate, estimated time saved, and manual steps removed |
+| `erp_workflow_run` | Run ERP packaged workflows: quote-to-order, lead-to-cash, collections |
+| `erp_kpis` | Return KPI snapshot for ERP product lines |
+| `erp_connector_connect` | Connect ERP systems (odoo, business-central, dynamics) with auth + metadata |
+| `erp_connector_sync` | Run two-way sync with idempotency and retry policy |
+| `erp_connector_status` | Return connector health, token status, and renewal warnings |
+| `erp_connector_renew` | Renew Business Central webhook subscription metadata |
+| `erp_connector_renew_due` | Auto-renew due connector subscriptions (supports dry-run) |
+| `erp_connector_kpis` | Return connector reliability and renewal KPI snapshot |
+| `erp_connector_renewals` | List renewal incidents with filter + pagination cursor |
+| `erp_connector_renewals_export` | Export renewal incidents as CSV |
+| `erp_connector_renewals_snapshot` | Generate CSV+JSON snapshot files for reporting |
+| `erp_connector_renewals_verify` | Verify snapshot manifest hashes/signature |
+| `erp_connector_trust_report` | Generate procurement-ready trust report |
+| `erp_connector_sales_packet` | Generate one-payload sales/proposal packet |
+| `erp_pilot_readiness` | Evaluate pilot go-live readiness gates |
+| `erp_launch_pilot` | Execute launch gate and generate outbound pilot packet |
+| `erp_pilot_launches` | List pilot launch attempts with status filters |
+| `erp_onboarding_create` | Create onboarding session for customer/product KPI tracking |
+| `erp_onboarding_capture` | Capture onboarding KPI snapshot (`baseline` or `current`) from tracked ERP data |
+| `erp_onboarding_report` | Build baseline-vs-current onboarding report with ROI deltas |
+| `erp_onboarding_list` | List onboarding sessions by status |
+| `erp_commercial_event_record` | Record funnel events (`qualified_call`, `proposal_sent`, `pilot_signed`) |
+| `erp_commercial_kpis` | Track commercial acceptance KPIs against wave targets (10/3/1) |
+| `erp_workflow_sla_status` | Evaluate SLA health for all workflow modules |
+| `erp_workflow_sla_escalate` | Create SLA incidents for breached modules with dedupe |
+| `erp_workflow_sla_incidents` | List workflow SLA incidents for operations follow-up |
+| `erp_workflow_sla_incident_update` | Update SLA incident lifecycle state (`acknowledged`/`resolved`) |
+| `erp_q2o_quote_sync` | Upsert quote records into Quote-to-Order state machine with traceability |
+| `erp_q2o_order_sync` | Upsert order conversion/fulfillment state linked to quote |
+| `erp_q2o_approval_decision` | Apply approval decision on quote approval items |
+| `erp_q2o_pipeline` | Return quote-to-order pipeline metrics and revenue-at-risk |
+| `erp_master_data_sync` | Sync master data (`customer`,`product`,`price`,`tax`) with drift detection |
+| `erp_master_data_mappings` | List field mappings per workspace/connector/entity |
+| `erp_master_data_mapping_update` | Update mapping and bump version |
+| `erp_analytics_executive` | Executive KPI view (conversion, approval time, revenue-at-risk, ROI) |
+| `erp_analytics_ops` | Ops KPI view (throughput/failures, retry/DLQ/replay, SLA timeline, MTTR) |
 
 ### Collaboration
 
@@ -282,7 +342,7 @@ The orchestrator exposes 27 tools via the MCP stdio interface. These are the too
 
 ## MCP Resources
 
-14 resources exposed via the MCP `resources/list` handler:
+17 resources exposed via the MCP `resources/list` handler:
 
 | URI | Description |
 |-----|-------------|
@@ -300,6 +360,11 @@ The orchestrator exposes 27 tools via the MCP stdio interface. These are the too
 | `a2a://audit` | Recent audit log entries (enterprise) |
 | `a2a://license` | Current license tier and skill gates |
 | `a2a://workspaces` | Team workspaces and members |
+| `a2a://agency-workflows` | Packaged agency workflow templates for v1 delivery automation |
+| `a2a://agency-roi` | Agency pilot KPI snapshot (runs, reliability, estimated savings) |
+| `a2a://connectors` | ERP connector health and auth status for Odoo, Business Central, and Dynamics |
+| `a2a://connectors-kpis` | Connector reliability and renewal KPI snapshot |
+| `a2a://connector-renewals` | Recent connector renewal incidents feed |
 
 ---
 
@@ -342,7 +407,7 @@ The Fastify HTTP server (default port 8080) exposes:
 | `GET` | `/livez` | Liveness probe |
 | `GET` | `/dashboard` | Interactive HTML dashboard with real-time metrics |
 | `GET` | `/metrics` | Prometheus-style metrics JSON |
-| `POST` | `/webhook/:id` | Inbound webhook receiver with HMAC-SHA256 verification |
+| `POST` | `/webhooks/:id` | Inbound webhook receiver with HMAC-SHA256 verification |
 | `GET` | `/sse/:taskId` | Server-Sent Events stream for task progress |
 
 ### A2A Authentication
@@ -352,6 +417,78 @@ Set `A2A_API_KEY` environment variable to protect all HTTP endpoints. Requests m
 ```
 Authorization: Bearer <your-api-key>
 ```
+
+---
+
+## ERP Expansion APIs
+
+Shared connector core for Odoo, Business Central, and Dynamics CRM with two-way sync defaults, idempotency keys, Retry-After aware backoff, and dead-letter capture.
+
+### Connector APIs
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/connectors/{odoo\|business-central\|dynamics}/connect` | Connect/update connector auth and metadata (Odoo requires `metadata.odooPlan=custom`) |
+| `POST` | `/v1/connectors/{type}/sync` | Run sync operation with idempotency key and retry policy |
+| `GET` | `/v1/connectors/{type}/status` | Connector health, token status, renewal warnings |
+| `GET` | `/v1/connectors/status` | Status overview of all connectors |
+| `POST` | `/v1/connectors/business-central/renew` | Renew Business Central webhook subscription metadata (default +3 days) |
+| `POST` | `/v1/connectors/renew-due` | Scan and renew all due connector subscriptions (Business Central currently supported) |
+| `GET` | `/v1/connectors/kpis` | Connector health and renewal KPI snapshot |
+| `GET` | `/v1/connectors/renewals` | Renewal incidents feed with filters (`connector`, `status`, `since`, `before`, `limit`) |
+| `GET` | `/v1/connectors/renewals/export.csv` | CSV export of renewal incidents with the same filters |
+| `POST` | `/v1/connectors/renewals/snapshot` | Generate snapshot files and return written paths |
+| `POST` | `/v1/connectors/renewals/verify` | Verify snapshot manifest integrity |
+| `GET` | `/v1/connectors/trust-report` | Build trust report from latest snapshot + verification + KPI deltas |
+| `GET` | `/v1/connectors/sales-packet` | Build combined sales packet (trust + connector KPIs + product KPIs + artifacts). `format=brief` adds executive summary; `format=email` returns subject + email-ready body. |
+| `GET` | `/v1/connectors/pilot-readiness` | Evaluate pilot readiness (trust score, manifest validity, connector health, zero renewal backlog) |
+| `POST` | `/v1/connectors/launch-pilot` | Run readiness gate and generate launch packet (or return blockers) |
+| `GET` | `/v1/connectors/pilot-launches` | List pilot launch attempts (`status`, `since`, `limit`) with persisted outcomes |
+| `POST` | `/v1/onboarding/sessions` | Create onboarding session (customer + product + optional connector scope) |
+| `GET` | `/v1/onboarding/sessions` | List onboarding sessions (`status`, `limit`) |
+| `POST` | `/v1/onboarding/sessions/{id}/capture` | Capture onboarding snapshot from tracked ERP runs (`phase=baseline|current`) |
+| `GET` | `/v1/onboarding/sessions/{id}/report` | Build onboarding report with baseline/current deltas and expansion recommendation |
+| `POST` | `/v1/commercial/events` | Record commercial funnel event for a product |
+| `GET` | `/v1/commercial/kpis` | Retrieve funnel conversion and target progress KPIs (`product`, `since`) |
+| `GET` | `/v1/workflows/sla/status` | SLA status for `quote-to-order`, `lead-to-cash`, and `collections` |
+| `POST` | `/v1/workflows/sla/escalate` | Create SLA incidents for breached modules |
+| `GET` | `/v1/workflows/sla/incidents` | List SLA incidents (`product`, `status`, `limit`) |
+| `PATCH` | `/v1/workflows/sla/incidents/{id}` | Update incident lifecycle state (`acknowledged`, `resolved`) |
+| `POST` | `/v1/quote-to-order/workspaces/{id}/quotes/sync` | Sync quote lifecycle state into command center |
+| `POST` | `/v1/quote-to-order/workspaces/{id}/orders/sync` | Sync order conversion/fulfillment against quote |
+| `POST` | `/v1/quote-to-order/workspaces/{id}/approvals/{approvalId}/decision` | Apply approval decision and transition state |
+| `GET` | `/v1/quote-to-order/workspaces/{id}/pipeline` | Quote-to-order pipeline metrics and risk values |
+| `POST` | `/v1/erp/master-data/{entity}/sync` | Sync master data entity (`customer|product|price|tax`) |
+| `GET` | `/v1/erp/master-data/mappings` | List master-data field mappings |
+| `PUT` | `/v1/erp/master-data/mappings/{id}` | Update one mapping and mapping version |
+| `GET` | `/v1/analytics/executive` | Executive dashboard metrics |
+| `GET` | `/v1/analytics/ops` | Operations dashboard metrics |
+| `GET` | `/v1/analytics/onboarding/{sessionId}/report` | Onboarding baseline-vs-current analytics report |
+
+Auto-renew scheduler defaults: enabled, hourly sweep interval, up to 5-minute jitter. Override via env:
+`A2A_ERP_AUTO_RENEW_ENABLED`, `A2A_ERP_SWEEP_INTERVAL_MS`, `A2A_ERP_SWEEP_JITTER_MS`.
+
+Snapshot export scheduler defaults: disabled, 24-hour interval, 30-day retention. Override via env:
+`A2A_ERP_SNAPSHOT_EXPORT_ENABLED`, `A2A_ERP_SNAPSHOT_INTERVAL_MS`, `A2A_ERP_SNAPSHOT_RETENTION_DAYS`, `A2A_ERP_SNAPSHOT_OUTPUT_DIR`.
+
+Snapshot writes now include a `*.manifest.json` file with SHA-256 hashes, generation metadata (`generated_by`, period), and optional HMAC signature when `A2A_ERP_SNAPSHOT_SIGNING_KEY` is set.
+
+### Product Workflow APIs
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/workflows/{quote-to-order\|lead-to-cash\|collections}/run` | Run packaged product workflow asynchronously (returns task + workflow run IDs) |
+| `GET` | `/v1/kpis/{product}` | Product KPI snapshot (workflow success, sync stats, revenue proxy signal) |
+
+### Data Fields (sync entities)
+
+Lead/deal/invoice/quote/order sync records track:
+
+- `source_system`
+- `external_id`
+- `sync_state`
+- `last_synced_at`
+- `last_sync_error`
 
 ---
 

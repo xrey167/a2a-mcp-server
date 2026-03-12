@@ -11,6 +11,7 @@ import {
 import Fastify from "fastify";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { mkdirSync, readdirSync, statSync, unlinkSync } from "fs";
 import { SKILLS, SKILL_MAP } from "./skills.js";
 import { sendTask, discoverAgent, fetchWithTimeout, type AgentCard } from "./a2a.js";
 import { initRegistry, listMcpServers, listMcpTools, callMcpTool } from "./mcp-registry.js";
@@ -22,7 +23,7 @@ import { memory } from "./memory.js";
 import { createTask, markWorking, markCompleted, markFailed, markCanceled, emitProgress, getTask, listTasks, pruneTasks, toA2AResult, taskEvents } from "./task-store.js";
 import { initAgentRegistry, registerAgent, unregisterAgent, getExternalCards, getRegistryEntries, getAgentApiKey } from "./agent-registry.js";
 import { AgentError } from "./errors.js";
-import { randomUUID } from "crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "crypto";
 import { executeSandbox, setAdapters } from "./sandbox.js";
 import { sandboxStore } from "./sandbox-store.js";
 import { sanitizeForPrompt } from "./prompt-sanitizer.js";
@@ -49,6 +50,97 @@ import { isAllowedUrl, configureAllowedUrls } from "./url-validation.js";
 import { applyFilters, recordFilterStats, type FilterContext } from "./output-filter.js";
 import { recordTokenSaving, getTokenStats } from "./token-tracker.js";
 import { teeOutput, readTee, pruneTeeFiles, listTeeFiles } from "./tee.js";
+import { getAgencyProductSummary, getAgencyRoiSnapshot, getAgencyWorkflowTemplates } from "./agency-product.js";
+import {
+  buildOnboardingReport,
+  buildConnectorRenewalSnapshot,
+  captureOnboardingSnapshot,
+  connectConnector,
+  createWizardSessionState,
+  createOnboardingSession,
+  createPilotLaunchRun,
+  decideQuoteToOrderApproval,
+  getExecutiveAnalytics,
+  getForecastQualityAnalytics,
+  getOpsAnalytics,
+  getQuotePersonalityProfile,
+  recordQuotePersonalityFeedback,
+  getQuotePersonalityInsights,
+  getQuoteCommunicationAnalytics,
+  getQuoteCommunicationThreadSignals,
+  getRevenueGraphEntity,
+  getRevenueIntelligenceAnalytics,
+  getQuoteToOrderPipeline,
+  getTrustConsentStatus,
+  getWizardSessionReport,
+  getWizardSessionState,
+  exportConnectorRenewalsCsv,
+  getCommercialKpis,
+  listOnboardingSessions,
+  listWizardSessionStates,
+  listConnectorRenewals,
+  listMasterDataMappings,
+  listQuoteMailboxConnections,
+  listQuoteFollowupActions,
+  importQuoteMailboxCommunications,
+  approveQuoteAutopilotProposal,
+  createQuoteNextActionRecommendation,
+  disableQuoteMailboxConnection,
+  pullQuoteMailboxCommunications,
+  refreshQuoteMailboxConnection,
+  rejectQuoteAutopilotProposal,
+  runQuoteDealRescue,
+  syncQuoteCommunicationThreads,
+  writebackQuoteFollowupAction,
+  writebackQuoteFollowupBatch,
+  runScheduledFollowupWritebacks,
+  listPilotLaunchRuns,
+  listWorkflowSlaIncidents,
+  launchWizardSession,
+  overrideWizardGate,
+  recordWizardConnectorConnection,
+  recordCommercialEvent,
+  runWizardConnectorTest,
+  runWizardMasterDataAutoSync,
+  runWizardQuoteToOrderDryRun,
+  runQuoteFollowupEngine,
+  syncRevenueGraphWorkspace,
+  syncMasterDataEntity,
+  ingestQuoteCommunication,
+  upsertQuoteMailboxConnection,
+  syncQuoteToOrderOrder,
+  syncQuoteToOrderQuote,
+  escalateWorkflowSlaBreaches,
+  getConnectorKpis,
+  getConnectorStatus,
+  getWorkflowSlaStatus,
+  updateMasterDataMapping,
+  updateQuoteFollowupAction,
+  updateTrustConsent,
+  updateWorkflowSlaIncidentStatus,
+  getProductKpis,
+  listConnectorStatuses,
+  recordWorkflowRun,
+  renewDueConnectors,
+  renewBusinessCentralSubscription,
+  syncConnector,
+  updatePilotLaunchRun,
+  updateWorkflowRun,
+  validateConnectorType,
+  validateMasterDataEntity,
+  validateProductType,
+  workflowDefinitionFor,
+  getCustomer360Profile,
+  getCustomer360Health,
+  getCustomer360Timeline,
+  getCustomer360Segments,
+  getCustomer360ChurnRisk,
+  Customer360ProfileInputSchema,
+  Customer360HealthInputSchema,
+  Customer360TimelineInputSchema,
+  Customer360SegmentsInputSchema,
+  Customer360ChurnRiskInputSchema,
+} from "./erp-platform.js";
 
 // Extend Fastify's request interface with rawBody for HMAC verification
 declare module "fastify" {
@@ -633,6 +725,229 @@ const OrchestratorSchemas = {
     action: z.enum(["list", "get", "delete"]).optional().default("list"),
     varName: z.string().optional(),
   }).strict(),
+  erp_connector_connect: z.object({
+    type: z.enum(["odoo", "business-central", "dynamics"]),
+    authMode: z.enum(["oauth", "api-key"]),
+    config: z.record(z.string(), z.unknown()).optional().default({}),
+    metadata: z.record(z.string(), z.unknown()).optional().default({}),
+    enabled: z.boolean().optional().default(true),
+  }).strict(),
+  erp_connector_sync: z.object({
+    type: z.enum(["odoo", "business-central", "dynamics"]),
+    direction: z.enum(["ingest", "writeback", "two-way"]).optional().default("two-way"),
+    entityType: z.enum(["lead", "deal", "invoice", "quote", "order"]).optional().default("lead"),
+    externalId: z.string().optional(),
+    idempotencyKey: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional().default({}),
+    maxRetries: z.number().int().min(0).max(5).optional().default(3),
+  }).strict(),
+  erp_connector_status: z.object({
+    type: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+  }).strict(),
+  erp_connector_renew: z.object({
+    type: z.enum(["business-central"]),
+    webhookExpiresAt: z.string().optional(),
+    notificationUrl: z.string().url().optional(),
+    resource: z.string().optional(),
+  }).strict(),
+  erp_connector_renew_due: z.object({
+    dryRun: z.boolean().optional().default(false),
+  }).strict(),
+  erp_workflow_run: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]),
+    context: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_kpis: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]),
+    since: z.string().optional(),
+  }).strict(),
+  erp_connector_kpis: z.object({
+    since: z.string().optional(),
+  }).strict(),
+  erp_connector_renewals: z.object({
+    connector: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+    status: z.enum(["success", "failed"]).optional(),
+    since: z.string().optional(),
+    before: z.string().optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict(),
+  erp_connector_renewals_export: z.object({
+    connector: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+    status: z.enum(["success", "failed"]).optional(),
+    since: z.string().optional(),
+    before: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+  }).strict(),
+  erp_connector_renewals_snapshot: z.object({
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    outputDir: z.string().optional(),
+  }).strict(),
+  erp_connector_renewals_verify: z.object({
+    manifestPath: z.string().min(1),
+  }).strict(),
+  erp_connector_trust_report: z.object({
+    outputDir: z.string().optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    generateIfMissing: z.boolean().optional().default(true),
+  }).strict(),
+  erp_connector_sales_packet: z.object({
+    outputDir: z.string().optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    generateIfMissing: z.boolean().optional().default(true),
+    products: z.array(z.enum(["quote-to-order", "lead-to-cash", "collections"])).optional(),
+    format: z.enum(["full", "brief", "email"]).optional().default("full"),
+  }).strict(),
+  erp_pilot_readiness: z.object({
+    outputDir: z.string().optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    generateIfMissing: z.boolean().optional().default(true),
+    requiredTrustScore: z.number().min(0).max(100).optional().default(80),
+    requireProcurementReady: z.boolean().optional().default(true),
+  }).strict(),
+  erp_launch_pilot: z.object({
+    outputDir: z.string().optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(2000).optional().default(1000),
+    generateIfMissing: z.boolean().optional().default(true),
+    requiredTrustScore: z.number().min(0).max(100).optional().default(80),
+    requireProcurementReady: z.boolean().optional().default(true),
+    dryRun: z.boolean().optional().default(false),
+  }).strict(),
+  erp_pilot_launches: z.object({
+    status: z.enum(["blocked", "ready", "launched", "delivery_failed", "dry_run"]).optional(),
+    since: z.string().optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict(),
+  erp_onboarding_create: z.object({
+    customerName: z.string().min(1),
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]),
+    connector: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_onboarding_capture: z.object({
+    onboardingId: z.string().min(1),
+    phase: z.enum(["baseline", "current"]).optional().default("current"),
+    since: z.string().optional(),
+  }).strict(),
+  erp_onboarding_report: z.object({
+    onboardingId: z.string().min(1),
+    autoCaptureCurrent: z.boolean().optional().default(true),
+  }).strict(),
+  erp_onboarding_list: z.object({
+    status: z.enum(["active", "completed", "paused"]).optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict(),
+  erp_commercial_event_record: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]),
+    stage: z.enum(["qualified_call", "proposal_sent", "pilot_signed"]),
+    customerName: z.string().min(1),
+    onboardingId: z.string().optional(),
+    valueEur: z.number().nonnegative().optional(),
+    notes: z.string().optional(),
+    occurredAt: z.string().optional(),
+  }).strict(),
+  erp_commercial_kpis: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+    since: z.string().optional(),
+  }).strict(),
+  erp_workflow_sla_status: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+    since: z.string().optional(),
+  }).strict(),
+  erp_workflow_sla_escalate: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+    since: z.string().optional(),
+    minIntervalMinutes: z.number().int().min(1).max(24 * 60).optional().default(60),
+  }).strict(),
+  erp_workflow_sla_incidents: z.object({
+    product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+    status: z.enum(["open", "acknowledged", "resolved"]).optional(),
+    limit: z.number().int().min(1).max(200).optional().default(50),
+  }).strict(),
+  erp_workflow_sla_incident_update: z.object({
+    incidentId: z.string().min(1),
+    status: z.enum(["acknowledged", "resolved"]),
+  }).strict(),
+  erp_q2o_quote_sync: z.object({
+    workspaceId: z.string().min(1),
+    connectorType: z.enum(["odoo", "business-central", "dynamics"]),
+    quoteExternalId: z.string().min(1),
+    approvalExternalId: z.string().optional(),
+    customerExternalId: z.string().optional(),
+    amount: z.number().nonnegative().optional(),
+    currency: z.string().optional(),
+    state: z.enum(["draft", "submitted", "approved", "rejected", "converted_to_order", "fulfilled"]).optional(),
+    approvalDeadlineAt: z.string().optional(),
+    conversionDeadlineAt: z.string().optional(),
+    expectedVersion: z.number().int().min(1).optional(),
+    idempotencyKey: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_q2o_order_sync: z.object({
+    workspaceId: z.string().min(1),
+    connectorType: z.enum(["odoo", "business-central", "dynamics"]),
+    quoteExternalId: z.string().min(1),
+    orderExternalId: z.string().min(1),
+    amount: z.number().nonnegative().optional(),
+    currency: z.string().optional(),
+    state: z.enum(["converted_to_order", "fulfilled"]).optional(),
+    expectedVersion: z.number().int().min(1).optional(),
+    idempotencyKey: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_q2o_approval_decision: z.object({
+    workspaceId: z.string().min(1),
+    approvalId: z.string().min(1),
+    decision: z.enum(["approved", "rejected"]),
+    decidedBy: z.string().optional(),
+    quoteExternalId: z.string().optional(),
+    idempotencyKey: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional().default({}),
+  }).strict(),
+  erp_q2o_pipeline: z.object({
+    workspaceId: z.string().min(1),
+    since: z.string().optional(),
+  }).strict(),
+  erp_master_data_sync: z.object({
+    workspaceId: z.string().min(1),
+    entity: z.enum(["customer", "product", "price", "tax"]),
+    connectorType: z.enum(["odoo", "business-central", "dynamics"]),
+    idempotencyKey: z.string().optional(),
+    records: z.array(z.object({
+      externalId: z.string().min(1),
+      payload: z.record(z.string(), z.unknown()).optional().default({}),
+    }).strict()).optional().default([]),
+    externalId: z.string().optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
+  }).strict(),
+  erp_master_data_mappings: z.object({
+    workspaceId: z.string().min(1),
+    connectorType: z.enum(["odoo", "business-central", "dynamics"]).optional(),
+    entity: z.enum(["customer", "product", "price", "tax"]).optional(),
+    limit: z.number().int().min(1).max(500).optional().default(200),
+  }).strict(),
+  erp_master_data_mapping_update: z.object({
+    mappingId: z.string().min(1),
+    unifiedField: z.string().optional(),
+    externalField: z.string().optional(),
+    driftStatus: z.enum(["ok", "changed"]).optional(),
+  }).strict(),
+  erp_analytics_executive: z.object({
+    workspaceId: z.string().optional(),
+    since: z.string().optional(),
+  }).strict(),
+  erp_analytics_ops: z.object({
+    since: z.string().optional(),
+  }).strict(),
+  erp_customer360_profile: Customer360ProfileInputSchema,
+  erp_customer360_health: Customer360HealthInputSchema,
+  erp_customer360_timeline: Customer360TimelineInputSchema,
+  erp_customer360_segments: Customer360SegmentsInputSchema,
+  erp_customer360_churn_risk: Customer360ChurnRiskInputSchema,
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -927,6 +1242,266 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       })();
 
       return JSON.stringify({ taskId: task.id, status: "working", hint: "Poll with get_task_result" });
+    }
+
+    case "agency_workflow_templates":
+      return JSON.stringify({
+        summary: getAgencyProductSummary(),
+        templates: getAgencyWorkflowTemplates(),
+      }, null, 2);
+
+    case "agency_roi_snapshot":
+      return JSON.stringify(getAgencyRoiSnapshot({
+        since: args.since as string | undefined,
+        assumedMinutesSavedPerSuccessfulRun: args.assumedMinutesSavedPerSuccessfulRun as number | undefined,
+        assumedManualStepsRemovedPerRun: args.assumedManualStepsRemovedPerRun as number | undefined,
+      }), null, 2);
+
+    case "erp_connector_connect": {
+      const { type, authMode, config, metadata, enabled } = validateOrchestrator("erp_connector_connect", args);
+      return JSON.stringify(connectConnector(type, { authMode, config, metadata, enabled }), null, 2);
+    }
+
+    case "erp_connector_sync": {
+      const { type, direction, entityType, externalId, idempotencyKey, payload, maxRetries } = validateOrchestrator("erp_connector_sync", args);
+      const result = await syncConnector(type, { direction, entityType, externalId, idempotencyKey, payload, maxRetries });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "erp_connector_status": {
+      const { type } = validateOrchestrator("erp_connector_status", args);
+      return JSON.stringify(type ? getConnectorStatus(type) : listConnectorStatuses(), null, 2);
+    }
+
+    case "erp_connector_renew": {
+      const { type, webhookExpiresAt, notificationUrl, resource } = validateOrchestrator("erp_connector_renew", args);
+      if (type !== "business-central") {
+        throw new Error("Only business-central renewal is currently supported");
+      }
+      const result = await renewBusinessCentralSubscription({ webhookExpiresAt, notificationUrl, resource });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "erp_connector_renew_due": {
+      const { dryRun } = validateOrchestrator("erp_connector_renew_due", args);
+      const result = await renewDueConnectors({ dryRun });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "erp_workflow_run": {
+      const { product, context } = validateOrchestrator("erp_workflow_run", args);
+      const workflow = workflowDefinitionFor(product, context);
+      const task = createTask({ skillId: `erp:${product}` });
+      markWorking(task.id);
+      const workflowRunId = recordWorkflowRun(product, "running", task.id, context);
+
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+          updateWorkflowRun(workflowRunId, "completed");
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch {}
+          updateWorkflowRun(workflowRunId, "failed", msg);
+        }
+      })();
+
+      return JSON.stringify({ status: "accepted", product, workflowRunId, taskId: task.id }, null, 2);
+    }
+
+    case "erp_kpis": {
+      const { product, since } = validateOrchestrator("erp_kpis", args);
+      return JSON.stringify(getProductKpis(product, { since }), null, 2);
+    }
+
+    case "erp_connector_kpis": {
+      const { since } = validateOrchestrator("erp_connector_kpis", args);
+      return JSON.stringify(getConnectorKpis({ since }), null, 2);
+    }
+
+    case "erp_connector_renewals": {
+      const { connector, status, since, before, limit } = validateOrchestrator("erp_connector_renewals", args);
+      return JSON.stringify(listConnectorRenewals({ connector, status, since, before, limit }), null, 2);
+    }
+
+    case "erp_connector_renewals_export": {
+      const { connector, status, since, before, limit } = validateOrchestrator("erp_connector_renewals_export", args);
+      return exportConnectorRenewalsCsv({ connector, status, since, before, limit });
+    }
+
+    case "erp_connector_renewals_snapshot": {
+      const { since, limit, outputDir } = validateOrchestrator("erp_connector_renewals_snapshot", args);
+      return JSON.stringify(await writeConnectorRenewalSnapshot({ since, limit, outputDir }), null, 2);
+    }
+
+    case "erp_connector_renewals_verify": {
+      const { manifestPath } = validateOrchestrator("erp_connector_renewals_verify", args);
+      return JSON.stringify(await verifyConnectorRenewalManifest(manifestPath), null, 2);
+    }
+
+    case "erp_connector_trust_report": {
+      const { outputDir, since, limit, generateIfMissing } = validateOrchestrator("erp_connector_trust_report", args);
+      return JSON.stringify(await buildConnectorTrustReport({ outputDir, since, limit, generateIfMissing }), null, 2);
+    }
+
+    case "erp_connector_sales_packet": {
+      const { outputDir, since, limit, generateIfMissing, products, format } = validateOrchestrator("erp_connector_sales_packet", args);
+      return JSON.stringify(await buildConnectorSalesPacket({ outputDir, since, limit, generateIfMissing, products, format }), null, 2);
+    }
+
+    case "erp_pilot_readiness": {
+      const { outputDir, since, limit, generateIfMissing, requiredTrustScore, requireProcurementReady } = validateOrchestrator("erp_pilot_readiness", args);
+      return JSON.stringify(await buildPilotReadiness({
+        outputDir,
+        since,
+        limit,
+        generateIfMissing,
+        requiredTrustScore,
+        requireProcurementReady,
+      }), null, 2);
+    }
+
+    case "erp_launch_pilot": {
+      const { outputDir, since, limit, generateIfMissing, requiredTrustScore, requireProcurementReady, dryRun } = validateOrchestrator("erp_launch_pilot", args);
+      return JSON.stringify(await launchPilot({
+        outputDir,
+        since,
+        limit,
+        generateIfMissing,
+        requiredTrustScore,
+        requireProcurementReady,
+        dryRun,
+      }), null, 2);
+    }
+
+    case "erp_pilot_launches": {
+      const { status, since, limit } = validateOrchestrator("erp_pilot_launches", args);
+      return JSON.stringify(listPilotLaunchRuns({ status, since, limit }), null, 2);
+    }
+
+    case "erp_onboarding_create": {
+      const { customerName, product, connector, metadata } = validateOrchestrator("erp_onboarding_create", args);
+      return JSON.stringify(createOnboardingSession({ customerName, product, connector, metadata }), null, 2);
+    }
+
+    case "erp_onboarding_capture": {
+      const { onboardingId, phase, since } = validateOrchestrator("erp_onboarding_capture", args);
+      return JSON.stringify(captureOnboardingSnapshot({ onboardingId, phase, since }), null, 2);
+    }
+
+    case "erp_onboarding_report": {
+      const { onboardingId, autoCaptureCurrent } = validateOrchestrator("erp_onboarding_report", args);
+      return JSON.stringify(buildOnboardingReport({ onboardingId, autoCaptureCurrent }), null, 2);
+    }
+
+    case "erp_onboarding_list": {
+      const { status, limit } = validateOrchestrator("erp_onboarding_list", args);
+      return JSON.stringify(listOnboardingSessions({ status, limit }), null, 2);
+    }
+
+    case "erp_commercial_event_record": {
+      const { product, stage, customerName, onboardingId, valueEur, notes, occurredAt } = validateOrchestrator("erp_commercial_event_record", args);
+      return JSON.stringify(recordCommercialEvent({ product, stage, customerName, onboardingId, valueEur, notes, occurredAt }), null, 2);
+    }
+
+    case "erp_commercial_kpis": {
+      const { product, since } = validateOrchestrator("erp_commercial_kpis", args);
+      return JSON.stringify(getCommercialKpis({ product, since }), null, 2);
+    }
+
+    case "erp_workflow_sla_status": {
+      const { product, since } = validateOrchestrator("erp_workflow_sla_status", args);
+      return JSON.stringify(getWorkflowSlaStatus({ product, since }), null, 2);
+    }
+
+    case "erp_workflow_sla_escalate": {
+      const { product, since, minIntervalMinutes } = validateOrchestrator("erp_workflow_sla_escalate", args);
+      return JSON.stringify(escalateWorkflowSlaBreaches({ product, since, minIntervalMinutes }), null, 2);
+    }
+
+    case "erp_workflow_sla_incidents": {
+      const { product, status, limit } = validateOrchestrator("erp_workflow_sla_incidents", args);
+      return JSON.stringify(listWorkflowSlaIncidents({ product, status, limit }), null, 2);
+    }
+
+    case "erp_workflow_sla_incident_update": {
+      const { incidentId, status } = validateOrchestrator("erp_workflow_sla_incident_update", args);
+      return JSON.stringify(updateWorkflowSlaIncidentStatus(incidentId, status), null, 2);
+    }
+
+    case "erp_q2o_quote_sync": {
+      const { workspaceId, ...rest } = validateOrchestrator("erp_q2o_quote_sync", args);
+      return JSON.stringify(syncQuoteToOrderQuote(workspaceId, rest), null, 2);
+    }
+
+    case "erp_q2o_order_sync": {
+      const { workspaceId, ...rest } = validateOrchestrator("erp_q2o_order_sync", args);
+      return JSON.stringify(syncQuoteToOrderOrder(workspaceId, rest), null, 2);
+    }
+
+    case "erp_q2o_approval_decision": {
+      const { workspaceId, approvalId, ...rest } = validateOrchestrator("erp_q2o_approval_decision", args);
+      return JSON.stringify(decideQuoteToOrderApproval(workspaceId, approvalId, rest), null, 2);
+    }
+
+    case "erp_q2o_pipeline": {
+      const { workspaceId, since } = validateOrchestrator("erp_q2o_pipeline", args);
+      return JSON.stringify(getQuoteToOrderPipeline(workspaceId, { since }), null, 2);
+    }
+
+    case "erp_master_data_sync": {
+      const { workspaceId, entity, ...rest } = validateOrchestrator("erp_master_data_sync", args);
+      return JSON.stringify(syncMasterDataEntity(workspaceId, entity, rest), null, 2);
+    }
+
+    case "erp_master_data_mappings": {
+      const { workspaceId, connectorType, entity, limit } = validateOrchestrator("erp_master_data_mappings", args);
+      return JSON.stringify(listMasterDataMappings({ workspaceId, connectorType, entity, limit }), null, 2);
+    }
+
+    case "erp_master_data_mapping_update": {
+      const { mappingId, unifiedField, externalField, driftStatus } = validateOrchestrator("erp_master_data_mapping_update", args);
+      return JSON.stringify(updateMasterDataMapping(mappingId, { unifiedField, externalField, driftStatus }), null, 2);
+    }
+
+    case "erp_analytics_executive": {
+      const { workspaceId, since } = validateOrchestrator("erp_analytics_executive", args);
+      return JSON.stringify(getExecutiveAnalytics({ workspaceId, since }), null, 2);
+    }
+
+    case "erp_analytics_ops": {
+      const { since } = validateOrchestrator("erp_analytics_ops", args);
+      return JSON.stringify(getOpsAnalytics({ since }), null, 2);
+    }
+
+    case "erp_customer360_profile": {
+      const { workspaceId, customerExternalId, forceRefresh } = validateOrchestrator("erp_customer360_profile", args);
+      return JSON.stringify(getCustomer360Profile(workspaceId, customerExternalId, forceRefresh), null, 2);
+    }
+
+    case "erp_customer360_health": {
+      const { workspaceId, customerExternalId, weights } = validateOrchestrator("erp_customer360_health", args);
+      return JSON.stringify(getCustomer360Health(workspaceId, customerExternalId, weights), null, 2);
+    }
+
+    case "erp_customer360_timeline": {
+      const { workspaceId, customerExternalId, ...rest } = validateOrchestrator("erp_customer360_timeline", args);
+      return JSON.stringify(getCustomer360Timeline(workspaceId, customerExternalId, rest), null, 2);
+    }
+
+    case "erp_customer360_segments": {
+      const opts = validateOrchestrator("erp_customer360_segments", args);
+      return JSON.stringify(getCustomer360Segments(opts), null, 2);
+    }
+
+    case "erp_customer360_churn_risk": {
+      const opts = validateOrchestrator("erp_customer360_churn_risk", args);
+      return JSON.stringify(getCustomer360ChurnRisk(opts), null, 2);
     }
 
     // ── Metrics ─────────────────────────────────────────────────
@@ -1713,6 +2288,595 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         required: ["workflow"],
       },
     },
+    {
+      name: "agency_workflow_templates",
+      description: "Return three packaged agency workflow templates (reporting, approval, handoff) with ready-to-adapt workflow_execute definitions.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "agency_roi_snapshot",
+      description: "Compute agency KPI snapshot: runs completed, failure rate, estimated hours saved, manual steps removed, and token savings.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string", description: "Optional ISO timestamp lower bound for KPI window" },
+          assumedMinutesSavedPerSuccessfulRun: { type: "number", description: "Default 20 minutes saved per successful run" },
+          assumedManualStepsRemovedPerRun: { type: "number", description: "Default 4 manual steps removed per successful run" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_connect",
+      description: "Connect or update an ERP connector (odoo, business-central, dynamics). Enforces Odoo Custom-plan gating via metadata.odooPlan.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          type: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          authMode: { type: "string", enum: ["oauth", "api-key"] },
+          config: { type: "object", description: "Connector credentials/settings (provider-specific)" },
+          metadata: { type: "object", description: "Connector metadata (tenantId, tokenExpiresAt, webhookExpiresAt, odooPlan, instanceUrl)" },
+          enabled: { type: "boolean", description: "Enable connector after connect (default: true)" },
+        },
+        required: ["type", "authMode"],
+      },
+    },
+    {
+      name: "erp_connector_sync",
+      description: "Run connector sync with idempotency key, retry policy, and dead-letter safety.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          type: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          direction: { type: "string", enum: ["ingest", "writeback", "two-way"] },
+          entityType: { type: "string", enum: ["lead", "deal", "invoice", "quote", "order"] },
+          externalId: { type: "string" },
+          idempotencyKey: { type: "string" },
+          payload: { type: "object" },
+          maxRetries: { type: "number", description: "Default 3, max 5" },
+        },
+        required: ["type"],
+      },
+    },
+    {
+      name: "erp_connector_status",
+      description: "Get ERP connector health status, token expiry state, and renewal warnings. If type omitted, returns all.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          type: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renew",
+      description: "Renew Business Central webhook subscription. Uses native subscription API when connector has baseUrl, accessToken, notificationUrl, and resource configured.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          type: { type: "string", enum: ["business-central"] },
+          webhookExpiresAt: { type: "string", description: "Optional explicit ISO expiry timestamp" },
+          notificationUrl: { type: "string", description: "Optional webhook callback URL override for renewal request" },
+          resource: { type: "string", description: "Optional Business Central resource path override for renewal request" },
+        },
+        required: ["type"],
+      },
+    },
+    {
+      name: "erp_connector_renew_due",
+      description: "Scan connectors with renewalDue=true and renew automatically (Business Central). Use dryRun=true for no-op planning.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          dryRun: { type: "boolean", description: "If true, report what would be renewed without performing renewals" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_run",
+      description: "Run a packaged ERP product workflow (quote-to-order, lead-to-cash, collections). Returns taskId.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          context: { type: "object", description: "Optional product context (customerName, quoteUrl, leadUrl, invoiceUrl, etc.)" },
+        },
+        required: ["product"],
+      },
+    },
+    {
+      name: "erp_kpis",
+      description: "Get KPI snapshot for ERP product lines (workflow success, sync outcomes, revenue proxy signals).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          since: { type: "string", description: "Optional ISO timestamp lower bound" },
+        },
+        required: ["product"],
+      },
+    },
+    {
+      name: "erp_connector_kpis",
+      description: "Get connector health and renewal KPIs (success/failure rate, due backlog, alert flags).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string", description: "Optional ISO timestamp lower bound for renewal KPI window" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renewals",
+      description: "List connector renewal incidents with filters and cursor-style pagination.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          connector: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          status: { type: "string", enum: ["success", "failed"] },
+          since: { type: "string", description: "Optional ISO lower bound for created_at" },
+          before: { type: "string", description: "Optional ISO cursor (returns rows older than this timestamp)" },
+          limit: { type: "number", description: "Page size (1-200, default 50)" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renewals_export",
+      description: "Export connector renewal incidents as CSV using the same filters as erp_connector_renewals.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          connector: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          status: { type: "string", enum: ["success", "failed"] },
+          since: { type: "string", description: "Optional ISO lower bound for created_at" },
+          before: { type: "string", description: "Optional ISO cursor (returns rows older than this timestamp)" },
+          limit: { type: "number", description: "Page size (1-2000, default 1000)" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renewals_snapshot",
+      description: "Generate CSV+JSON renewal snapshot files and return file paths for reporting pipelines.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string", description: "Optional ISO lower bound for included renewal incidents" },
+          limit: { type: "number", description: "Maximum incidents to include (1-2000, default 1000)" },
+          outputDir: { type: "string", description: "Optional output directory override" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_renewals_verify",
+      description: "Verify a renewal snapshot manifest by recalculating artifact hashes and optional HMAC signature.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          manifestPath: { type: "string", description: "Absolute path to *.manifest.json" },
+        },
+        required: ["manifestPath"],
+      },
+    },
+    {
+      name: "erp_connector_trust_report",
+      description: "Build procurement-ready trust report from latest snapshot manifest, verification, and KPI deltas.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          outputDir: { type: "string", description: "Optional snapshot directory override" },
+          since: { type: "string", description: "Optional ISO lower bound for KPI comparison window" },
+          limit: { type: "number", description: "Snapshot generation limit when generateIfMissing=true (1-2000)" },
+          generateIfMissing: { type: "boolean", description: "Generate a new snapshot if no manifest exists (default true)" },
+        },
+      },
+    },
+    {
+      name: "erp_connector_sales_packet",
+      description: "Build one-payload sales packet with trust report, connector KPIs, product KPIs, and latest snapshot artifacts.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          outputDir: { type: "string", description: "Optional snapshot directory override" },
+          since: { type: "string", description: "Optional ISO lower bound for KPI windows" },
+          limit: { type: "number", description: "Snapshot generation limit when generateIfMissing=true (1-2000)" },
+          generateIfMissing: { type: "boolean", description: "Generate a new snapshot if no manifest exists (default true)" },
+          products: { type: "array", items: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] } },
+          format: { type: "string", enum: ["full", "brief", "email"], description: "Output detail level (default: full)" },
+        },
+      },
+    },
+    {
+      name: "erp_pilot_readiness",
+      description: "Evaluate pilot go-live readiness against trust, manifest validity, connector health, and renewal backlog gates.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          outputDir: { type: "string", description: "Optional snapshot directory override" },
+          since: { type: "string", description: "Optional ISO lower bound for KPI windows" },
+          limit: { type: "number", description: "Snapshot generation limit when generateIfMissing=true (1-2000)" },
+          generateIfMissing: { type: "boolean", description: "Generate a new snapshot if none exists (default true)" },
+          requiredTrustScore: { type: "number", description: "Minimum trust score required (0-100, default 80)" },
+          requireProcurementReady: { type: "boolean", description: "Require procurementReady=true in trust report (default true)" },
+        },
+      },
+    },
+    {
+      name: "erp_launch_pilot",
+      description: "Run readiness gate and, if passed, auto-generate launch sales packet (email format).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          outputDir: { type: "string", description: "Optional snapshot directory override" },
+          since: { type: "string", description: "Optional ISO lower bound for KPI windows" },
+          limit: { type: "number", description: "Snapshot generation limit when generateIfMissing=true (1-2000)" },
+          generateIfMissing: { type: "boolean", description: "Generate a new snapshot if none exists (default true)" },
+          requiredTrustScore: { type: "number", description: "Minimum trust score required (0-100, default 80)" },
+          requireProcurementReady: { type: "boolean", description: "Require procurementReady=true in trust report (default true)" },
+          dryRun: { type: "boolean", description: "If true, validate readiness but do not generate packet" },
+        },
+      },
+    },
+    {
+      name: "erp_pilot_launches",
+      description: "List pilot launch attempts and outcomes with optional status/time filters.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          status: { type: "string", enum: ["blocked", "ready", "launched", "delivery_failed", "dry_run"] },
+          since: { type: "string", description: "Optional ISO lower bound for created_at" },
+          limit: { type: "number", description: "Maximum rows to return (1-200, default 50)" },
+        },
+      },
+    },
+    {
+      name: "erp_onboarding_create",
+      description: "Create an onboarding session that auto-tracks ERP workflow/sync KPIs for one customer/product.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          customerName: { type: "string", description: "Customer or workspace display name" },
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          connector: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          metadata: { type: "object", description: "Optional structured metadata (owner, segment, notes)" },
+        },
+        required: ["customerName", "product"],
+      },
+    },
+    {
+      name: "erp_onboarding_capture",
+      description: "Capture onboarding KPI snapshot from tracked ERP data (baseline/current).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          onboardingId: { type: "string" },
+          phase: { type: "string", enum: ["baseline", "current"] },
+          since: { type: "string", description: "Optional ISO lower bound for KPI window" },
+        },
+        required: ["onboardingId"],
+      },
+    },
+    {
+      name: "erp_onboarding_report",
+      description: "Build onboarding report with baseline vs current deltas and expansion recommendation.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          onboardingId: { type: "string" },
+          autoCaptureCurrent: { type: "boolean", description: "Auto-capture current snapshot if missing (default true)" },
+        },
+        required: ["onboardingId"],
+      },
+    },
+    {
+      name: "erp_onboarding_list",
+      description: "List onboarding sessions and their status.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          status: { type: "string", enum: ["active", "completed", "paused"] },
+          limit: { type: "number", description: "Maximum rows to return (1-200, default 50)" },
+        },
+      },
+    },
+    {
+      name: "erp_commercial_event_record",
+      description: "Record a commercial pipeline event (qualified call, proposal sent, pilot signed).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          stage: { type: "string", enum: ["qualified_call", "proposal_sent", "pilot_signed"] },
+          customerName: { type: "string" },
+          onboardingId: { type: "string" },
+          valueEur: { type: "number" },
+          notes: { type: "string" },
+          occurredAt: { type: "string", description: "Optional ISO timestamp" },
+        },
+        required: ["product", "stage", "customerName"],
+      },
+    },
+    {
+      name: "erp_commercial_kpis",
+      description: "Get commercial funnel KPIs against wave targets (10 calls, 3 proposals, 1 signed pilot).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          since: { type: "string", description: "Optional ISO lower bound for occurred_at" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_sla_status",
+      description: "Evaluate SLA status for workflow modules (quote-to-order, lead-to-cash, collections).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          since: { type: "string", description: "Optional ISO lower bound for workflow runs" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_sla_escalate",
+      description: "Create SLA incidents for breached modules with dedupe interval.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          since: { type: "string", description: "Optional ISO lower bound for workflow runs" },
+          minIntervalMinutes: { type: "number", description: "Dedupe interval for repeated incident creation (default 60)" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_sla_incidents",
+      description: "List SLA incidents for workflow modules.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          product: { type: "string", enum: ["quote-to-order", "lead-to-cash", "collections"] },
+          status: { type: "string", enum: ["open", "acknowledged", "resolved"] },
+          limit: { type: "number", description: "Maximum rows (1-200, default 50)" },
+        },
+      },
+    },
+    {
+      name: "erp_workflow_sla_incident_update",
+      description: "Update SLA incident lifecycle state (acknowledged/resolved).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          incidentId: { type: "string" },
+          status: { type: "string", enum: ["acknowledged", "resolved"] },
+        },
+        required: ["incidentId", "status"],
+      },
+    },
+    {
+      name: "erp_q2o_quote_sync",
+      description: "Upsert quote state into Quote-to-Order Command Center with traceability and optimistic concurrency checks.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          connectorType: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          quoteExternalId: { type: "string" },
+          approvalExternalId: { type: "string" },
+          customerExternalId: { type: "string" },
+          amount: { type: "number" },
+          currency: { type: "string" },
+          state: { type: "string", enum: ["draft", "submitted", "approved", "rejected", "converted_to_order", "fulfilled"] },
+          approvalDeadlineAt: { type: "string" },
+          conversionDeadlineAt: { type: "string" },
+          expectedVersion: { type: "number" },
+          idempotencyKey: { type: "string" },
+          payload: { type: "object" },
+        },
+        required: ["workspaceId", "connectorType", "quoteExternalId"],
+      },
+    },
+    {
+      name: "erp_q2o_order_sync",
+      description: "Upsert order conversion/fulfillment state for a quote.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          connectorType: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          quoteExternalId: { type: "string" },
+          orderExternalId: { type: "string" },
+          amount: { type: "number" },
+          currency: { type: "string" },
+          state: { type: "string", enum: ["converted_to_order", "fulfilled"] },
+          expectedVersion: { type: "number" },
+          idempotencyKey: { type: "string" },
+          payload: { type: "object" },
+        },
+        required: ["workspaceId", "connectorType", "quoteExternalId", "orderExternalId"],
+      },
+    },
+    {
+      name: "erp_q2o_approval_decision",
+      description: "Apply approval decision on a quote approval item.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          approvalId: { type: "string" },
+          decision: { type: "string", enum: ["approved", "rejected"] },
+          decidedBy: { type: "string" },
+          quoteExternalId: { type: "string" },
+          idempotencyKey: { type: "string" },
+          payload: { type: "object" },
+        },
+        required: ["workspaceId", "approvalId", "decision"],
+      },
+    },
+    {
+      name: "erp_q2o_pipeline",
+      description: "Get quote-to-order pipeline health and business metrics for a workspace.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          since: { type: "string" },
+        },
+        required: ["workspaceId"],
+      },
+    },
+    {
+      name: "erp_master_data_sync",
+      description: "Sync master data entity payloads and detect mapping drift.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          entity: { type: "string", enum: ["customer", "product", "price", "tax"] },
+          connectorType: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          idempotencyKey: { type: "string" },
+          records: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                externalId: { type: "string" },
+                payload: { type: "object" },
+              },
+              required: ["externalId"],
+            },
+          },
+          externalId: { type: "string" },
+          payload: { type: "object" },
+        },
+        required: ["workspaceId", "entity", "connectorType"],
+      },
+    },
+    {
+      name: "erp_master_data_mappings",
+      description: "List ERP master-data field mappings for workspace scope.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          connectorType: { type: "string", enum: ["odoo", "business-central", "dynamics"] },
+          entity: { type: "string", enum: ["customer", "product", "price", "tax"] },
+          limit: { type: "number" },
+        },
+        required: ["workspaceId"],
+      },
+    },
+    {
+      name: "erp_master_data_mapping_update",
+      description: "Update one master-data mapping and bump mapping version.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          mappingId: { type: "string" },
+          unifiedField: { type: "string" },
+          externalField: { type: "string" },
+          driftStatus: { type: "string", enum: ["ok", "changed"] },
+        },
+        required: ["mappingId"],
+      },
+    },
+    {
+      name: "erp_analytics_executive",
+      description: "Executive KPI dashboard metrics for quote-to-order performance and ROI.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          since: { type: "string" },
+        },
+      },
+    },
+    {
+      name: "erp_analytics_ops",
+      description: "Operations analytics dashboard metrics (sync reliability, DLQ/replay, SLA timeline, MTTR).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since: { type: "string" },
+        },
+      },
+    },
+    // Customer 360
+    {
+      name: "erp_customer360_profile",
+      description: "Get unified Customer 360 profile with health score, segment, and relationship map.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          customerExternalId: { type: "string" },
+          forceRefresh: { type: "boolean" },
+        },
+        required: ["workspaceId", "customerExternalId"],
+      },
+    },
+    {
+      name: "erp_customer360_health",
+      description: "Compute or retrieve customer health score with dimension breakdown and history.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          customerExternalId: { type: "string" },
+          weights: {
+            type: "object",
+            properties: {
+              engagement: { type: "number" },
+              revenue: { type: "number" },
+              sentiment: { type: "number" },
+              responsiveness: { type: "number" },
+            },
+          },
+        },
+        required: ["workspaceId", "customerExternalId"],
+      },
+    },
+    {
+      name: "erp_customer360_timeline",
+      description: "Get chronological interaction timeline for a customer across all touchpoints.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          customerExternalId: { type: "string" },
+          since: { type: "string" },
+          limit: { type: "number" },
+          interactionTypes: { type: "array", items: { type: "string", enum: ["quote_created", "quote_approved", "quote_rejected", "quote_converted", "quote_fulfilled", "communication", "followup", "consent_change", "order_created"] } },
+        },
+        required: ["workspaceId", "customerExternalId"],
+      },
+    },
+    {
+      name: "erp_customer360_segments",
+      description: "List customers grouped by segment (champion, loyal, promising, at_risk, churning, new, dormant).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          segment: { type: "string", enum: ["champion", "loyal", "promising", "at_risk", "churning", "new", "dormant"] },
+          limit: { type: "number" },
+        },
+        required: ["workspaceId"],
+      },
+    },
+    {
+      name: "erp_customer360_churn_risk",
+      description: "Assess churn risk for a customer or find all customers above a risk threshold.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          customerExternalId: { type: "string" },
+          threshold: { type: "number" },
+          limit: { type: "number" },
+        },
+        required: ["workspaceId"],
+      },
+    },
     // Metrics and observability
     {
       name: "get_metrics",
@@ -1984,6 +3148,11 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
     { uri: "a2a://audit", name: "Audit Log", description: "Recent audit log entries (enterprise)", mimeType: "application/json" },
     { uri: "a2a://license", name: "License", description: "Current license tier and skill gates", mimeType: "application/json" },
     { uri: "a2a://workspaces", name: "Workspaces", description: "Team workspaces and members", mimeType: "application/json" },
+    { uri: "a2a://agency-workflows", name: "Agency Workflows", description: "Packaged agency templates for reporting, approval, and handoff", mimeType: "application/json" },
+    { uri: "a2a://agency-roi", name: "Agency ROI", description: "Agency KPI snapshot for pilot performance and ROI", mimeType: "application/json" },
+    { uri: "a2a://connectors", name: "ERP Connectors", description: "Connector health and auth status for Odoo, Business Central, and Dynamics", mimeType: "application/json" },
+    { uri: "a2a://connectors-kpis", name: "ERP Connector KPIs", description: "Connector reliability and renewal KPI snapshot", mimeType: "application/json" },
+    { uri: "a2a://connector-renewals", name: "ERP Connector Renewals", description: "Recent connector renewal incidents (success/failure feed)", mimeType: "application/json" },
   ];
   for (const card of workerCards) {
     resources.push({
@@ -2057,6 +3226,59 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
   if (uri === "a2a://workspaces") {
     return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(listWorkspaces(), null, 2) }] };
+  }
+
+  if (uri === "a2a://agency-workflows") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify({
+          summary: getAgencyProductSummary(),
+          templates: getAgencyWorkflowTemplates(),
+        }, null, 2),
+      }],
+    };
+  }
+
+  if (uri === "a2a://agency-roi") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(getAgencyRoiSnapshot(), null, 2),
+      }],
+    };
+  }
+
+  if (uri === "a2a://connectors") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(listConnectorStatuses(), null, 2),
+      }],
+    };
+  }
+
+  if (uri === "a2a://connectors-kpis") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(getConnectorKpis(), null, 2),
+      }],
+    };
+  }
+
+  if (uri === "a2a://connector-renewals") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(listConnectorRenewals({ limit: 50 }), null, 2),
+      }],
+    };
   }
 
   const workerMatch = uri.match(/^a2a:\/\/workers\/([^/]+)\/card$/);
@@ -2243,6 +3465,327 @@ function checkAuth(request: { ip: string; headers: Record<string, string | strin
   return false;
 }
 
+interface WizardWebSession {
+  token: string;
+  keyPrefix: string;
+  name: string;
+  role: ApiKeyEntry["role"];
+  workspace?: string;
+  expiresAt: number;
+}
+
+const WIZARD_SESSION_COOKIE = "a2a_wizard_session";
+const WIZARD_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const wizardWebSessions = new Map<string, WizardWebSession>();
+
+function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  if (!cookieHeader) return {};
+  const parts = cookieHeader.split(";").map((part) => part.trim()).filter(Boolean);
+  const out: Record<string, string> = {};
+  for (const part of parts) {
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+    const rawKey = part.slice(0, idx).trim();
+    const rawValue = part.slice(idx + 1).trim();
+    const key = (() => {
+      try { return decodeURIComponent(rawKey); } catch { return rawKey; }
+    })();
+    const value = (() => {
+      try { return decodeURIComponent(rawValue); } catch { return rawValue; }
+    })();
+    out[key] = value;
+  }
+  return out;
+}
+
+function pruneWizardWebSessions(): void {
+  const now = Date.now();
+  for (const [token, session] of wizardWebSessions.entries()) {
+    if (session.expiresAt <= now) wizardWebSessions.delete(token);
+  }
+}
+
+function setWizardSessionCookie(reply: { header: (name: string, value: string) => void }, token: string, secure: boolean): void {
+  const attrs = [
+    `${WIZARD_SESSION_COOKIE}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    `Max-Age=${Math.floor(WIZARD_SESSION_TTL_MS / 1000)}`,
+  ];
+  if (secure) attrs.push("Secure");
+  reply.header("Set-Cookie", attrs.join("; "));
+}
+
+function clearWizardSessionCookie(reply: { header: (name: string, value: string) => void }, secure: boolean): void {
+  const attrs = [
+    `${WIZARD_SESSION_COOKIE}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    "Max-Age=0",
+  ];
+  if (secure) attrs.push("Secure");
+  reply.header("Set-Cookie", attrs.join("; "));
+}
+
+function getWizardWebSession(request: {
+  headers: Record<string, string | string[] | undefined>;
+}): WizardWebSession | null {
+  pruneWizardWebSessions();
+  const rawCookie = request.headers["cookie"];
+  const cookieHeader = Array.isArray(rawCookie) ? rawCookie[0] : rawCookie;
+  const cookies = parseCookies(cookieHeader);
+  const token = cookies[WIZARD_SESSION_COOKIE];
+  if (!token) return null;
+  const session = wizardWebSessions.get(token);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    wizardWebSessions.delete(token);
+    return null;
+  }
+  return session;
+}
+
+function startWizardWebSession(entry: ApiKeyEntry): WizardWebSession {
+  const token = `${randomUUID()}${randomUUID().replace(/-/g, "")}`;
+  const session: WizardWebSession = {
+    token,
+    keyPrefix: entry.prefix,
+    name: entry.name,
+    role: entry.role,
+    workspace: entry.workspace,
+    expiresAt: Date.now() + WIZARD_SESSION_TTL_MS,
+  };
+  wizardWebSessions.set(token, session);
+  return session;
+}
+
+function listWizardAccessibleWorkspaces(session: WizardWebSession): ReturnType<typeof listWorkspaces> {
+  const all = listWorkspaces();
+  if (session.role === "admin" && !session.workspace) return all;
+  if (session.workspace) return all.filter((ws) => ws.id === session.workspace);
+  return all.filter((ws) => ws.members.some((member) => member.keyPrefix === session.keyPrefix));
+}
+
+function requireWizardWriteRole(session: WizardWebSession): void {
+  if (session.role === "viewer") {
+    throw new Error("Viewer keys are read-only in the wizard.");
+  }
+}
+
+function requireWizardWorkspaceAccess(session: WizardWebSession, workspaceId: string, write: boolean): void {
+  if (write) requireWizardWriteRole(session);
+  if (session.workspace && session.workspace !== workspaceId) {
+    throw new Error(`Session is scoped to workspace '${session.workspace}', not '${workspaceId}'.`);
+  }
+  const workspace = getWorkspace(workspaceId);
+  if (!workspace) {
+    throw new Error(`Workspace '${workspaceId}' not found.`);
+  }
+  if (session.role === "admin") return;
+  if (workspace.members.some((member) => member.keyPrefix === session.keyPrefix)) return;
+  if (session.workspace === workspaceId) return;
+  throw new Error(`Workspace access denied for '${workspaceId}'.`);
+}
+
+function wizardSessionWorkspaceId(payload: Record<string, unknown>): string {
+  const workspaceId = payload.workspaceId;
+  if (typeof workspaceId !== "string" || workspaceId.length === 0) {
+    throw new Error("Wizard session payload is missing workspaceId.");
+  }
+  return workspaceId;
+}
+
+type WizardMailboxOAuthProvider = "gmail" | "outlook";
+
+interface WizardMailboxOAuthTransaction {
+  state: string;
+  provider: WizardMailboxOAuthProvider;
+  workspaceId: string;
+  userId: string;
+  tenantId?: string;
+  clientId: string;
+  clientSecret?: string;
+  tokenEndpoint: string;
+  scopes: string[];
+  codeVerifier: string;
+  initiatedBy: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+const WIZARD_MAILBOX_OAUTH_TTL_MS = 10 * 60 * 1000;
+const wizardMailboxOauthTransactions = new Map<string, WizardMailboxOAuthTransaction>();
+
+function pruneWizardMailboxOauthTransactions(): void {
+  const now = Date.now();
+  for (const [state, tx] of wizardMailboxOauthTransactions.entries()) {
+    if (tx.expiresAt <= now) wizardMailboxOauthTransactions.delete(state);
+  }
+}
+
+function createPkcePair(): { verifier: string; challenge: string } {
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return { verifier, challenge };
+}
+
+function wizardOAuthBaseUrl(request: { headers: Record<string, string | string[] | undefined> }): string {
+  const xfProto = request.headers["x-forwarded-proto"];
+  const forwardedProto = Array.isArray(xfProto) ? xfProto[0] : xfProto;
+  const xfHost = request.headers["x-forwarded-host"];
+  const forwardedHost = Array.isArray(xfHost) ? xfHost[0] : xfHost;
+  const hostHeader = request.headers["host"];
+  const host = forwardedHost || (Array.isArray(hostHeader) ? hostHeader[0] : hostHeader) || `localhost:${CONFIG.server.port}`;
+  const proto = forwardedProto || "http";
+  return `${proto}://${host}`;
+}
+
+function wizardMailboxOAuthPreset(provider: WizardMailboxOAuthProvider, tenantId?: string): {
+  authEndpoint: string;
+  tokenEndpoint: string;
+  scopes: string[];
+  authorizeParams: Record<string, string>;
+} {
+  if (provider === "gmail") {
+    return {
+      authEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+      tokenEndpoint: "https://oauth2.googleapis.com/token",
+      scopes: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "openid",
+        "email",
+      ],
+      authorizeParams: {
+        access_type: "offline",
+        prompt: "consent",
+        include_granted_scopes: "true",
+      },
+    };
+  }
+  const tenant = tenantId && tenantId.length > 0 ? tenantId : "common";
+  return {
+    authEndpoint: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`,
+    tokenEndpoint: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`,
+    scopes: ["offline_access", "Mail.Read", "User.Read"],
+    authorizeParams: {
+      response_mode: "query",
+    },
+  };
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function renderWizardMailboxOAuthPage(input: {
+  ok: boolean;
+  title: string;
+  message: string;
+  payload: Record<string, unknown>;
+}): string {
+  const payloadJson = JSON.stringify({
+    ...input.payload,
+    type: "wizard-mailbox-oauth",
+  }).replaceAll("<", "\\u003c");
+  const color = input.ok ? "#0f766e" : "#b91c1c";
+  const title = escapeHtml(input.title);
+  const message = escapeHtml(input.message);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${title}</title>
+  <style>
+    body{margin:0;background:#f8fafc;color:#0f172a;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+    .wrap{max-width:640px;margin:0 auto;padding:36px 20px}
+    .card{background:#fff;border:1px solid #dbe3ef;border-radius:14px;padding:18px}
+    h1{margin:0 0 10px;font-size:1.2rem;color:${color}}
+    p{margin:0 0 8px;color:#334155;line-height:1.5}
+    code{display:block;background:#0f172a;color:#e2e8f0;padding:10px;border-radius:10px;margin-top:12px;white-space:pre-wrap}
+    .row{margin-top:14px}
+    button{padding:9px 12px;border:1px solid #cbd5e1;background:#f8fafc;border-radius:10px;cursor:pointer}
+    a{color:#1d4ed8}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>${title}</h1>
+      <p>${message}</p>
+      <p>You can close this tab and continue in the Wizard.</p>
+      <div class="row">
+        <button onclick="window.close()">Close Window</button>
+        <a href="/wizard" target="_self" style="margin-left:12px">Back to Wizard</a>
+      </div>
+      <code id="payloadBox"></code>
+    </div>
+  </div>
+  <script>
+  (() => {
+    const payload = ${payloadJson};
+    document.getElementById("payloadBox").textContent = JSON.stringify(payload, null, 2);
+    try {
+      if (window.opener) window.opener.postMessage(payload, window.location.origin);
+    } catch {}
+    if (payload.status === "ok") {
+      setTimeout(() => { try { window.close(); } catch {} }, 1200);
+    }
+  })();
+  </script>
+</body>
+</html>`;
+}
+
+async function exchangeWizardMailboxOAuthCode(input: {
+  tokenEndpoint: string;
+  code: string;
+  clientId: string;
+  clientSecret?: string;
+  redirectUri: string;
+  codeVerifier: string;
+}): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string; grantedScope?: string }> {
+  const form = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: input.code,
+    client_id: input.clientId,
+    redirect_uri: input.redirectUri,
+    code_verifier: input.codeVerifier,
+  });
+  if (input.clientSecret) form.set("client_secret", input.clientSecret);
+  const res = await fetch(input.tokenEndpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json",
+    },
+    body: form.toString(),
+  });
+  const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+  if (!res.ok) {
+    const detail = typeof data.error_description === "string"
+      ? data.error_description
+      : (typeof data.error === "string" ? data.error : `HTTP ${res.status}`);
+    throw new Error(`OAuth token exchange failed: ${detail}`);
+  }
+  const accessToken = typeof data.access_token === "string" ? data.access_token : "";
+  if (!accessToken) throw new Error("OAuth token exchange returned no access_token.");
+  const refreshToken = typeof data.refresh_token === "string" ? data.refresh_token : undefined;
+  const expiresInRaw = Number(data.expires_in);
+  const expiresAt = Number.isFinite(expiresInRaw) && expiresInRaw > 0
+    ? new Date(Date.now() + (expiresInRaw * 1000)).toISOString()
+    : undefined;
+  const grantedScope = typeof data.scope === "string" ? data.scope : undefined;
+  return { accessToken, refreshToken, expiresAt, grantedScope };
+}
+
 // ── Worker health polling ────────────────────────────────────────
 async function pollWorkerHealth() {
   for (const w of WORKERS) {
@@ -2292,6 +3835,816 @@ async function pollWorkerHealth() {
   }
 }
 
+function randomJitterMs(maxJitterMs: number): number {
+  if (maxJitterMs <= 0) return 0;
+  return Math.floor(Math.random() * (maxJitterMs + 1));
+}
+
+function startFollowupWritebackScheduler(): () => void {
+  const enabled = CONFIG.erp.followupWritebackEnabled;
+  const intervalMs = Math.max(60_000, CONFIG.erp.followupWritebackIntervalMs);
+  const jitterMs = Math.max(0, CONFIG.erp.followupWritebackJitterMs);
+  if (!enabled) {
+    process.stderr.write("[q2o-writeback] scheduler disabled by config\n");
+    return () => {};
+  }
+  process.stderr.write(
+    `[q2o-writeback] scheduler enabled (interval=${intervalMs}ms, jitter<=${jitterMs}ms, limitPerWorkspace=${CONFIG.erp.followupWritebackBatchLimit})\n`,
+  );
+
+  let stopped = false;
+  let inFlight = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const runBatch = async () => {
+    if (inFlight) {
+      process.stderr.write("[q2o-writeback] previous run still in progress, skipping overlap\n");
+      return;
+    }
+    inFlight = true;
+    const startedAt = Date.now();
+    try {
+      const result = await runScheduledFollowupWritebacks({
+        limitPerWorkspace: CONFIG.erp.followupWritebackBatchLimit,
+        statusOnSuccess: "sent",
+        maxRetries: 2,
+      }) as { workspaceCount: number; processedCount: number; failedCount: number };
+      process.stderr.write(
+        `[q2o-writeback] run complete: workspaces=${result.workspaceCount} processed=${result.processedCount} failed=${result.failedCount} durationMs=${Date.now() - startedAt}\n`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[q2o-writeback] run failed: ${msg}\n`);
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const scheduleNext = () => {
+    if (stopped) return;
+    const delay = intervalMs + randomJitterMs(jitterMs);
+    timer = setTimeout(async () => {
+      await runBatch();
+      scheduleNext();
+    }, delay);
+    timer.unref?.();
+  };
+
+  scheduleNext();
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
+}
+
+function startConnectorRenewalScheduler(): () => void {
+  const enabled = CONFIG.erp.autoRenewEnabled;
+  const intervalMs = Math.max(60_000, CONFIG.erp.renewalSweepIntervalMs);
+  const jitterMs = Math.max(0, CONFIG.erp.renewalSweepJitterMs);
+  const breaker = getBreaker("erp-renewal:business-central", {
+    failureThreshold: 3,
+    cooldownMs: Math.max(intervalMs, 5 * 60 * 1000),
+    callTimeoutMs: Math.min(intervalMs, 120_000),
+    successThreshold: 1,
+  });
+
+  if (!enabled) {
+    process.stderr.write("[erp-renewal] scheduler disabled by config\n");
+    return () => {};
+  }
+
+  process.stderr.write(`[erp-renewal] scheduler enabled (interval=${intervalMs}ms, jitter<=${jitterMs}ms)\n`);
+
+  let stopped = false;
+  let inFlight = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const runSweep = async () => {
+    if (inFlight) {
+      process.stderr.write("[erp-renewal] previous sweep still in progress, skipping overlap\n");
+      return;
+    }
+    inFlight = true;
+    const startedAt = Date.now();
+    try {
+      const result = await breaker.call(() => renewDueConnectors());
+      process.stderr.write(
+        `[erp-renewal] sweep complete: scanned=${result.scanned} due=${result.due} renewed=${result.renewed} failed=${result.failed} skipped=${result.skipped} durationMs=${Date.now() - startedAt}\n`
+      );
+    } catch (err) {
+      if (err instanceof CircuitOpenError) {
+        process.stderr.write(`[erp-renewal] sweep blocked by circuit breaker (retryAfterMs=${err.retryAfterMs})\n`);
+      } else {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[erp-renewal] sweep failed: ${msg}\n`);
+      }
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const scheduleNext = () => {
+    if (stopped) return;
+    const delay = intervalMs + randomJitterMs(jitterMs);
+    timer = setTimeout(async () => {
+      await runSweep();
+      scheduleNext();
+    }, delay);
+    timer.unref?.();
+  };
+
+  scheduleNext();
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+}
+
+function pruneSnapshotExports(dir: string, retentionDays: number): void {
+  const maxAgeMs = Math.max(1, retentionDays) * 24 * 60 * 60 * 1000;
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    try {
+      const stats = statSync(fullPath);
+      if (!stats.isFile()) continue;
+      if (stats.mtimeMs < cutoff) unlinkSync(fullPath);
+    } catch {}
+  }
+}
+
+async function writeConnectorRenewalSnapshot(input: { since?: string; limit?: number; outputDir?: string } = {}): Promise<{
+  generatedAt: string;
+  csvPath: string;
+  jsonPath: string;
+  manifestPath: string;
+  csvSha256: string;
+  jsonSha256: string;
+  manifestSha256: string;
+  signature?: string;
+  rowCount: number;
+  failedCount: number;
+}> {
+  const outputDir = input.outputDir ?? CONFIG.erp.snapshotOutputDir;
+  const snapshot = buildConnectorRenewalSnapshot({
+    since: input.since,
+    limit: input.limit,
+  });
+  mkdirSync(outputDir, { recursive: true });
+  const stamp = snapshot.generatedAt.replaceAll(":", "-");
+  const csvPath = join(outputDir, `renewal-snapshot-${stamp}.csv`);
+  const jsonPath = join(outputDir, `renewal-snapshot-${stamp}.json`);
+  const manifestPath = join(outputDir, `renewal-snapshot-${stamp}.manifest.json`);
+  const jsonPayload = JSON.stringify({
+    generatedAt: snapshot.generatedAt,
+    since: snapshot.since,
+    limit: snapshot.limit,
+    rowCount: snapshot.rowCount,
+    failedCount: snapshot.failedCount,
+    kpis: snapshot.kpis,
+  }, null, 2);
+  const csvSha256 = createHash("sha256").update(snapshot.csv).digest("hex");
+  const jsonSha256 = createHash("sha256").update(jsonPayload).digest("hex");
+  const manifestBase: Record<string, unknown> = {
+    manifestVersion: "1.0",
+    generatedAt: snapshot.generatedAt,
+    generatedBy: {
+      service: "a2a-mcp-orchestrator",
+      version: ORCHESTRATOR_VERSION,
+    },
+    period: {
+      since: snapshot.since ?? null,
+      until: snapshot.generatedAt,
+    },
+    summary: {
+      rowCount: snapshot.rowCount,
+      failedCount: snapshot.failedCount,
+      limit: snapshot.limit,
+    },
+    artifacts: [
+      { type: "csv", path: csvPath, sha256: csvSha256 },
+      { type: "json", path: jsonPath, sha256: jsonSha256 },
+    ],
+  };
+  let signature: string | undefined;
+  if (CONFIG.erp.snapshotSigningKey) {
+    const canonical = JSON.stringify(manifestBase);
+    signature = createHmac("sha256", CONFIG.erp.snapshotSigningKey).update(canonical).digest("hex");
+    manifestBase.signature = {
+      algorithm: "hmac-sha256",
+      value: signature,
+    };
+  }
+  const manifestPayload = JSON.stringify(manifestBase, null, 2);
+  const manifestSha256 = createHash("sha256").update(manifestPayload).digest("hex");
+  await Bun.write(csvPath, snapshot.csv);
+  await Bun.write(jsonPath, jsonPayload);
+  await Bun.write(manifestPath, manifestPayload);
+  pruneSnapshotExports(outputDir, CONFIG.erp.snapshotRetentionDays);
+  return {
+    generatedAt: snapshot.generatedAt,
+    csvPath,
+    jsonPath,
+    manifestPath,
+    csvSha256,
+    jsonSha256,
+    manifestSha256,
+    signature,
+    rowCount: snapshot.rowCount,
+    failedCount: snapshot.failedCount,
+  };
+}
+
+async function verifyConnectorRenewalManifest(manifestPath: string): Promise<{
+  manifestPath: string;
+  valid: boolean;
+  hashValid: boolean;
+  signatureValid?: boolean;
+  errors: string[];
+}> {
+  const errors: string[] = [];
+  let manifestRaw = "";
+  try {
+    manifestRaw = await Bun.file(manifestPath).text();
+  } catch {
+    return { manifestPath, valid: false, hashValid: false, errors: ["manifest file not readable"] };
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(manifestRaw) as Record<string, unknown>;
+  } catch {
+    return { manifestPath, valid: false, hashValid: false, errors: ["manifest is not valid JSON"] };
+  }
+
+  const artifacts = Array.isArray(parsed.artifacts) ? parsed.artifacts as Array<Record<string, unknown>> : [];
+  let hashValid = true;
+  for (const artifact of artifacts) {
+    const path = typeof artifact.path === "string" ? artifact.path : "";
+    const expected = typeof artifact.sha256 === "string" ? artifact.sha256 : "";
+    if (!path || !expected) {
+      hashValid = false;
+      errors.push("artifact missing path or sha256");
+      continue;
+    }
+    let content = "";
+    try {
+      content = await Bun.file(path).text();
+    } catch {
+      hashValid = false;
+      errors.push(`artifact unreadable: ${path}`);
+      continue;
+    }
+    const actual = createHash("sha256").update(content).digest("hex");
+    if (actual !== expected) {
+      hashValid = false;
+      errors.push(`artifact hash mismatch: ${path}`);
+    }
+  }
+
+  const signatureObj = (typeof parsed.signature === "object" && parsed.signature !== null)
+    ? parsed.signature as Record<string, unknown>
+    : null;
+  let signatureValid: boolean | undefined;
+  if (signatureObj && typeof signatureObj.value === "string") {
+    if (!CONFIG.erp.snapshotSigningKey) {
+      signatureValid = false;
+      errors.push("signature present but A2A_ERP_SNAPSHOT_SIGNING_KEY is not configured");
+    } else {
+      const signatureValue = signatureObj.value;
+      const unsigned = { ...parsed };
+      delete unsigned.signature;
+      const canonical = JSON.stringify(unsigned);
+      const expectedSig = createHmac("sha256", CONFIG.erp.snapshotSigningKey).update(canonical).digest("hex");
+      signatureValid = signatureValue === expectedSig;
+      if (!signatureValid) {
+        errors.push("manifest signature mismatch");
+      }
+    }
+  }
+
+  const valid = hashValid && (signatureValid === undefined || signatureValid === true);
+  return { manifestPath, valid, hashValid, signatureValid, errors };
+}
+
+function findLatestManifestPath(outputDir: string): string | null {
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(outputDir);
+  } catch {
+    return null;
+  }
+  const manifests = entries
+    .filter(name => name.endsWith(".manifest.json"))
+    .map(name => join(outputDir, name));
+  if (manifests.length === 0) return null;
+  manifests.sort((a, b) => {
+    try {
+      return statSync(b).mtimeMs - statSync(a).mtimeMs;
+    } catch {
+      return 0;
+    }
+  });
+  return manifests[0] ?? null;
+}
+
+async function buildConnectorTrustReport(input: {
+  outputDir?: string;
+  since?: string;
+  limit?: number;
+  generateIfMissing?: boolean;
+} = {}): Promise<Record<string, unknown>> {
+  const outputDir = input.outputDir ?? CONFIG.erp.snapshotOutputDir;
+  const generateIfMissing = input.generateIfMissing !== false;
+  let manifestPath = findLatestManifestPath(outputDir);
+
+  if (!manifestPath && generateIfMissing) {
+    const snap = await writeConnectorRenewalSnapshot({
+      outputDir,
+      since: input.since,
+      limit: input.limit,
+    });
+    manifestPath = snap.manifestPath;
+  }
+
+  const currentKpis = getConnectorKpis({ since: input.since });
+
+  if (!manifestPath) {
+    return {
+      generatedAt: new Date().toISOString(),
+      outputDir,
+      snapshotFound: false,
+      verification: {
+        valid: false,
+        errors: ["No snapshot manifest found"],
+      },
+      currentKpis,
+      trustScore: 0,
+      procurementReady: false,
+      recommendations: [
+        "Generate a snapshot via /v1/connectors/renewals/snapshot before sharing trust evidence.",
+      ],
+    };
+  }
+
+  const verification = await verifyConnectorRenewalManifest(manifestPath);
+  let manifest: Record<string, unknown> = {};
+  try {
+    manifest = JSON.parse(await Bun.file(manifestPath).text()) as Record<string, unknown>;
+  } catch {}
+
+  const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts as Array<Record<string, unknown>> : [];
+  const jsonArtifactPath = artifacts.find(a => a.type === "json" && typeof a.path === "string")?.path as string | undefined;
+  let snapshotJson: Record<string, unknown> | null = null;
+  if (jsonArtifactPath) {
+    try {
+      snapshotJson = JSON.parse(await Bun.file(jsonArtifactPath).text()) as Record<string, unknown>;
+    } catch {
+      snapshotJson = null;
+    }
+  }
+
+  const currentConnectors = (currentKpis.connectors as Record<string, unknown> | undefined) ?? {};
+  const currentRenewals = (currentKpis.renewals as Record<string, unknown> | undefined) ?? {};
+  const snapshotKpis = (snapshotJson?.kpis as Record<string, unknown> | undefined) ?? {};
+  const prevConnectors = (snapshotKpis.connectors as Record<string, unknown> | undefined) ?? {};
+  const prevRenewals = (snapshotKpis.renewals as Record<string, unknown> | undefined) ?? {};
+
+  const toNum = (v: unknown): number | null => typeof v === "number" ? v : null;
+  const renewalDueDelta = (() => {
+    const curr = toNum(currentConnectors.renewalDue);
+    const prev = toNum(prevConnectors.renewalDue);
+    return curr !== null && prev !== null ? curr - prev : null;
+  })();
+  const failedRunsDelta = (() => {
+    const curr = toNum(currentRenewals.failedRuns);
+    const prev = toNum(prevRenewals.failedRuns);
+    return curr !== null && prev !== null ? curr - prev : null;
+  })();
+  const successRateDeltaPct = (() => {
+    const curr = toNum(currentRenewals.successRatePct);
+    const prev = toNum(prevRenewals.successRatePct);
+    return curr !== null && prev !== null ? Number((curr - prev).toFixed(1)) : null;
+  })();
+
+  const unhealthy = toNum(currentConnectors.unhealthy) ?? 0;
+  const degraded = toNum(currentConnectors.degraded) ?? 0;
+  const backlog = toNum(currentConnectors.renewalDue) ?? 0;
+  let trustScore = 100;
+  if (!verification.valid) trustScore -= 40;
+  if (unhealthy > 0) trustScore -= Math.min(30, unhealthy * 10);
+  if (degraded > 0) trustScore -= Math.min(20, degraded * 5);
+  if (backlog > 0) trustScore -= Math.min(20, backlog * 5);
+  trustScore = Math.max(0, trustScore);
+
+  const procurementReady = verification.valid && unhealthy === 0 && backlog === 0;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    outputDir,
+    snapshotFound: true,
+    latestManifestPath: manifestPath,
+    verification,
+    currentKpis,
+    snapshotKpis,
+    deltas: {
+      renewalDueDelta,
+      failedRunsDelta,
+      successRateDeltaPct,
+    },
+    trustScore,
+    procurementReady,
+  };
+}
+
+async function buildConnectorSalesPacket(input: {
+  outputDir?: string;
+  since?: string;
+  limit?: number;
+  generateIfMissing?: boolean;
+  products?: Array<"quote-to-order" | "lead-to-cash" | "collections">;
+  format?: "full" | "brief" | "email";
+} = {}): Promise<Record<string, unknown>> {
+  const trustReport = await buildConnectorTrustReport({
+    outputDir: input.outputDir,
+    since: input.since,
+    limit: input.limit,
+    generateIfMissing: input.generateIfMissing,
+  });
+
+  const selectedProducts = input.products && input.products.length > 0
+    ? input.products
+    : (["quote-to-order", "lead-to-cash", "collections"] as const);
+
+  const productKpis: Record<string, unknown> = {};
+  for (const product of selectedProducts) {
+    productKpis[product] = getProductKpis(product, { since: input.since });
+  }
+
+  const trust = trustReport as Record<string, unknown>;
+  const format = input.format ?? "full";
+  const latestManifestPath = typeof trust.latestManifestPath === "string" ? trust.latestManifestPath : undefined;
+  let artifacts: Array<Record<string, unknown>> = [];
+  if (latestManifestPath) {
+    try {
+      const manifest = JSON.parse(await Bun.file(latestManifestPath).text()) as Record<string, unknown>;
+      if (Array.isArray(manifest.artifacts)) {
+        artifacts = manifest.artifacts as Array<Record<string, unknown>>;
+      }
+    } catch {}
+  }
+
+  const fullPacket = {
+    generatedAt: new Date().toISOString(),
+    packetType: "connector-sales-packet",
+    format,
+    timeframe: { since: input.since ?? "all_time" },
+    products: selectedProducts,
+    summary: {
+      trustScore: trust.trustScore ?? null,
+      procurementReady: trust.procurementReady ?? false,
+      latestManifestPath: latestManifestPath ?? null,
+    },
+    trustReport,
+    connectorKpis: getConnectorKpis({ since: input.since }),
+    productKpis,
+    artifacts,
+  };
+
+  if (format === "brief") {
+    const trustScore = typeof fullPacket.summary.trustScore === "number" ? fullPacket.summary.trustScore : 0;
+    const procurementReady = fullPacket.summary.procurementReady === true;
+    const renewalSuccessRate = (() => {
+      const renewals = (fullPacket.connectorKpis as Record<string, unknown>).renewals as Record<string, unknown> | undefined;
+      return renewals && typeof renewals.successRatePct === "number" ? renewals.successRatePct : null;
+    })();
+    const unhealthy = (() => {
+      const connectors = (fullPacket.connectorKpis as Record<string, unknown>).connectors as Record<string, unknown> | undefined;
+      return connectors && typeof connectors.unhealthy === "number" ? connectors.unhealthy : 0;
+    })();
+    const renewalDue = (() => {
+      const connectors = (fullPacket.connectorKpis as Record<string, unknown>).connectors as Record<string, unknown> | undefined;
+      return connectors && typeof connectors.renewalDue === "number" ? connectors.renewalDue : 0;
+    })();
+
+    const executiveSummary = [
+      `Trust score is ${trustScore}/100 and procurement readiness is ${procurementReady ? "YES" : "NO"}.`,
+      `Renewal reliability is ${renewalSuccessRate ?? 0}% with ${renewalDue} due renewals currently queued.`,
+      `Operational health shows ${unhealthy} unhealthy connector(s), guiding risk posture for rollout decisions.`,
+    ];
+    const nextActions = [
+      renewalDue > 0 ? "Run renewal sweep now to clear due backlog before buyer review." : "Keep automated renewal sweep running to preserve zero-backlog posture.",
+      unhealthy > 0 ? "Investigate unhealthy connectors and attach remediation ETA to the proposal." : "Highlight healthy connector state as a proof point in outbound proposals.",
+      procurementReady ? "Share this packet as primary due-diligence evidence." : "Regenerate packet after remediation to reach procurement-ready status.",
+    ];
+
+    return {
+      generatedAt: fullPacket.generatedAt,
+      packetType: fullPacket.packetType,
+      format,
+      timeframe: fullPacket.timeframe,
+      summary: fullPacket.summary,
+      executiveSummary,
+      verification: (trust.verification as Record<string, unknown> | undefined) ?? {},
+      deltas: (trust.deltas as Record<string, unknown> | undefined) ?? {},
+      connectorHighlights: {
+        renewals: (fullPacket.connectorKpis as Record<string, unknown>).renewals ?? {},
+        alerting: (fullPacket.connectorKpis as Record<string, unknown>).alerting ?? {},
+      },
+      productHighlights: Object.fromEntries(
+        Object.entries(productKpis).map(([product, kpi]) => [
+          product,
+          {
+            workflowRuns: (kpi as Record<string, unknown>).workflowRuns ?? {},
+            revenueSignal: (kpi as Record<string, unknown>).revenueSignal ?? {},
+          },
+        ]),
+      ),
+      artifactPaths: artifacts.map((a) => ({
+        type: a.type,
+        path: a.path,
+      })),
+      nextActions,
+    };
+  }
+
+  if (format === "email") {
+    const trustScore = typeof fullPacket.summary.trustScore === "number" ? fullPacket.summary.trustScore : 0;
+    const procurementReady = fullPacket.summary.procurementReady === true;
+    const verification = (trust.verification as Record<string, unknown> | undefined) ?? {};
+    const verificationValid = verification.valid === true;
+    const connectorKpis = fullPacket.connectorKpis as Record<string, unknown>;
+    const renewals = (connectorKpis.renewals as Record<string, unknown> | undefined) ?? {};
+    const alerts = (connectorKpis.alerting as Record<string, unknown> | undefined) ?? {};
+    const renewalSuccessRate = typeof renewals.successRatePct === "number" ? renewals.successRatePct : 0;
+    const failedRuns = typeof renewals.failedRuns === "number" ? renewals.failedRuns : 0;
+    const unhealthy = typeof alerts.unhealthyConnectors === "number" ? alerts.unhealthyConnectors : 0;
+    const degraded = typeof alerts.degradedConnectors === "number" ? alerts.degradedConnectors : 0;
+    const latestManifestPath = typeof fullPacket.summary.latestManifestPath === "string"
+      ? fullPacket.summary.latestManifestPath
+      : "(not generated)";
+
+    const subject = procurementReady
+      ? `ERP Reliability Packet: Procurement-Ready (${trustScore}/100)`
+      : `ERP Reliability Update: Trust Score ${trustScore}/100`;
+
+    const body = [
+      `## Executive Update`,
+      ``,
+      `Current trust score is **${trustScore}/100** and procurement readiness is **${procurementReady ? "YES" : "NO"}**.`,
+      `Manifest verification is **${verificationValid ? "VALID" : "NOT VALID"}** and renewal success rate is **${renewalSuccessRate}%**.`,
+      ``,
+      `## Operational Signals`,
+      ``,
+      `- Failed renewal runs: **${failedRuns}**`,
+      `- Unhealthy connectors: **${unhealthy}**`,
+      `- Degraded connectors: **${degraded}**`,
+      ``,
+      `## Evidence Artifacts`,
+      ``,
+      `- Latest manifest: \`${latestManifestPath}\``,
+      ...artifacts.map((a) => `- ${String(a.type)}: \`${String(a.path ?? "")}\``),
+      ``,
+      `## Recommended Next Step`,
+      ``,
+      procurementReady
+        ? `Proceed with buyer due diligence using this packet as primary operational evidence.`
+        : `Run remediation on unhealthy/degraded connectors, regenerate packet, and then reshare with buyer.`,
+    ].join("\n");
+
+    return {
+      generatedAt: fullPacket.generatedAt,
+      packetType: fullPacket.packetType,
+      format,
+      subject,
+      body,
+      summary: fullPacket.summary,
+      verification,
+      artifactPaths: artifacts.map((a) => ({
+        type: a.type,
+        path: a.path,
+      })),
+    };
+  }
+
+  return fullPacket;
+}
+
+async function buildPilotReadiness(input: {
+  outputDir?: string;
+  since?: string;
+  limit?: number;
+  generateIfMissing?: boolean;
+  requiredTrustScore?: number;
+  requireProcurementReady?: boolean;
+} = {}): Promise<Record<string, unknown>> {
+  const requiredTrustScore = input.requiredTrustScore ?? 80;
+  const requireProcurementReady = input.requireProcurementReady !== false;
+
+  const trustReport = await buildConnectorTrustReport({
+    outputDir: input.outputDir,
+    since: input.since,
+    limit: input.limit,
+    generateIfMissing: input.generateIfMissing,
+  });
+  const connectorStatuses = listConnectorStatuses();
+  const connectorKpis = getConnectorKpis({ since: input.since });
+  const trust = trustReport as Record<string, unknown>;
+
+  const trustScore = typeof trust.trustScore === "number" ? trust.trustScore : 0;
+  const procurementReady = trust.procurementReady === true;
+  const verification = (trust.verification as Record<string, unknown> | undefined) ?? {};
+  const manifestValid = verification.valid === true;
+  const enabledConnectors = connectorStatuses.filter(c => c.enabled);
+  const healthyEnabled = enabledConnectors.filter(c => c.health === "healthy");
+  const connectorsSummary = (connectorKpis.connectors as Record<string, unknown> | undefined) ?? {};
+  const renewalDue = typeof connectorsSummary.renewalDue === "number" ? connectorsSummary.renewalDue : 0;
+  const unhealthy = typeof connectorsSummary.unhealthy === "number" ? connectorsSummary.unhealthy : 0;
+
+  const checks = {
+    hasConnectedConnector: enabledConnectors.length > 0,
+    hasHealthyConnector: healthyEnabled.length > 0,
+    zeroRenewalBacklog: renewalDue === 0,
+    manifestValid,
+    trustScoreThresholdMet: trustScore >= requiredTrustScore,
+    procurementReady: requireProcurementReady ? procurementReady : true,
+    noUnhealthyConnectors: unhealthy === 0,
+  };
+  const ready = Object.values(checks).every(Boolean);
+
+  const blockers: string[] = [];
+  if (!checks.hasConnectedConnector) blockers.push("No connected ERP connector is enabled.");
+  if (!checks.hasHealthyConnector) blockers.push("No enabled connector is currently healthy.");
+  if (!checks.zeroRenewalBacklog) blockers.push(`Renewal backlog is ${renewalDue}; must be 0 for pilot launch.`);
+  if (!checks.manifestValid) blockers.push("Latest snapshot manifest is not valid.");
+  if (!checks.trustScoreThresholdMet) blockers.push(`Trust score ${trustScore} is below required threshold ${requiredTrustScore}.`);
+  if (!checks.procurementReady) blockers.push("Procurement readiness flag is false.");
+  if (!checks.noUnhealthyConnectors) blockers.push(`Unhealthy connectors detected: ${unhealthy}.`);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    ready,
+    requiredTrustScore,
+    requireProcurementReady,
+    checks,
+    blockers,
+    trustReport,
+    connectorKpis,
+    connectors: connectorStatuses,
+  };
+}
+
+async function launchPilot(input: {
+  outputDir?: string;
+  since?: string;
+  limit?: number;
+  generateIfMissing?: boolean;
+  requiredTrustScore?: number;
+  requireProcurementReady?: boolean;
+  dryRun?: boolean;
+} = {}): Promise<Record<string, unknown>> {
+  const readiness = await buildPilotReadiness({
+    outputDir: input.outputDir,
+    since: input.since,
+    limit: input.limit,
+    generateIfMissing: input.generateIfMissing,
+    requiredTrustScore: input.requiredTrustScore,
+    requireProcurementReady: input.requireProcurementReady,
+  });
+
+  const ready = (readiness.ready === true);
+  if (!ready) {
+    const launchRunId = createPilotLaunchRun({
+      status: "blocked",
+      readiness,
+      error: "Pilot readiness checks did not pass",
+    });
+    return {
+      launched: false,
+      status: "blocked",
+      launchRunId,
+      reason: "Pilot readiness checks did not pass",
+      readiness,
+      blockers: Array.isArray(readiness.blockers) ? readiness.blockers : [],
+    };
+  }
+
+  if (input.dryRun === true) {
+    const launchRunId = createPilotLaunchRun({
+      status: "dry_run",
+      readiness,
+      delivery: { mode: "dry_run" },
+    });
+    return {
+      launched: false,
+      status: "dry_run",
+      launchRunId,
+      dryRun: true,
+      readiness,
+      message: "Pilot is launch-ready. Dry-run mode skipped packet generation.",
+    };
+  }
+
+  const launchRunId = createPilotLaunchRun({
+    status: "ready",
+    readiness,
+  });
+
+  try {
+    const packet = await buildConnectorSalesPacket({
+      outputDir: input.outputDir,
+      since: input.since,
+      limit: input.limit,
+      generateIfMissing: input.generateIfMissing,
+      format: "email",
+    });
+
+    updatePilotLaunchRun(launchRunId, {
+      status: "launched",
+      salesPacket: packet,
+      delivery: { channel: "email", delivered: true },
+      error: undefined,
+    });
+
+    return {
+      launched: true,
+      status: "launched",
+      launchRunId,
+      launchedAt: new Date().toISOString(),
+      readiness,
+      salesPacket: packet,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    updatePilotLaunchRun(launchRunId, {
+      status: "delivery_failed",
+      delivery: { channel: "email", delivered: false },
+      error: message,
+    });
+    return {
+      launched: false,
+      status: "delivery_failed",
+      launchRunId,
+      readiness,
+      error: message,
+    };
+  }
+}
+
+function startConnectorRenewalSnapshotScheduler(): () => void {
+  if (!CONFIG.erp.snapshotExportEnabled) {
+    process.stderr.write("[erp-snapshot] scheduler disabled by config\n");
+    return () => {};
+  }
+  const intervalMs = Math.max(60_000, CONFIG.erp.snapshotExportIntervalMs);
+  const jitterMs = Math.max(0, CONFIG.erp.renewalSweepJitterMs);
+  process.stderr.write(`[erp-snapshot] scheduler enabled (interval=${intervalMs}ms, jitter<=${jitterMs}ms, dir=${CONFIG.erp.snapshotOutputDir})\n`);
+
+  let stopped = false;
+  let inFlight = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const run = async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const out = await writeConnectorRenewalSnapshot();
+      process.stderr.write(`[erp-snapshot] exported renewal snapshot rows=${out.rowCount} failed=${out.failedCount} csv=${out.csvPath} manifest=${out.manifestPath}\n`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[erp-snapshot] snapshot export failed: ${msg}\n`);
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const scheduleNext = () => {
+    if (stopped) return;
+    const delay = intervalMs + randomJitterMs(jitterMs);
+    timer = setTimeout(async () => {
+      await run();
+      scheduleNext();
+    }, delay);
+    timer.unref?.();
+  };
+  scheduleNext();
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+}
+
 // ── A2A HTTP Server ─────────────────────────────────────────────
 async function startHttpServer() {
   const app = Fastify({ logger: false, connectionTimeout: 300_000 });
@@ -2335,17 +4688,19 @@ async function startHttpServer() {
     };
   });
 
-  // Health check for orchestrator itself
-  app.get("/healthz", async () => {
+  // Detailed orchestrator health snapshot
+  app.get("/healthz/details", async () => {
     const workerStatus: Record<string, boolean> = {};
     for (const w of WORKERS) {
       workerStatus[w.name] = workerHealth.get(w.name)?.healthy ?? false;
     }
+    const connectorKpis = getConnectorKpis();
     return {
       status: "ok",
       uptime: process.uptime(),
       workers: workerStatus,
       tasks: { total: listTasks().length, active: listTasks("working").length },
+      connectors: connectorKpis,
     };
   });
 
@@ -2584,8 +4939,2619 @@ async function startHttpServer() {
     }
   });
 
+  // ── Wizard APIs (session cookie auth) ────────────────────────
+  const wizardAuth = (
+    request: { headers: Record<string, string | string[] | undefined> },
+    reply: { code: (n: number) => void },
+    write = false,
+  ): WizardWebSession | null => {
+    const session = getWizardWebSession(request);
+    if (!session) {
+      reply.code(401);
+      return null;
+    }
+    if (write && session.role === "viewer") {
+      reply.code(403);
+      return null;
+    }
+    return session;
+  };
+
+  app.post<{ Body: { apiKey?: string } }>("/v1/wizard/auth/login", async (request, reply) => {
+    try {
+      const body = z.object({ apiKey: z.string().min(1) }).strict().parse(request.body ?? {});
+      const entry = validateApiKey(body.apiKey);
+      if (!entry) {
+        reply.code(401);
+        return { error: "Invalid or expired API key." };
+      }
+      const session = startWizardWebSession(entry);
+      setWizardSessionCookie(reply, session.token, ((request as any).protocol ?? "").toLowerCase() === "https");
+      return {
+        status: "ok",
+        user: {
+          name: session.name,
+          role: session.role,
+          keyPrefix: session.keyPrefix,
+          workspace: session.workspace ?? null,
+        },
+        readOnly: session.role === "viewer",
+        expiresAt: new Date(session.expiresAt).toISOString(),
+      };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post("/v1/wizard/auth/logout", async (request, reply) => {
+    const session = getWizardWebSession(request as any);
+    if (session) wizardWebSessions.delete(session.token);
+    clearWizardSessionCookie(reply, ((request as any).protocol ?? "").toLowerCase() === "https");
+    return { status: "ok" };
+  });
+
+  app.get("/v1/wizard/bootstrap", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, false);
+    if (!session) return { error: "Unauthorized" };
+    const accessibleWorkspaces = listWizardAccessibleWorkspaces(session);
+    const workspaceIds = new Set(accessibleWorkspaces.map((workspace) => workspace.id));
+    const sessionsRaw = listWizardSessionStates({ limit: 50 }).items;
+    const sessions = sessionsRaw.filter((item) => {
+      const record = (item && typeof item === "object" && !Array.isArray(item)) ? item as Record<string, unknown> : {};
+      const workspaceId = typeof record.workspaceId === "string" ? record.workspaceId : "";
+      if (session.role === "admin" && !session.workspace) return true;
+      if (session.workspace) return workspaceId === session.workspace;
+      return workspaceIds.has(workspaceId);
+    });
+    return {
+      user: {
+        name: session.name,
+        role: session.role,
+        keyPrefix: session.keyPrefix,
+        workspace: session.workspace ?? null,
+      },
+      readOnly: session.role === "viewer",
+      workspaces: accessibleWorkspaces,
+      sessions,
+      defaults: {
+        product: "quote-to-order",
+        requiredConnectors: ["odoo", "business-central", "dynamics"],
+        launchPolicy: "warn_and_continue_with_override",
+      },
+    };
+  });
+
+  app.post<{ Body: { customerName?: string; workspaceId?: string; workspaceName?: string; product?: string } }>("/v1/wizard/sessions", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const body = z.object({
+        customerName: z.string().min(1),
+        workspaceId: z.string().min(1).optional(),
+        workspaceName: z.string().min(1).optional(),
+        product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+      }).strict().parse(request.body ?? {});
+
+      let workspaceId = body.workspaceId;
+      if (!workspaceId) {
+        if (session.workspace) {
+          workspaceId = session.workspace;
+        } else {
+          if (!body.workspaceName) throw new Error("Provide workspaceId or workspaceName.");
+          const workspace = createWorkspace(body.workspaceName, session.keyPrefix, session.name);
+          workspaceId = workspace.id;
+        }
+      }
+      requireWizardWorkspaceAccess(session, workspaceId, true);
+      return createWizardSessionState({
+        workspaceId,
+        customerName: body.customerName,
+        product: body.product ?? "quote-to-order",
+        createdBy: session.name,
+        workspaceIsolationOk: true,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/v1/wizard/sessions/:id", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, false);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const payload = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(payload), false);
+      return payload;
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; type: string }; Body: Record<string, unknown> }>("/v1/wizard/sessions/:id/connectors/:type/connect", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      const connectorType = validateConnectorType(request.params.type);
+      const connector = connectConnector(connectorType, request.body ?? {});
+      const updatedSession = recordWizardConnectorConnection(request.params.id, connectorType, connector);
+      return { status: "connected", connector, session: updatedSession };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; type: string }; Body: Record<string, unknown> }>("/v1/wizard/sessions/:id/connectors/:type/test", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      const connectorType = validateConnectorType(request.params.type);
+      return await runWizardConnectorTest(request.params.id, connectorType, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/wizard/sessions/:id/master-data/auto-sync", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      return runWizardMasterDataAutoSync(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/wizard/sessions/:id/q2o/dry-run", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      return runWizardQuoteToOrderDryRun(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; gateId: string }; Body: { reason?: string; approvedBy?: string } }>("/v1/wizard/sessions/:id/gates/:gateId/override", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      return overrideWizardGate(request.params.id, request.params.gateId, {
+        reason: request.body?.reason,
+        approvedBy: request.body?.approvedBy ?? session.name,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { mode?: "sandbox" | "production" } }>("/v1/wizard/sessions/:id/launch", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      return launchWizardSession(request.params.id, { mode: request.body?.mode });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/v1/wizard/sessions/:id/report", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, false);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), false);
+      return getWizardSessionReport(request.params.id);
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; provider: string }; Body: Record<string, unknown> }>(
+    "/v1/wizard/sessions/:id/mailboxes/:provider/oauth/start",
+    async (request, reply) => {
+      const session = wizardAuth(request as any, reply as any, true);
+      if (!session) return { error: "Unauthorized" };
+      try {
+        const wizardState = getWizardSessionState(request.params.id);
+        const workspaceId = wizardSessionWorkspaceId(wizardState);
+        requireWizardWorkspaceAccess(session, workspaceId, true);
+        const provider = z.enum(["gmail", "outlook"]).parse(request.params.provider) as WizardMailboxOAuthProvider;
+        const body = z.object({
+          clientId: z.string().min(1),
+          clientSecret: z.string().optional(),
+          userId: z.string().min(1).optional().default("me"),
+          tenantId: z.string().optional(),
+          scopes: z.array(z.string().min(1)).optional(),
+          loginHint: z.string().optional(),
+        }).strict().parse(request.body ?? {});
+        const preset = wizardMailboxOAuthPreset(provider, body.tenantId);
+        const scopes = (body.scopes && body.scopes.length > 0) ? body.scopes : preset.scopes;
+        const state = randomBytes(24).toString("hex");
+        const pkce = createPkcePair();
+        const createdAt = Date.now();
+        const expiresAt = createdAt + WIZARD_MAILBOX_OAUTH_TTL_MS;
+        const redirectUri = `${wizardOAuthBaseUrl(request as any)}/v1/wizard/mailboxes/oauth/callback`;
+        const params = new URLSearchParams({
+          response_type: "code",
+          client_id: body.clientId,
+          redirect_uri: redirectUri,
+          scope: scopes.join(" "),
+          state,
+          code_challenge: pkce.challenge,
+          code_challenge_method: "S256",
+          ...preset.authorizeParams,
+        });
+        if (body.loginHint) params.set("login_hint", body.loginHint);
+        const authUrl = `${preset.authEndpoint}?${params.toString()}`;
+        wizardMailboxOauthTransactions.set(state, {
+          state,
+          provider,
+          workspaceId,
+          userId: body.userId,
+          tenantId: body.tenantId,
+          clientId: body.clientId,
+          clientSecret: body.clientSecret,
+          tokenEndpoint: preset.tokenEndpoint,
+          scopes,
+          codeVerifier: pkce.verifier,
+          initiatedBy: session.name,
+          createdAt,
+          expiresAt,
+        });
+        return {
+          status: "pending",
+          provider,
+          workspaceId,
+          userId: body.userId,
+          authUrl,
+          expiresAt: new Date(expiresAt).toISOString(),
+        };
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.get<{ Querystring: { state?: string; code?: string; error?: string; error_description?: string } }>(
+    "/v1/wizard/mailboxes/oauth/callback",
+    async (request, reply) => {
+      const query = request.query ?? {};
+      const providerFromState = (() => {
+        if (!query.state) return "unknown";
+        const tx = wizardMailboxOauthTransactions.get(query.state);
+        return tx?.provider ?? "unknown";
+      })();
+      const errorPayloadBase = {
+        status: "error",
+        provider: providerFromState,
+      };
+
+      if (query.error) {
+        reply.type("text/html");
+        reply.code(400);
+        return renderWizardMailboxOAuthPage({
+          ok: false,
+          title: "OAuth failed",
+          message: `${query.error}${query.error_description ? `: ${query.error_description}` : ""}`,
+          payload: {
+            ...errorPayloadBase,
+            reason: query.error,
+          },
+        });
+      }
+      if (!query.state || !query.code) {
+        reply.type("text/html");
+        reply.code(400);
+        return renderWizardMailboxOAuthPage({
+          ok: false,
+          title: "OAuth callback invalid",
+          message: "Missing code or state.",
+          payload: {
+            ...errorPayloadBase,
+            reason: "missing_code_or_state",
+          },
+        });
+      }
+
+      pruneWizardMailboxOauthTransactions();
+      const tx = wizardMailboxOauthTransactions.get(query.state);
+      if (!tx || tx.expiresAt <= Date.now()) {
+        if (tx) wizardMailboxOauthTransactions.delete(query.state);
+        reply.type("text/html");
+        reply.code(400);
+        return renderWizardMailboxOAuthPage({
+          ok: false,
+          title: "OAuth session expired",
+          message: "The OAuth state is missing or expired. Start the flow again from the wizard.",
+          payload: {
+            ...errorPayloadBase,
+            reason: "state_expired",
+          },
+        });
+      }
+
+      wizardMailboxOauthTransactions.delete(query.state);
+      try {
+        const redirectUri = `${wizardOAuthBaseUrl(request as any)}/v1/wizard/mailboxes/oauth/callback`;
+        const tokens = await exchangeWizardMailboxOAuthCode({
+          tokenEndpoint: tx.tokenEndpoint,
+          code: query.code,
+          clientId: tx.clientId,
+          clientSecret: tx.clientSecret,
+          redirectUri,
+          codeVerifier: tx.codeVerifier,
+        });
+        upsertQuoteMailboxConnection(tx.workspaceId, {
+          provider: tx.provider,
+          userId: tx.userId,
+          tenantId: tx.tenantId,
+          clientId: tx.clientId,
+          clientSecret: tx.clientSecret,
+          refreshToken: tokens.refreshToken,
+          accessToken: tokens.accessToken,
+          accessTokenExpiresAt: tokens.expiresAt,
+          tokenEndpoint: tx.tokenEndpoint,
+          scopes: tx.scopes,
+          metadata: {
+            source: "wizard-oauth",
+            connectedBy: tx.initiatedBy,
+            connectedAt: new Date().toISOString(),
+            grantedScope: tokens.grantedScope,
+          },
+          enabled: true,
+        });
+        reply.type("text/html");
+        return renderWizardMailboxOAuthPage({
+          ok: true,
+          title: "Mailbox connected",
+          message: `${tx.provider} mailbox for workspace '${tx.workspaceId}' has been connected.`,
+          payload: {
+            status: "ok",
+            provider: tx.provider,
+            workspaceId: tx.workspaceId,
+            userId: tx.userId,
+          },
+        });
+      } catch (err) {
+        reply.type("text/html");
+        reply.code(400);
+        return renderWizardMailboxOAuthPage({
+          ok: false,
+          title: "OAuth exchange failed",
+          message: err instanceof Error ? err.message : String(err),
+          payload: {
+            status: "error",
+            provider: tx.provider,
+            workspaceId: tx.workspaceId,
+            userId: tx.userId,
+            reason: "token_exchange_failed",
+          },
+        });
+      }
+    },
+  );
+
+  // ── ERP Expansion APIs ───────────────────────────────────────
+  app.post<{ Params: { type: string }; Body: unknown }>("/v1/connectors/:type/connect", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const status = connectConnector(request.params.type, request.body);
+      return { status: "connected", connector: status };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { type: string }; Body: unknown }>("/v1/connectors/:type/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const result = await syncConnector(request.params.type, request.body);
+      return result;
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { type: string } }>("/v1/connectors/:type/status", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getConnectorStatus(request.params.type);
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get("/v1/connectors/status", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    return listConnectorStatuses();
+  });
+
+  app.post<{ Body: { webhookExpiresAt?: string; notificationUrl?: string; resource?: string } }>("/v1/connectors/business-central/renew", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await renewBusinessCentralSubscription({
+        webhookExpiresAt: request.body?.webhookExpiresAt,
+        notificationUrl: request.body?.notificationUrl,
+        resource: request.body?.resource,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { dryRun?: boolean } }>("/v1/connectors/renew-due", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await renewDueConnectors({ dryRun: request.body?.dryRun === true });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { since?: string } }>("/v1/connectors/kpis", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getConnectorKpis({ since: request.query?.since });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { connector?: string; status?: string; since?: string; before?: string; limit?: string } }>("/v1/connectors/renewals", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listConnectorRenewals({
+        connector: request.query?.connector,
+        status: request.query?.status,
+        since: request.query?.since,
+        before: request.query?.before,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { connector?: string; status?: string; since?: string; before?: string; limit?: string } }>("/v1/connectors/renewals/export.csv", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      const csv = exportConnectorRenewalsCsv({
+        connector: request.query?.connector,
+        status: request.query?.status,
+        since: request.query?.since,
+        before: request.query?.before,
+        limit,
+      });
+      reply.header("Content-Type", "text/csv; charset=utf-8");
+      reply.header("Content-Disposition", "attachment; filename=\"connector-renewals.csv\"");
+      return csv;
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { since?: string; limit?: number; outputDir?: string } }>("/v1/connectors/renewals/snapshot", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await writeConnectorRenewalSnapshot({
+        since: request.body?.since,
+        limit: request.body?.limit,
+        outputDir: request.body?.outputDir,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { manifestPath: string } }>("/v1/connectors/renewals/verify", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await verifyConnectorRenewalManifest(request.body?.manifestPath);
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { outputDir?: string; since?: string; limit?: string; generateIfMissing?: string } }>("/v1/connectors/trust-report", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      const genRaw = request.query?.generateIfMissing;
+      const generateIfMissing = genRaw === undefined ? undefined : genRaw !== "false";
+      return await buildConnectorTrustReport({
+        outputDir: request.query?.outputDir,
+        since: request.query?.since,
+        limit,
+        generateIfMissing,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { outputDir?: string; since?: string; limit?: string; generateIfMissing?: string; products?: string; format?: string } }>("/v1/connectors/sales-packet", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      const genRaw = request.query?.generateIfMissing;
+      const generateIfMissing = genRaw === undefined ? undefined : genRaw !== "false";
+      const formatRaw = request.query?.format;
+      const format = formatRaw === undefined
+        ? undefined
+        : (formatRaw === "full" || formatRaw === "brief" || formatRaw === "email" ? formatRaw : null);
+      if (format === null) {
+        throw new Error("Invalid format. Use 'full', 'brief', or 'email'.");
+      }
+      const products = typeof request.query?.products === "string" && request.query.products.length > 0
+        ? request.query.products.split(",").map(s => s.trim()).filter(Boolean) as Array<"quote-to-order" | "lead-to-cash" | "collections">
+        : undefined;
+      return await buildConnectorSalesPacket({
+        outputDir: request.query?.outputDir,
+        since: request.query?.since,
+        limit,
+        generateIfMissing,
+        products,
+        format: format as "full" | "brief" | "email" | undefined,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { outputDir?: string; since?: string; limit?: string; generateIfMissing?: string; requiredTrustScore?: string; requireProcurementReady?: string } }>("/v1/connectors/pilot-readiness", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      const genRaw = request.query?.generateIfMissing;
+      const generateIfMissing = genRaw === undefined ? undefined : genRaw !== "false";
+      const requiredTrustScoreRaw = request.query?.requiredTrustScore;
+      const requiredTrustScore = typeof requiredTrustScoreRaw === "string" && requiredTrustScoreRaw.length > 0
+        ? Number(requiredTrustScoreRaw)
+        : undefined;
+      const reqProcRaw = request.query?.requireProcurementReady;
+      const requireProcurementReady = reqProcRaw === undefined ? undefined : reqProcRaw !== "false";
+      return await buildPilotReadiness({
+        outputDir: request.query?.outputDir,
+        since: request.query?.since,
+        limit,
+        generateIfMissing,
+        requiredTrustScore,
+        requireProcurementReady,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { outputDir?: string; since?: string; limit?: number; generateIfMissing?: boolean; requiredTrustScore?: number; requireProcurementReady?: boolean; dryRun?: boolean } }>("/v1/connectors/launch-pilot", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await launchPilot({
+        outputDir: request.body?.outputDir,
+        since: request.body?.since,
+        limit: request.body?.limit,
+        generateIfMissing: request.body?.generateIfMissing,
+        requiredTrustScore: request.body?.requiredTrustScore,
+        requireProcurementReady: request.body?.requireProcurementReady,
+        dryRun: request.body?.dryRun,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { status?: string; since?: string; limit?: string } }>("/v1/connectors/pilot-launches", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listPilotLaunchRuns({
+        status: request.query?.status,
+        since: request.query?.since,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { customerName: string; product: string; connector?: string; metadata?: Record<string, unknown> } }>("/v1/onboarding/sessions", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return createOnboardingSession({
+        customerName: request.body?.customerName,
+        product: request.body?.product,
+        connector: request.body?.connector,
+        metadata: request.body?.metadata,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { status?: string; limit?: string } }>("/v1/onboarding/sessions", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listOnboardingSessions({
+        status: request.query?.status,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { phase?: string; since?: string } }>("/v1/onboarding/sessions/:id/capture", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return captureOnboardingSnapshot({
+        onboardingId: request.params.id,
+        phase: request.body?.phase,
+        since: request.body?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { autoCaptureCurrent?: string } }>("/v1/onboarding/sessions/:id/report", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const autoCaptureCurrent = request.query?.autoCaptureCurrent === undefined
+        ? undefined
+        : request.query.autoCaptureCurrent !== "false";
+      return buildOnboardingReport({
+        onboardingId: request.params.id,
+        autoCaptureCurrent,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { product: string; stage: string; customerName: string; onboardingId?: string; valueEur?: number; notes?: string; occurredAt?: string } }>("/v1/commercial/events", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return recordCommercialEvent({
+        product: request.body?.product,
+        stage: request.body?.stage,
+        customerName: request.body?.customerName,
+        onboardingId: request.body?.onboardingId,
+        valueEur: request.body?.valueEur,
+        notes: request.body?.notes,
+        occurredAt: request.body?.occurredAt,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/commercial/kpis", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getCommercialKpis({
+        product: request.query?.product,
+        since: request.query?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/workflows/sla/status", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getWorkflowSlaStatus({
+        product: request.query?.product,
+        since: request.query?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: { product?: string; since?: string; minIntervalMinutes?: number } }>("/v1/workflows/sla/escalate", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return escalateWorkflowSlaBreaches({
+        product: request.body?.product,
+        since: request.body?.since,
+        minIntervalMinutes: request.body?.minIntervalMinutes,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { product?: string; status?: string; limit?: string } }>("/v1/workflows/sla/incidents", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listWorkflowSlaIncidents({
+        product: request.query?.product,
+        status: request.query?.status,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.patch<{ Params: { id: string }; Body: { status: string } }>("/v1/workflows/sla/incidents/:id", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return updateWorkflowSlaIncidentStatus(request.params.id, request.body?.status);
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/quotes/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return syncQuoteToOrderQuote(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/orders/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return syncQuoteToOrderOrder(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; approvalId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/approvals/:approvalId/decision", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return decideQuoteToOrderApproval(request.params.id, request.params.approvalId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { since?: string } }>("/v1/quote-to-order/workspaces/:id/pipeline", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getQuoteToOrderPipeline(request.params.id, { since: request.query?.since });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/revenue-graph/workspaces/:id/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return syncRevenueGraphWorkspace(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string; entityType: string; entityId: string }; Querystring: { includeNeighbors?: string; neighborLimit?: string } }>(
+    "/v1/revenue-graph/workspaces/:id/entities/:entityType/:entityId",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const includeNeighbors = request.query?.includeNeighbors === undefined
+          ? undefined
+          : request.query.includeNeighbors === "true";
+        const neighborLimitRaw = request.query?.neighborLimit;
+        const neighborLimit = typeof neighborLimitRaw === "string" && neighborLimitRaw.length > 0
+          ? Number(neighborLimitRaw)
+          : undefined;
+        return getRevenueGraphEntity(
+          request.params.id,
+          request.params.entityType,
+          request.params.entityId,
+          { includeNeighbors, neighborLimit },
+        );
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string; quoteId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/communications/:quoteId/ingest", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return ingestQuoteCommunication(request.params.id, request.params.quoteId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/communications/import", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return importQuoteMailboxCommunications(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/mailboxes/connect", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return upsertQuoteMailboxConnection(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { provider?: string; userId?: string } }>("/v1/quote-to-order/workspaces/:id/mailboxes", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return listQuoteMailboxConnections(request.params.id, {
+        provider: request.query?.provider,
+        userId: request.query?.userId,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; provider: string }; Body: Record<string, unknown>; Querystring: { userId?: string; force?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/mailboxes/:provider/refresh",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const body = {
+          ...(request.body ?? {}),
+          userId: (request.body?.userId as string | undefined) ?? request.query?.userId,
+          force: (request.body?.force as boolean | undefined) ?? (request.query?.force === "true"),
+        };
+        return await refreshQuoteMailboxConnection(request.params.id, request.params.provider, body);
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string; provider: string }; Querystring: { userId?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/mailboxes/:provider",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        return disableQuoteMailboxConnection(request.params.id, request.params.provider, {
+          userId: request.query?.userId,
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/communications/pull", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await pullQuoteMailboxCommunications(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/communications/threads/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await syncQuoteCommunicationThreads(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string; threadId: string }; Querystring: { since?: string; includeEvents?: string; eventLimit?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/communications/threads/:threadId/signals",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const includeEvents = request.query?.includeEvents === undefined
+          ? undefined
+          : request.query.includeEvents === "true";
+        const eventLimitRaw = request.query?.eventLimit;
+        const eventLimit = typeof eventLimitRaw === "string" && eventLimitRaw.length > 0 ? Number(eventLimitRaw) : undefined;
+        return getQuoteCommunicationThreadSignals(request.params.id, request.params.threadId, {
+          since: request.query?.since,
+          includeEvents,
+          eventLimit,
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/followups/run", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return runQuoteFollowupEngine(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { status?: string; actionType?: string; limit?: string } }>("/v1/quote-to-order/workspaces/:id/followups", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listQuoteFollowupActions(request.params.id, {
+        status: request.query?.status,
+        actionType: request.query?.actionType,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.patch<{ Params: { id: string; actionId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/followups/:actionId", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return updateQuoteFollowupAction(request.params.id, request.params.actionId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; actionId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/followups/:actionId/writeback", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await writebackQuoteFollowupAction(request.params.id, request.params.actionId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/followups/writeback", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await writebackQuoteFollowupBatch(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: Record<string, unknown> }>("/v1/quote-to-order/followups/writeback/scheduled-run", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await runScheduledFollowupWritebacks(request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { since?: string; stagnationHours?: string } }>("/v1/quote-to-order/workspaces/:id/communications/kpis", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const stagnationHoursRaw = request.query?.stagnationHours;
+      const stagnationHours = typeof stagnationHoursRaw === "string" && stagnationHoursRaw.length > 0
+        ? Number(stagnationHoursRaw)
+        : undefined;
+      return getQuoteCommunicationAnalytics(request.params.id, {
+        since: request.query?.since,
+        stagnationHours,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { since?: string; quoteExternalId?: string; limit?: string; minConfidence?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/communications/personality",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const limitRaw = request.query?.limit;
+        const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+        const minConfidenceRaw = request.query?.minConfidence;
+        const minConfidence = typeof minConfidenceRaw === "string" && minConfidenceRaw.length > 0
+          ? Number(minConfidenceRaw)
+          : undefined;
+        return getQuotePersonalityInsights(request.params.id, {
+          since: request.query?.since,
+          quoteExternalId: request.query?.quoteExternalId,
+          limit,
+          minConfidence,
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.get<{ Params: { id: string; contactKey: string }; Querystring: { includeRecentEvents?: string; eventLimit?: string; since?: string; autoRecompute?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/communications/personality/profile/:contactKey",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const eventLimitRaw = request.query?.eventLimit;
+        const eventLimit = typeof eventLimitRaw === "string" && eventLimitRaw.length > 0 ? Number(eventLimitRaw) : undefined;
+        const includeRecentEvents = request.query?.includeRecentEvents === undefined
+          ? undefined
+          : request.query.includeRecentEvents === "true";
+        const autoRecompute = request.query?.autoRecompute === undefined
+          ? undefined
+          : request.query.autoRecompute === "true";
+        return getQuotePersonalityProfile(request.params.id, decodeURIComponent(request.params.contactKey), {
+          includeRecentEvents,
+          eventLimit,
+          since: request.query?.since,
+          autoRecompute,
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    "/v1/quote-to-order/workspaces/:id/communications/personality/feedback",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        return recordQuotePersonalityFeedback(request.params.id, request.body ?? {});
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/recommendations/next-action", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return createQuoteNextActionRecommendation(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; proposalId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/autopilot/proposals/:proposalId/approve", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await approveQuoteAutopilotProposal(request.params.id, request.params.proposalId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; proposalId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/autopilot/proposals/:proposalId/reject", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return rejectQuoteAutopilotProposal(request.params.id, request.params.proposalId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/deal-rescue/run", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return runQuoteDealRescue(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { entity: string }; Body: Record<string, unknown> }>("/v1/erp/master-data/:entity/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const workspaceId = typeof request.body?.workspaceId === "string" ? request.body.workspaceId : "default";
+      const entity = validateMasterDataEntity(request.params.entity);
+      return syncMasterDataEntity(workspaceId, entity, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { workspaceId?: string; connectorType?: string; entity?: string; limit?: string } }>("/v1/erp/master-data/mappings", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const workspaceId = request.query?.workspaceId ?? "default";
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listMasterDataMappings({
+        workspaceId,
+        connectorType: request.query?.connectorType,
+        entity: request.query?.entity,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/erp/master-data/mappings/:id", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return updateMasterDataMapping(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { workspaceId?: string; since?: string } }>("/v1/analytics/executive", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getExecutiveAnalytics({
+        workspaceId: request.query?.workspaceId,
+        since: request.query?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { since?: string } }>("/v1/analytics/ops", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getOpsAnalytics({ since: request.query?.since });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { workspaceId?: string; since?: string } }>("/v1/analytics/revenue-intelligence", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getRevenueIntelligenceAnalytics({
+        workspaceId: request.query?.workspaceId,
+        since: request.query?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { workspaceId?: string; since?: string; minSamples?: string } }>("/v1/analytics/forecast-quality", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const minSamplesRaw = request.query?.minSamples;
+      const minSamples = typeof minSamplesRaw === "string" && minSamplesRaw.length > 0 ? Number(minSamplesRaw) : undefined;
+      return getForecastQualityAnalytics({
+        workspaceId: request.query?.workspaceId,
+        since: request.query?.since,
+        minSamples,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { workspaceId?: string; contactKey?: string; limit?: string } }>("/v1/trust/consent/status", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const workspaceId = request.query?.workspaceId ?? "default";
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return getTrustConsentStatus({
+        workspaceId,
+        contactKey: request.query?.contactKey,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: Record<string, unknown> }>("/v1/trust/consent/update", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return updateTrustConsent(request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { sessionId: string } }>("/v1/analytics/onboarding/:sessionId/report", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return buildOnboardingReport({
+        onboardingId: request.params.sessionId,
+        autoCaptureCurrent: true,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { product: string }; Body: Record<string, unknown> }>("/v1/workflows/:product/run", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const product = validateProductType(request.params.product);
+      const context = (request.body?.context as Record<string, unknown> | undefined) ?? {};
+      const workflow = workflowDefinitionFor(product, context);
+
+      const task = createTask({ skillId: `erp:${product}` });
+      markWorking(task.id);
+      const workflowRunId = recordWorkflowRun(product, "running", task.id, context);
+
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+          updateWorkflowRun(workflowRunId, "completed");
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch {}
+          updateWorkflowRun(workflowRunId, "failed", msg);
+        }
+      })();
+
+      return { status: "accepted", product, workflowRunId, taskId: task.id };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { product: string }; Querystring: { since?: string } }>("/v1/kpis/:product", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const product = validateProductType(request.params.product);
+      return getProductKpis(product, { since: request.query?.since });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   // ── Metrics HTTP endpoint ─────────────────────────────────────
   app.get("/metrics", async () => getMetricsSnapshot());
+
+  // ── ERP Wizard UI ─────────────────────────────────────────────
+  app.get("/wizard", async (_req, reply) => {
+    reply.type("text/html");
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ERP Wizard</title>
+<style>
+:root{
+  --bg:#f6f8fb;--card:#ffffff;--line:#d6dbe5;--ink:#0f172a;--muted:#475569;--ok:#0f766e;--warn:#b45309;--bad:#b91c1c;--accent:#1d4ed8;
+}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,#eef3fb 0%,#f8fafc 60%);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink)}
+.shell{max-width:1180px;margin:0 auto;padding:20px}
+h1{margin:0 0 8px;font-size:1.45rem}
+.sub{margin:0 0 18px;color:var(--muted)}
+.grid{display:grid;grid-template-columns:340px 1fr;gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+input,select,button,textarea{font:inherit}
+input,select,textarea{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff}
+button{padding:9px 12px;border:1px solid #cbd5e1;background:#f8fafc;border-radius:10px;cursor:pointer}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.danger{background:#fff;color:var(--bad);border-color:#fecaca}
+button:disabled{opacity:.55;cursor:not-allowed}
+.list{display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto}
+.item{padding:10px;border:1px solid #dbe3ef;border-radius:10px;background:#f8fbff;cursor:pointer}
+.item.active{border-color:#93c5fd;background:#eef5ff}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.72rem}
+.b-ok{background:#dcfce7;color:#166534}.b-warn{background:#fef3c7;color:#92400e}.b-bad{background:#fee2e2;color:#991b1b}
+.b-muted{background:#e2e8f0;color:#334155}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e2e8f0;padding:12px;border-radius:10px;font-size:.78rem;max-height:340px;overflow:auto}
+.hidden{display:none}
+.mt{margin-top:10px}
+.section-title{font-size:.94rem;font-weight:700;margin:0 0 8px}
+.gate{padding:8px;border:1px solid #dbe3ef;border-radius:10px;margin-bottom:8px;background:#fff}
+.fix{font-size:.78rem;color:#334155}
+.result{padding:10px;border:1px solid #dbe3ef;border-radius:10px;background:#f8fbff}
+.result-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.result-meta{font-size:.78rem;color:#334155}
+.result-list{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.result-line{padding:7px 9px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;font-size:.8rem;color:#0f172a}
+@media (max-width:980px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+  <div class="shell">
+    <h1>Quote-to-Order ERP Wizard</h1>
+    <p class="sub">Connect Odoo + Business Central + Dynamics, run dry-run, review gates, and launch with full KPI traceability.</p>
+
+    <div id="authCard" class="card">
+      <div class="section-title">Sign In</div>
+      <div class="row">
+        <input id="apiKeyInput" type="password" placeholder="a2a_k_..." />
+        <button id="loginBtn" class="primary">Login</button>
+      </div>
+      <div class="fix mt">No key yet? Run <span class="mono">bun src/cli.ts auth-create-key --name wizard-admin --role admin</span></div>
+      <div id="authMsg" class="mt"></div>
+    </div>
+
+    <div id="appRoot" class="hidden">
+      <div class="row" style="justify-content:space-between;margin:12px 0 10px">
+        <div id="userLine" class="mono"></div>
+        <div class="row">
+          <button id="refreshBootstrapBtn">Refresh</button>
+          <button id="logoutBtn">Logout</button>
+        </div>
+      </div>
+      <div class="grid">
+        <div>
+          <div class="card">
+            <div class="section-title">Create Wizard Session</div>
+            <label>Customer Name</label>
+            <input id="customerNameInput" placeholder="Acme GmbH" />
+            <label class="mt">Workspace</label>
+            <select id="workspaceSelect"></select>
+            <label class="mt">Or new workspace name</label>
+            <input id="workspaceNameInput" placeholder="Acme Workspace" />
+            <div class="row mt">
+              <button id="createSessionBtn" class="primary">Create Session</button>
+            </div>
+            <div id="createMsg" class="mt"></div>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Sessions</div>
+            <div id="sessionList" class="list"></div>
+          </div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="section-title">Actions</div>
+            <div class="row">
+              <button data-action="connect-odoo">Connect Odoo</button>
+              <button data-action="connect-business-central">Connect BC</button>
+              <button data-action="connect-dynamics">Connect Dynamics</button>
+            </div>
+            <div class="row mt">
+              <button data-action="test-odoo">Test Odoo</button>
+              <button data-action="test-business-central">Test BC</button>
+              <button data-action="test-dynamics">Test Dynamics</button>
+            </div>
+            <div class="row mt">
+              <button data-action="master-sync">Master Data Auto-Sync</button>
+              <button data-action="q2o-dry-run">Q2O Dry-Run</button>
+            </div>
+            <div class="row mt">
+              <button data-action="launch-sandbox">Launch Sandbox</button>
+              <button data-action="launch-production" class="primary">Launch Production</button>
+              <button data-action="load-report">Load Report</button>
+            </div>
+            <div class="row mt">
+              <button data-action="run-followups">Run Auto Follow-ups</button>
+              <button data-action="load-comms-kpis">Load Comms + Deal KPIs</button>
+              <button data-action="load-personality-insights">Load Personality Insights</button>
+              <button data-action="load-personality-profile">Load Personality Profile</button>
+              <button data-action="submit-personality-feedback">Submit Personality Feedback</button>
+              <button data-action="writeback-followups">Writeback Open Follow-ups</button>
+            </div>
+            <div class="row mt">
+              <button data-action="sync-revenue-graph">Sync Revenue Graph</button>
+              <button data-action="load-thread-signals">Load Thread Signals</button>
+              <button data-action="recommend-next-action">Recommend Next Action</button>
+              <button data-action="approve-proposal">Approve Proposal</button>
+              <button data-action="reject-proposal">Reject Proposal</button>
+              <button data-action="run-deal-rescue">Run Deal Rescue</button>
+              <button data-action="load-revenue-intel">Load Revenue Intelligence</button>
+            </div>
+            <div class="row mt">
+              <button data-action="import-gmail-demo">Import Gmail Demo Mail</button>
+              <button data-action="import-outlook-demo">Import Outlook Demo Mail</button>
+              <button data-action="pull-gmail-mailbox">Pull Gmail API</button>
+              <button data-action="pull-outlook-mailbox">Pull Outlook API</button>
+            </div>
+            <div class="row mt">
+              <button data-action="oauth-connect-gmail">OAuth Connect Gmail</button>
+              <button data-action="oauth-connect-outlook">OAuth Connect Outlook</button>
+            </div>
+            <div class="row mt">
+              <button data-action="connect-gmail-mailbox">Connect Gmail Mailbox</button>
+              <button data-action="connect-outlook-mailbox">Connect Outlook Mailbox</button>
+              <button data-action="refresh-gmail-mailbox">Refresh Gmail Token</button>
+              <button data-action="refresh-outlook-mailbox">Refresh Outlook Token</button>
+              <button data-action="list-mailbox-connections">List Mailboxes</button>
+            </div>
+            <div id="actionMsg" class="mt"></div>
+            <div class="result mt">
+              <div class="result-head">
+                <div class="section-title" style="margin:0">Last Action Outcome</div>
+                <span id="actionOutcomeStatus" class="badge b-muted">idle</span>
+              </div>
+              <div id="actionOutcomeMeta" class="result-meta mt">No action executed yet.</div>
+              <div id="actionOutcomeHighlights" class="result-list"></div>
+            </div>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Gates</div>
+            <div id="gatesPane"></div>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Session JSON</div>
+            <pre id="sessionJson">{}</pre>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Report JSON</div>
+            <pre id="reportJson">{}</pre>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Revenue Intelligence</div>
+            <div class="row">
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Conversion Lift</div>
+                <div id="riConversionLift" class="mono">-</div>
+              </div>
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Recovered Revenue</div>
+                <div id="riRecoveredRevenue" class="mono">-</div>
+              </div>
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Forecast Error</div>
+                <div id="riForecastError" class="mono">-</div>
+              </div>
+            </div>
+            <div class="row mt">
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Follow-up SLA</div>
+                <div id="riFollowupSla" class="mono">-</div>
+              </div>
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Silent Deals</div>
+                <div id="riSilentDeals" class="mono">-</div>
+              </div>
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Consent Coverage</div>
+                <div id="riConsentCoverage" class="mono">-</div>
+              </div>
+            </div>
+            <div class="row mt">
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Time to 1st Conversion</div>
+                <div id="riTimeToFirstConversion" class="mono">-</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+<script>
+(() => {
+  let bootstrapData = null;
+  let selectedSessionId = "";
+  let lastAutopilotProposalId = "";
+
+  const $ = (id) => document.getElementById(id);
+  const authCard = $("authCard");
+  const appRoot = $("appRoot");
+  const authMsg = $("authMsg");
+  const createMsg = $("createMsg");
+  const actionMsg = $("actionMsg");
+  const sessionJson = $("sessionJson");
+  const reportJson = $("reportJson");
+  const sessionList = $("sessionList");
+  const workspaceSelect = $("workspaceSelect");
+  const gatesPane = $("gatesPane");
+  const userLine = $("userLine");
+  const riConversionLift = $("riConversionLift");
+  const riRecoveredRevenue = $("riRecoveredRevenue");
+  const riForecastError = $("riForecastError");
+  const riFollowupSla = $("riFollowupSla");
+  const riSilentDeals = $("riSilentDeals");
+  const riConsentCoverage = $("riConsentCoverage");
+  const riTimeToFirstConversion = $("riTimeToFirstConversion");
+  const actionOutcomeStatus = $("actionOutcomeStatus");
+  const actionOutcomeMeta = $("actionOutcomeMeta");
+  const actionOutcomeHighlights = $("actionOutcomeHighlights");
+
+  function asObject(value) {
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  }
+
+  function isNonEmptyObject(value) {
+    return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0;
+  }
+
+  function parseJsonMaybe(raw) {
+    try {
+      return JSON.parse(raw || "{}");
+    } catch {
+      return {};
+    }
+  }
+
+  function setActionsDisabled(disabled) {
+    Array.from(document.querySelectorAll("[data-action]")).forEach((button) => {
+      button.disabled = disabled;
+    });
+  }
+
+  function summarizeOutcome(action, payload) {
+    const root = asObject(payload);
+    const lines = [];
+    const session = asObject(root.session);
+    if (typeof session.id === "string") lines.push("Session: " + session.id);
+    if (typeof session.status === "string") lines.push("Session status: " + session.status);
+    if (Array.isArray(session.gates)) {
+      const red = session.gates.filter((gate) => gate && gate.status === "red").length;
+      const overridden = session.gates.filter((gate) => gate && gate.status === "overridden").length;
+      lines.push("Gates: red=" + red + ", overridden=" + overridden);
+    }
+    if (typeof root.workspaceId === "string") lines.push("Workspace: " + root.workspaceId);
+    if (typeof root.threadId === "string") lines.push("Thread: " + root.threadId);
+    if (typeof root.threadCount === "number") lines.push("Threads synced: " + root.threadCount);
+
+    const signals = asObject(root.signals);
+    if (typeof signals.messageCount === "number") lines.push("Messages in thread: " + signals.messageCount);
+    if (typeof signals.followupLikelihoodPct === "number") lines.push("Follow-up likelihood: " + fmtPct(signals.followupLikelihoodPct));
+
+    const proposal = asObject(root.proposal);
+    if (typeof proposal.id === "string") {
+      const statusSuffix = typeof proposal.status === "string" ? " (" + proposal.status + ")" : "";
+      lines.push("Proposal: " + proposal.id + statusSuffix);
+    }
+    if (Array.isArray(root.proposals)) lines.push("Proposals generated: " + root.proposals.length);
+    if (typeof root.proposalCount === "number") lines.push("Proposal count: " + root.proposalCount);
+
+    const metrics = asObject(root.metrics);
+    if (typeof metrics.conversionLiftPct === "number") lines.push("Conversion lift: " + fmtPct(metrics.conversionLiftPct));
+    if (typeof metrics.recoveredRevenueEur === "number") lines.push("Recovered revenue: " + fmtEur(metrics.recoveredRevenueEur));
+    if (typeof metrics.followupSlaAdherencePct === "number") lines.push("Follow-up SLA: " + fmtPct(metrics.followupSlaAdherencePct));
+    const profile = asObject(root.profile);
+    if (typeof profile.personalityType === "string") lines.push("Personality type: " + profile.personalityType);
+    if (typeof profile.confidence === "number") lines.push("Profile confidence: " + fmtNum(profile.confidence, 3));
+    const feedback = asObject(root.feedback);
+    const feedbackSummary = asObject(feedback.summary);
+    if (typeof feedbackSummary.total === "number") lines.push("Feedback samples: " + feedbackSummary.total);
+    if (typeof feedbackSummary.replyRatePct === "number") lines.push("Reply rate: " + fmtPct(feedbackSummary.replyRatePct));
+
+    if (typeof root.runId === "string") lines.push("Run ID: " + root.runId);
+    if (typeof root.authUrl === "string") lines.push("OAuth authorization URL prepared.");
+
+    const executionResult = asObject(root.executionResult);
+    if (typeof executionResult.executionMode === "string") lines.push("Execution mode: " + executionResult.executionMode);
+
+    if (lines.length === 0) {
+      const keys = Object.keys(root);
+      if (keys.length > 0) lines.push("Result fields: " + keys.slice(0, 4).join(", "));
+      else lines.push("Action executed successfully.");
+    }
+    return lines.slice(0, 6);
+  }
+
+  function renderActionOutcome(kind, action, detail, payload) {
+    const badgeMap = {
+      ok: { text: "success", cls: "b-ok" },
+      running: { text: "running", cls: "b-warn" },
+      pending: { text: "pending", cls: "b-warn" },
+      error: { text: "error", cls: "b-bad" },
+      idle: { text: "idle", cls: "b-muted" },
+    };
+    const entry = badgeMap[kind] || badgeMap.idle;
+    if (actionOutcomeStatus) {
+      actionOutcomeStatus.className = "badge " + entry.cls;
+      actionOutcomeStatus.textContent = entry.text;
+    }
+    if (actionOutcomeMeta) {
+      const timestamp = new Date().toLocaleTimeString();
+      actionOutcomeMeta.textContent = action + " • " + detail + " • " + timestamp;
+    }
+    if (actionOutcomeHighlights) {
+      actionOutcomeHighlights.innerHTML = "";
+      const lines = kind === "error"
+        ? [detail]
+        : kind === "running"
+          ? ["Waiting for API response..."]
+          : summarizeOutcome(action, payload);
+      lines.forEach((line) => {
+        const el = document.createElement("div");
+        el.className = "result-line";
+        el.textContent = line;
+        actionOutcomeHighlights.appendChild(el);
+      });
+    }
+  }
+
+  function latestActionPayload() {
+    const report = parseJsonMaybe(reportJson.textContent);
+    if (isNonEmptyObject(report)) return report;
+    const session = parseJsonMaybe(sessionJson.textContent);
+    if (isNonEmptyObject(session)) return session;
+    return {};
+  }
+
+  function fmtNum(value, digits) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return "-";
+    return num.toFixed(digits);
+  }
+
+  function fmtPct(value) {
+    const out = fmtNum(value, 1);
+    return out === "-" ? "-" : out + "%";
+  }
+
+  function fmtEur(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return "-";
+    return "€" + Math.round(num).toLocaleString();
+  }
+
+  function setKpi(el, value) {
+    if (!el) return;
+    el.textContent = value;
+  }
+
+  function resetRevenuePanel() {
+    setKpi(riConversionLift, "-");
+    setKpi(riRecoveredRevenue, "-");
+    setKpi(riForecastError, "-");
+    setKpi(riFollowupSla, "-");
+    setKpi(riSilentDeals, "-");
+    setKpi(riConsentCoverage, "-");
+    setKpi(riTimeToFirstConversion, "-");
+  }
+
+  async function getCurrentSession() {
+    if (!selectedSessionId) throw new Error("Select a session first.");
+    return await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+  }
+
+  async function loadRevenuePanel(workspaceId) {
+    const intelligence = await api("GET", "/v1/analytics/revenue-intelligence?workspaceId=" + encodeURIComponent(workspaceId));
+    const consent = await api("GET", "/v1/trust/consent/status?workspaceId=" + encodeURIComponent(workspaceId) + "&limit=200");
+
+    const metrics = intelligence.metrics || {};
+    setKpi(riConversionLift, fmtPct(metrics.conversionLiftPct));
+    setKpi(riRecoveredRevenue, fmtEur(metrics.recoveredRevenueEur));
+    setKpi(riForecastError, fmtPct(metrics.forecastErrorPct));
+    setKpi(riFollowupSla, fmtPct(metrics.followupSlaAdherencePct));
+    setKpi(riSilentDeals, Number(metrics.silentDealCount || 0).toString());
+    setKpi(riTimeToFirstConversion, metrics.timeToFirstOrderConversionHours === null || metrics.timeToFirstOrderConversionHours === undefined
+      ? "-"
+      : fmtNum(metrics.timeToFirstOrderConversionHours, 2) + "h");
+
+    const summary = consent.summary || {};
+    const optIn = Number(summary.opt_in || 0);
+    const optOut = Number(summary.opt_out || 0);
+    const unknown = Number(summary.unknown || 0);
+    const known = optIn + optOut;
+    const total = known + unknown;
+    const coverage = total > 0 ? Math.round((known / total) * 100) : 0;
+    setKpi(riConsentCoverage, coverage + "% known (" + optIn + " in / " + optOut + " out)");
+    return { intelligence, consent };
+  }
+
+  const defaultConnectPayload = (connector) => {
+    if (connector === "odoo") {
+      return {
+        authMode: "api-key",
+        config: { apiKey: "replace-with-odoo-api-key" },
+        metadata: { odooPlan: "custom" },
+        enabled: true
+      };
+    }
+    if (connector === "business-central") {
+      return {
+        authMode: "oauth",
+        config: { baseUrl: "https://api.businesscentral.dynamics.com", accessToken: "replace-with-token" },
+        metadata: { webhookExpiresAt: new Date(Date.now() + (48 * 60 * 60 * 1000)).toISOString() },
+        enabled: true
+      };
+    }
+    return {
+      authMode: "oauth",
+      config: { baseUrl: "https://example.crm.dynamics.com", accessToken: "replace-with-token" },
+      metadata: {},
+      enabled: true
+    };
+  };
+
+  window.addEventListener("message", async (event) => {
+    if (event.origin !== window.location.origin) return;
+    const data = (event && typeof event.data === "object" && event.data) ? event.data : {};
+    if (data.type !== "wizard-mailbox-oauth") return;
+    if (data.status === "ok") {
+      setMessage(actionMsg, "Mailbox OAuth connected: " + data.provider, "ok");
+      try {
+        if (selectedSessionId) {
+          const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+          const connections = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/mailboxes");
+          reportJson.textContent = JSON.stringify({
+            oauthCallback: data,
+            connections,
+          }, null, 2);
+          renderActionOutcome("ok", "mailbox-oauth-callback", "Mailbox connected", {
+            provider: data.provider,
+            status: data.status,
+            connections: connections.items || [],
+          });
+          await refreshBootstrap();
+          await loadSession(selectedSessionId);
+        }
+      } catch (err) {
+        setMessage(actionMsg, String(err.message || err), "error");
+      }
+      return;
+    }
+    setMessage(actionMsg, "Mailbox OAuth failed: " + (data.reason || "unknown"), "error");
+    reportJson.textContent = JSON.stringify(data, null, 2);
+    renderActionOutcome("error", "mailbox-oauth-callback", String(data.reason || "unknown"), data);
+  });
+
+  async function api(method, url, body) {
+    const init = { method, headers: { "Content-Type": "application/json" } };
+    if (body !== undefined) init.body = JSON.stringify(body);
+    const res = await fetch(url, init);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  }
+
+  function setMessage(el, text, kind) {
+    el.textContent = text || "";
+    el.style.color = kind === "error"
+      ? "#b91c1c"
+      : (kind === "ok" ? "#0f766e" : (kind === "warn" ? "#92400e" : "#334155"));
+  }
+
+  function badge(status) {
+    if (status === "green" || status === "done" || status === "launched") return '<span class="badge b-ok">' + status + "</span>";
+    if (status === "overridden" || status === "pending" || status === "active") return '<span class="badge b-warn">' + status + "</span>";
+    if (status === "red" || status === "blocked") return '<span class="badge b-bad">' + status + "</span>";
+    return '<span class="badge b-muted">' + status + "</span>";
+  }
+
+  function renderBootstrap() {
+    if (!bootstrapData) return;
+    userLine.textContent = "user=" + bootstrapData.user.name + " role=" + bootstrapData.user.role + " workspaceScope=" + (bootstrapData.user.workspace || "global");
+    workspaceSelect.innerHTML = "";
+    (bootstrapData.workspaces || []).forEach((ws) => {
+      const opt = document.createElement("option");
+      opt.value = ws.id;
+      opt.textContent = ws.name + " (" + ws.id + ")";
+      workspaceSelect.appendChild(opt);
+    });
+    sessionList.innerHTML = "";
+    (bootstrapData.sessions || []).forEach((session) => {
+      const el = document.createElement("div");
+      el.className = "item" + (selectedSessionId === session.id ? " active" : "");
+      el.innerHTML = "<div><strong>" + session.customerName + "</strong></div><div class='mono'>" + session.id + "</div><div>" + badge(session.status) + "</div>";
+      el.onclick = () => { loadSession(session.id); };
+      sessionList.appendChild(el);
+    });
+  }
+
+  function renderGates(session) {
+    gatesPane.innerHTML = "";
+    const gates = Array.isArray(session.gates) ? session.gates : [];
+    gates.forEach((gate) => {
+      const wrap = document.createElement("div");
+      wrap.className = "gate";
+      wrap.innerHTML =
+        "<div><strong>" + gate.title + "</strong> " + badge(gate.status) + "</div>" +
+        "<div class='mono'>id=" + gate.id + " class=" + gate.class + "</div>" +
+        "<div class='fix'>" + (gate.reason || "") + "</div>" +
+        "<div class='fix'><em>Fix:</em> " + (gate.fixPath || "") + "</div>";
+      if (gate.class === "overridable" && gate.status === "red") {
+        const btn = document.createElement("button");
+        btn.textContent = "Override";
+        btn.onclick = async () => {
+          const reason = window.prompt("Override reason");
+          if (!reason) return;
+          const approvedBy = window.prompt("Approved by", bootstrapData.user.name || "ops");
+          if (!approvedBy) return;
+          try {
+            const updated = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/gates/" + gate.id + "/override", { reason, approvedBy });
+            sessionJson.textContent = JSON.stringify(updated, null, 2);
+            renderGates(updated);
+            setMessage(actionMsg, "Gate overridden: " + gate.id, "ok");
+          } catch (err) {
+            setMessage(actionMsg, String(err.message || err), "error");
+          }
+        };
+        wrap.appendChild(btn);
+      }
+      gatesPane.appendChild(wrap);
+    });
+  }
+
+  async function refreshBootstrap() {
+    try {
+      bootstrapData = await api("GET", "/v1/wizard/bootstrap");
+      authCard.classList.add("hidden");
+      appRoot.classList.remove("hidden");
+      renderBootstrap();
+      if (bootstrapData.readOnly) {
+        setMessage(actionMsg, "Read-only mode: viewer key detected.", "warn");
+      }
+    } catch {
+      bootstrapData = null;
+      authCard.classList.remove("hidden");
+      appRoot.classList.add("hidden");
+      resetRevenuePanel();
+    }
+  }
+
+  async function loadSession(id) {
+    try {
+      selectedSessionId = id;
+      const session = await api("GET", "/v1/wizard/sessions/" + id);
+      sessionJson.textContent = JSON.stringify(session, null, 2);
+      renderGates(session);
+      if (session && session.workspaceId) {
+        try {
+          await loadRevenuePanel(session.workspaceId);
+        } catch {}
+      }
+      renderBootstrap();
+      setMessage(actionMsg, "Session loaded.", "ok");
+    } catch (err) {
+      setMessage(actionMsg, String(err.message || err), "error");
+    }
+  }
+
+  $("loginBtn").onclick = async () => {
+    try {
+      await api("POST", "/v1/wizard/auth/login", { apiKey: $("apiKeyInput").value.trim() });
+      setMessage(authMsg, "Login successful.", "ok");
+      $("apiKeyInput").value = "";
+      await refreshBootstrap();
+    } catch (err) {
+      setMessage(authMsg, String(err.message || err), "error");
+    }
+  };
+
+  $("logoutBtn").onclick = async () => {
+    await api("POST", "/v1/wizard/auth/logout");
+    selectedSessionId = "";
+    lastAutopilotProposalId = "";
+    sessionJson.textContent = "{}";
+    reportJson.textContent = "{}";
+    gatesPane.innerHTML = "";
+    resetRevenuePanel();
+    renderActionOutcome("idle", "session", "Signed out", {});
+    await refreshBootstrap();
+  };
+
+  $("refreshBootstrapBtn").onclick = refreshBootstrap;
+
+  $("createSessionBtn").onclick = async () => {
+    try {
+      const customerName = $("customerNameInput").value.trim();
+      const workspaceName = $("workspaceNameInput").value.trim();
+      const workspaceId = workspaceName ? undefined : (workspaceSelect.value || undefined);
+      const payload = { customerName, workspaceId, workspaceName: workspaceName || undefined, product: "quote-to-order" };
+      const session = await api("POST", "/v1/wizard/sessions", payload);
+      selectedSessionId = session.id;
+      setMessage(createMsg, "Session created: " + session.id, "ok");
+      $("workspaceNameInput").value = "";
+      await refreshBootstrap();
+      await loadSession(session.id);
+    } catch (err) {
+      setMessage(createMsg, String(err.message || err), "error");
+    }
+  };
+
+  async function connectorAction(kind, connector) {
+    if (!selectedSessionId) throw new Error("Select a session first.");
+    if (kind === "connect") {
+      const raw = window.prompt("Connector payload JSON", JSON.stringify(defaultConnectPayload(connector), null, 2));
+      if (!raw) return null;
+      const payload = JSON.parse(raw);
+      const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/connectors/" + connector + "/connect", payload);
+      sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      return out;
+    }
+    const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/connectors/" + connector + "/test", {});
+    sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+    return out;
+  }
+
+  async function doAction(action) {
+    if (!selectedSessionId && action !== "load-report") {
+      setMessage(actionMsg, "Select a session first.", "error");
+      return;
+    }
+    let actionHandled = false;
+    let actionKind = "ok";
+    let actionDetail = "Completed";
+    setActionsDisabled(true);
+    renderActionOutcome("running", action, "Executing", {});
+    reportJson.textContent = "{}";
+    try {
+      if (action.startsWith("connect-")) {
+        actionDetail = "Connector updated";
+        await connectorAction("connect", action.slice("connect-".length));
+      } else if (action.startsWith("test-")) {
+        actionDetail = "Connector tested";
+        await connectorAction("test", action.slice("test-".length));
+      } else if (action === "master-sync") {
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/master-data/auto-sync", {});
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      } else if (action === "q2o-dry-run") {
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/q2o/dry-run", { amount: 1000, currency: "EUR", decidedBy: bootstrapData.user.name });
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      } else if (action === "launch-sandbox") {
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/launch", { mode: "sandbox" });
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      } else if (action === "launch-production") {
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/launch", { mode: "production" });
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      } else if (action === "load-report") {
+        if (!selectedSessionId) throw new Error("Select a session first.");
+        const out = await api("GET", "/v1/wizard/sessions/" + selectedSessionId + "/report");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "import-gmail-demo" || action === "import-outlook-demo") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const provider = action === "import-gmail-demo" ? "gmail" : "outlook";
+        const defaultQuoteId = "Q-DEMO-" + String(Date.now()).slice(-6);
+        const quoteExternalId = window.prompt("Quote External ID", defaultQuoteId);
+        if (!quoteExternalId) return;
+        const connectorType = provider === "outlook" ? "dynamics" : "odoo";
+        const domain = "yourcompany.com";
+        const messageId = provider + "-" + Date.now();
+        await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/quotes/sync", {
+          connectorType,
+          quoteExternalId,
+          state: "submitted",
+          amount: provider === "outlook" ? 18000 : 12000,
+          currency: "EUR",
+          idempotencyKey: "wizard-seed-" + messageId,
+          payload: { source: "wizard-demo-mail-import" },
+        });
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/import", {
+          provider,
+          workspaceDomains: [domain],
+          defaultConnectorType: connectorType,
+          runFollowupEngine: true,
+          followupAfterHours: 1,
+          now: new Date(Date.now() + (2 * 60 * 60 * 1000)).toISOString(),
+          assignedTo: bootstrapData.user.name,
+          messages: [
+            {
+              messageId,
+              threadId: "thread-" + messageId,
+              quoteExternalId,
+              subject: "Re: " + quoteExternalId + " budget and next steps",
+              bodyText: provider === "outlook"
+                ? "This is too expensive. We need a discount before we proceed."
+                : "Can you share a status update for this quote? We need approval this week.",
+              fromAddress: "buyer@customer.example",
+              toAddress: "ops@" + domain,
+              receivedAt: new Date().toISOString(),
+            },
+          ],
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "oauth-connect-gmail" || action === "oauth-connect-outlook") {
+        const provider = action === "oauth-connect-gmail" ? "gmail" : "outlook";
+        const defaultPayload = provider === "gmail"
+          ? {
+            clientId: "replace-with-google-client-id",
+            clientSecret: "replace-with-google-client-secret",
+            userId: "me",
+            scopes: [
+              "https://www.googleapis.com/auth/gmail.readonly",
+              "openid",
+              "email",
+            ],
+          }
+          : {
+            clientId: "replace-with-microsoft-client-id",
+            clientSecret: "replace-with-microsoft-client-secret",
+            tenantId: "common",
+            userId: "me",
+            scopes: ["offline_access", "Mail.Read", "User.Read"],
+          };
+        const raw = window.prompt("OAuth start payload JSON", JSON.stringify(defaultPayload, null, 2));
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/mailboxes/" + provider + "/oauth/start", payload);
+        reportJson.textContent = JSON.stringify(out, null, 2);
+        const popup = window.open(out.authUrl, "wizard-mailbox-oauth", "width=560,height=760");
+        if (!popup) {
+          throw new Error("Popup blocked. Open authUrl manually from report JSON.");
+        } else {
+          popup.focus();
+          actionKind = "pending";
+          actionDetail = "OAuth window opened for " + provider;
+        }
+      } else if (action === "connect-gmail-mailbox" || action === "connect-outlook-mailbox") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const provider = action === "connect-gmail-mailbox" ? "gmail" : "outlook";
+        const userId = window.prompt("Mailbox userId", "me");
+        if (!userId) return;
+        const defaultPayload = provider === "gmail"
+          ? {
+            provider,
+            userId,
+            clientId: "replace-with-google-client-id",
+            clientSecret: "replace-with-google-client-secret",
+            refreshToken: "replace-with-google-refresh-token",
+            accessToken: "replace-with-google-access-token",
+            scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+            metadata: { source: "wizard" },
+            enabled: true,
+          }
+          : {
+            provider,
+            userId,
+            tenantId: "common",
+            clientId: "replace-with-microsoft-client-id",
+            clientSecret: "replace-with-microsoft-client-secret",
+            refreshToken: "replace-with-microsoft-refresh-token",
+            accessToken: "replace-with-microsoft-access-token",
+            scopes: ["Mail.Read", "offline_access"],
+            metadata: { source: "wizard" },
+            enabled: true,
+          };
+        const raw = window.prompt("Mailbox connection payload JSON", JSON.stringify(defaultPayload, null, 2));
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/mailboxes/connect", payload);
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "refresh-gmail-mailbox" || action === "refresh-outlook-mailbox") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const provider = action === "refresh-gmail-mailbox" ? "gmail" : "outlook";
+        const userId = window.prompt("Mailbox userId", "me");
+        if (!userId) return;
+        const force = window.confirm("Force token refresh now?");
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/mailboxes/" + provider + "/refresh", {
+          userId,
+          force,
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "list-mailbox-connections") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/mailboxes");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "pull-gmail-mailbox" || action === "pull-outlook-mailbox") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const provider = action === "pull-gmail-mailbox" ? "gmail" : "outlook";
+        const userId = window.prompt("Mailbox userId (stored connection)", "me");
+        if (!userId) return;
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/pull", {
+          provider,
+          userId,
+          useStoredConnection: true,
+          limit: 25,
+          workspaceDomains: ["yourcompany.com"],
+          runFollowupEngine: true,
+          followupAfterHours: 1,
+          now: new Date(Date.now() + (2 * 60 * 60 * 1000)).toISOString(),
+          assignedTo: bootstrapData.user.name,
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "run-followups") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/followups/run", {
+          followupAfterHours: 48,
+          assignedTo: bootstrapData.user.name,
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "writeback-followups") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/followups/writeback", {
+          status: "open",
+          limit: 20,
+          statusOnSuccess: "sent",
+          assignedTo: bootstrapData.user.name,
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-comms-kpis") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/kpis");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-personality-insights") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/personality");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-personality-profile") {
+        const currentSession = await getCurrentSession();
+        const contactKey = window.prompt("Contact key (email)", "buyer@customer.example");
+        if (!contactKey) return;
+        const out = await api(
+          "GET",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId
+            + "/communications/personality/profile/" + encodeURIComponent(contactKey)
+            + "?includeRecentEvents=true&eventLimit=20&autoRecompute=true",
+        );
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "submit-personality-feedback") {
+        const currentSession = await getCurrentSession();
+        const raw = window.prompt(
+          "Personality feedback payload JSON",
+          JSON.stringify({
+            contactKey: "buyer@customer.example",
+            outcome: "positive",
+            replyReceived: true,
+            convertedToOrder: false,
+            note: "Tone matched stakeholder style well.",
+            recordedBy: bootstrapData.user.name,
+            applyLearning: true,
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api(
+          "POST",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/personality/feedback",
+          payload,
+        );
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "sync-revenue-graph") {
+        const currentSession = await getCurrentSession();
+        const raw = window.prompt(
+          "Revenue graph sync payload JSON",
+          JSON.stringify({
+            mode: "incremental",
+            includeCommunications: true,
+            includeMasterData: true,
+            limit: 5000,
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/revenue-graph/workspaces/" + currentSession.workspaceId + "/sync", payload);
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-thread-signals") {
+        const currentSession = await getCurrentSession();
+        let threadId = (window.prompt("Thread ID (empty = auto-select from latest sync)", "") || "").trim();
+        let autoSync = null;
+        if (!threadId) {
+          autoSync = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/threads/sync", {
+            source: "existing",
+            limit: 25,
+            windowDays: 30,
+          });
+          const threads = Array.isArray(autoSync && autoSync.threads)
+            ? autoSync.threads
+            : [];
+          if (threads.length > 0) {
+            const candidate = threads[0];
+            threadId = candidate && typeof candidate.threadId === "string" ? candidate.threadId : "";
+          }
+          if (!threadId) {
+            throw new Error("No communication thread found. Import or pull communication data first.");
+          }
+        }
+        const out = await api(
+          "GET",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/threads/" + encodeURIComponent(threadId)
+            + "/signals?includeEvents=true&eventLimit=100",
+        );
+        reportJson.textContent = JSON.stringify({
+          threadId,
+          autoSync,
+          signals: out,
+        }, null, 2);
+      } else if (action === "recommend-next-action") {
+        const currentSession = await getCurrentSession();
+        const quoteExternalId = window.prompt("Quote External ID", "Q-DEMO-" + String(Date.now()).slice(-6));
+        if (!quoteExternalId) return;
+        const raw = window.prompt(
+          "Recommendation payload JSON",
+          JSON.stringify({
+            quoteExternalId,
+            mode: "create_proposal",
+            requireApproval: true,
+            channel: "email",
+            assignedTo: bootstrapData.user.name,
+            metadata: { source: "wizard" },
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/recommendations/next-action", payload);
+        const proposal = out && out.proposal;
+        if (proposal && typeof proposal === "object" && typeof proposal.id === "string") {
+          lastAutopilotProposalId = proposal.id;
+        }
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "approve-proposal") {
+        const currentSession = await getCurrentSession();
+        const proposalId = (window.prompt("Proposal ID", lastAutopilotProposalId || "") || "").trim();
+        if (!proposalId) return;
+        const raw = window.prompt(
+          "Approve payload JSON",
+          JSON.stringify({
+            approvedBy: bootstrapData.user.name,
+            execute: true,
+            note: "Approved from wizard",
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api(
+          "POST",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/autopilot/proposals/" + encodeURIComponent(proposalId) + "/approve",
+          payload,
+        );
+        lastAutopilotProposalId = proposalId;
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "reject-proposal") {
+        const currentSession = await getCurrentSession();
+        const proposalId = (window.prompt("Proposal ID", lastAutopilotProposalId || "") || "").trim();
+        if (!proposalId) return;
+        const raw = window.prompt(
+          "Reject payload JSON",
+          JSON.stringify({
+            rejectedBy: bootstrapData.user.name,
+            reason: "Not aligned with customer context",
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api(
+          "POST",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/autopilot/proposals/" + encodeURIComponent(proposalId) + "/reject",
+          payload,
+        );
+        lastAutopilotProposalId = proposalId;
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "run-deal-rescue") {
+        const currentSession = await getCurrentSession();
+        const raw = window.prompt(
+          "Deal rescue payload JSON",
+          JSON.stringify({
+            mode: "batch",
+            minStagnationHours: 72,
+            maxQuotes: 25,
+            assignedTo: bootstrapData.user.name,
+            dryRun: false,
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/deal-rescue/run", payload);
+        const proposals = Array.isArray(out && out.proposals)
+          ? out.proposals
+          : [];
+        if (proposals.length > 0 && typeof proposals[0].id === "string") {
+          lastAutopilotProposalId = proposals[0].id;
+        }
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-revenue-intel") {
+        const currentSession = await getCurrentSession();
+        const out = await loadRevenuePanel(currentSession.workspaceId);
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      }
+      if (selectedSessionId) {
+        await refreshBootstrap();
+        await loadSession(selectedSessionId);
+      }
+      const payload = latestActionPayload();
+      if (actionKind === "pending") {
+        setMessage(actionMsg, "Action pending: " + action, "warn");
+      } else {
+        setMessage(actionMsg, "Action complete: " + action, "ok");
+      }
+      renderActionOutcome(actionKind, action, actionDetail, payload);
+      actionHandled = true;
+    } catch (err) {
+      const message = String(err.message || err);
+      setMessage(actionMsg, message, "error");
+      renderActionOutcome("error", action, message, {});
+      actionHandled = true;
+    } finally {
+      if (!actionHandled) {
+        renderActionOutcome("idle", action, "Canceled", {});
+        setMessage(actionMsg, "Action canceled: " + action, "warn");
+      }
+      setActionsDisabled(false);
+    }
+  }
+
+  Array.from(document.querySelectorAll("[data-action]")).forEach((button) => {
+    button.addEventListener("click", () => doAction(button.getAttribute("data-action")));
+  });
+
+  renderActionOutcome("idle", "wizard", "Ready", {});
+  refreshBootstrap();
+})();
+</script>
+</body></html>`;
+  });
 
   // ── Dashboard ─────────────────────────────────────────────────
   app.get("/dashboard", async (_req, reply) => {
@@ -2663,18 +7629,6 @@ ${Object.entries(breakers).map(([name, b]: [string, any]) => `
   // Register cloud health routes (/healthz, /readyz, /health)
   registerHealthRoutes(app, ORCHESTRATOR_VERSION);
 
-  app.get("/healthz", async () => {
-    const health: Record<string, unknown> = {};
-    for (const w of WORKERS) {
-      health[w.name] = workerHealth.get(w.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
-    }
-    for (const rw of REMOTE_WORKERS) {
-      const h = workerHealth.get(rw.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
-      health[`remote:${rw.name}`] = { ...h, url: rw.url };
-    }
-    return { status: "ok", agent: "orchestrator", uptime: process.uptime(), workers: health };
-  });
-
   const httpPort = CONFIG.server.port;
   await app.listen({ port: httpPort, host: "0.0.0.0" });
   const authStatus = A2A_API_KEY ? `auth: Bearer required for remote` : `auth: none (set A2A_API_KEY to enable)`;
@@ -2737,7 +7691,10 @@ async function main() {
 
   // Register graceful shutdown handlers
   installShutdownHandlers();
-  onShutdown(async () => { flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
+  const stopRenewalScheduler = startConnectorRenewalScheduler();
+  const stopFollowupWritebackScheduler = startFollowupWritebackScheduler();
+  const stopSnapshotScheduler = startConnectorRenewalSnapshotScheduler();
+  onShutdown(async () => { stopRenewalScheduler(); stopFollowupWritebackScheduler(); stopSnapshotScheduler(); flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
 
   // Start periodic health checks (every 30s)
   pollWorkerHealth().catch(() => {});

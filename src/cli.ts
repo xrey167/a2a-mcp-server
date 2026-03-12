@@ -12,6 +12,7 @@
 import { initConfigDir, loadConfig } from "./config.js";
 import { discoverUserWorkers, scaffoldWorker, getWorkersDir, ensureWorkersDir } from "./worker-loader.js";
 import { searchRegistry, getRegistryEntry, loadRegistry } from "./worker-registry.js";
+import { createApiKey, listApiKeys, revokeApiKey, type Role } from "./auth.js";
 import { join } from "path";
 import { existsSync, writeFileSync, readFileSync } from "fs";
 import { homedir } from "os";
@@ -31,6 +32,11 @@ Commands:
                   --full    All 8 workers (default)
   config          Show current configuration
   workers         List available workers and their status
+  auth-create-key Create a RBAC API key (for /wizard login)
+                  Usage: auth-create-key --name <name> [--role admin|operator|viewer] [--workspace <id>] [--ttl-hours <n>] [--allow a,b] [--deny x,y]
+  auth-list-keys  List API key metadata (never prints key material)
+  auth-revoke-key Revoke key by prefix or name
+                  Usage: auth-revoke-key --target <prefix-or-name>
   create-worker   Scaffold a new custom worker
                   Usage: create-worker <name> [--port <port>]
   search          Search the worker registry
@@ -61,6 +67,24 @@ Config file: ~/.a2a-mcp/config.json
 Dashboard: http://localhost:8080/dashboard (while server is running)
 
 `);
+}
+
+function readFlag(flag: string): string | undefined {
+  const inline = args.find((part) => part.startsWith(`${flag}=`));
+  if (inline) return inline.slice(flag.length + 1);
+  const idx = args.indexOf(flag);
+  if (idx >= 0 && idx + 1 < args.length) return args[idx + 1];
+  return undefined;
+}
+
+function readCsvFlag(flag: string): string[] | undefined {
+  const raw = readFlag(flag);
+  if (!raw) return undefined;
+  const values = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return values.length > 0 ? values : undefined;
 }
 
 function initCommand() {
@@ -140,6 +164,83 @@ function workersCommand() {
 
   process.stderr.write("\nEdit ~/.a2a-mcp/config.json to configure.\n");
   process.stderr.write(`Create a new worker: bun src/cli.ts create-worker <name>\n\n`);
+}
+
+function authCreateKeyCommand() {
+  const name = readFlag("--name") ?? "wizard-admin";
+  const roleRaw = (readFlag("--role") ?? "admin").toLowerCase();
+  if (!(["admin", "operator", "viewer"] as const).includes(roleRaw as Role)) {
+    process.stderr.write("Invalid role. Use one of: admin, operator, viewer\n");
+    process.exit(1);
+  }
+  const role = roleRaw as Role;
+  const workspace = readFlag("--workspace");
+  const allow = readCsvFlag("--allow");
+  const deny = readCsvFlag("--deny");
+
+  const ttlHoursRaw = readFlag("--ttl-hours");
+  let ttlMs: number | undefined;
+  if (ttlHoursRaw) {
+    const ttlHours = Number(ttlHoursRaw);
+    if (!Number.isFinite(ttlHours) || ttlHours <= 0) {
+      process.stderr.write("--ttl-hours must be a positive number\n");
+      process.exit(1);
+    }
+    ttlMs = Math.round(ttlHours * 60 * 60 * 1000);
+  }
+
+  const { key, entry } = createApiKey(name, role, {
+    workspace,
+    allowedSkills: allow,
+    deniedSkills: deny,
+    ttlMs,
+  });
+
+  process.stderr.write("\nAPI key created successfully.\n");
+  process.stderr.write("Save this now — it is shown only once:\n");
+  process.stderr.write(`${key}\n\n`);
+  process.stderr.write(`name: ${entry.name}\n`);
+  process.stderr.write(`prefix: ${entry.prefix}\n`);
+  process.stderr.write(`role: ${entry.role}\n`);
+  process.stderr.write(`workspace: ${entry.workspace ?? "(global)"}\n`);
+  process.stderr.write(`createdAt: ${new Date(entry.createdAt).toISOString()}\n`);
+  process.stderr.write(`expiresAt: ${entry.expiresAt ? new Date(entry.expiresAt).toISOString() : "(none)"}\n\n`);
+}
+
+function authListKeysCommand() {
+  const keys = listApiKeys();
+  if (keys.length === 0) {
+    process.stderr.write("No API keys found.\n");
+    process.stderr.write("Create one with: bun src/cli.ts auth-create-key --name wizard-admin --role admin\n");
+    return;
+  }
+
+  process.stderr.write(`\nAPI keys (${keys.length}):\n`);
+  for (const key of keys) {
+    process.stderr.write(`\n- ${key.name}\n`);
+    process.stderr.write(`  prefix: ${key.prefix}\n`);
+    process.stderr.write(`  role: ${key.role}\n`);
+    process.stderr.write(`  workspace: ${key.workspace ?? "(global)"}\n`);
+    process.stderr.write(`  createdAt: ${new Date(key.createdAt).toISOString()}\n`);
+    process.stderr.write(`  lastUsedAt: ${key.lastUsedAt ? new Date(key.lastUsedAt).toISOString() : "(never)"}\n`);
+    process.stderr.write(`  expiresAt: ${key.expiresAt ? new Date(key.expiresAt).toISOString() : "(none)"}\n`);
+  }
+  process.stderr.write("\n");
+}
+
+function authRevokeKeyCommand() {
+  const target = readFlag("--target") ?? args[1];
+  if (!target) {
+    process.stderr.write("Usage: bun src/cli.ts auth-revoke-key --target <prefix-or-name>\n");
+    process.exit(1);
+  }
+
+  const removed = revokeApiKey(target);
+  if (!removed) {
+    process.stderr.write(`No key found for target: ${target}\n`);
+    process.exit(1);
+  }
+  process.stderr.write(`Revoked API key: ${target}\n`);
 }
 
 function createWorkerCommand() {
@@ -276,6 +377,15 @@ switch (command) {
     break;
   case "workers":
     workersCommand();
+    break;
+  case "auth-create-key":
+    authCreateKeyCommand();
+    break;
+  case "auth-list-keys":
+    authListKeysCommand();
+    break;
+  case "auth-revoke-key":
+    authRevokeKeyCommand();
     break;
   case "create-worker":
     createWorkerCommand();

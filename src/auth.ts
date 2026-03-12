@@ -2,7 +2,7 @@
 // Role-based access control (RBAC) and API key management.
 // Keys and roles are stored in ~/.a2a-mcp/auth.json (mode 0o600).
 
-import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { randomBytes, createHash } from "crypto";
@@ -44,6 +44,8 @@ const ROLE_PERMISSIONS: Record<Role, Set<string>> = {
   operator: new Set([
     "delegate", "list_agents", "register_agent", "unregister_agent",
     "sandbox_execute", "sandbox_vars", "workflow_execute",
+    "agency_workflow_templates", "agency_roi_snapshot",
+    "erp_connector_connect", "erp_connector_sync", "erp_connector_status", "erp_connector_renew", "erp_connector_renew_due", "erp_workflow_run", "erp_kpis", "erp_connector_kpis", "erp_connector_renewals", "erp_connector_renewals_export", "erp_connector_renewals_snapshot", "erp_connector_renewals_verify", "erp_connector_trust_report", "erp_connector_sales_packet", "erp_pilot_readiness", "erp_launch_pilot", "erp_pilot_launches", "erp_onboarding_create", "erp_onboarding_capture", "erp_onboarding_report", "erp_onboarding_list", "erp_commercial_event_record", "erp_commercial_kpis", "erp_workflow_sla_status", "erp_workflow_sla_escalate", "erp_workflow_sla_incidents", "erp_workflow_sla_incident_update", "erp_q2o_quote_sync", "erp_q2o_order_sync", "erp_q2o_approval_decision", "erp_q2o_pipeline", "erp_master_data_sync", "erp_master_data_mappings", "erp_master_data_mapping_update", "erp_analytics_executive", "erp_analytics_ops",
     "compose_pipeline", "execute_pipeline", "list_pipelines",
     "collaborate", "event_publish", "event_subscribe", "event_replay",
     "cache_stats", "cache_invalidate", "cache_configure",
@@ -53,6 +55,8 @@ const ROLE_PERMISSIONS: Record<Role, Set<string>> = {
   ]),
   viewer: new Set([
     "delegate", "list_agents",
+    "agency_workflow_templates", "agency_roi_snapshot",
+    "erp_connector_status", "erp_kpis", "erp_connector_kpis", "erp_connector_renewals", "erp_connector_renewals_export", "erp_connector_renewals_verify", "erp_connector_trust_report", "erp_connector_sales_packet", "erp_pilot_readiness", "erp_pilot_launches", "erp_onboarding_report", "erp_onboarding_list", "erp_commercial_kpis", "erp_workflow_sla_status", "erp_workflow_sla_incidents", "erp_q2o_pipeline", "erp_master_data_mappings", "erp_analytics_executive", "erp_analytics_ops",
     "get_metrics", "list_traces", "get_trace", "search_traces",
     "cache_stats", "list_capabilities", "capability_stats",
     "recall",
@@ -63,34 +67,62 @@ const ROLE_PERMISSIONS: Record<Role, Set<string>> = {
 
 /** In-memory cache of the auth store — populated on first read, updated on every write. */
 let authCache: AuthStore | null = null;
+/** Last observed file signature for AUTH_FILE so we can detect out-of-process edits. */
+let authCacheSignature: string | null = null;
+
+function getAuthFileSignature(): string | null {
+  if (!existsSync(AUTH_FILE)) return null;
+  try {
+    const stat = statSync(AUTH_FILE);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
 
 function readStore(): AuthStore {
+  const diskSignature = getAuthFileSignature();
   if (authCache !== null) {
     // Detect external deletion (e.g., in tests or manual cleanup):
     // if the backing file was removed since last cache load, reset the cache.
-    if (!existsSync(AUTH_FILE)) {
+    if (diskSignature === null) {
       authCache = { keys: [] };
+      authCacheSignature = null;
+      return authCache;
+    }
+    // Detect external modifications (e.g. CLI edits while server is running).
+    if (authCacheSignature !== diskSignature) {
+      try {
+        authCache = JSON.parse(readFileSync(AUTH_FILE, "utf-8")) as AuthStore;
+      } catch {
+        authCache = { keys: [] };
+      }
+      authCacheSignature = diskSignature;
     }
     return authCache;
   }
-  if (!existsSync(AUTH_FILE)) {
+  if (diskSignature === null) {
     authCache = { keys: [] };
+    authCacheSignature = null;
     return authCache;
   }
   try {
     authCache = JSON.parse(readFileSync(AUTH_FILE, "utf-8")) as AuthStore;
+    authCacheSignature = diskSignature;
     return authCache;
   } catch {
     authCache = { keys: [] };
+    authCacheSignature = diskSignature;
     return authCache;
   }
 }
 
 function writeStore(store: AuthStore): void {
-  authCache = store; // keep cache in sync before the disk write
   if (!existsSync(AUTH_DIR)) mkdirSync(AUTH_DIR, { recursive: true });
   writeFileSync(AUTH_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
   chmodSync(AUTH_FILE, 0o600);
+  authCache = store; // keep cache in sync after successful disk write
+  authCacheSignature = getAuthFileSignature();
 }
 
 /**
@@ -99,6 +131,7 @@ function writeStore(store: AuthStore): void {
  */
 export function invalidateAuthCache(): void {
   authCache = null;
+  authCacheSignature = null;
 }
 
 // ── Deferred lastUsedAt updates ─────────────────────────────────

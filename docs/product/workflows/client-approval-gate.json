@@ -1,0 +1,37 @@
+{
+  "id": "client-approval-template",
+  "name": "Client Approval Gate",
+  "description": "Prepare a deliverable and emit approval request event before handoff.",
+  "maxConcurrency": 3,
+  "steps": [
+    {
+      "id": "generate_deliverable",
+      "skillId": "ask_claude",
+      "label": "Generate draft deliverable",
+      "args": {
+        "prompt": "Draft a client deliverable update using this scope: weekly campaign status, blockers, and next-week plan."
+      }
+    },
+    {
+      "id": "publish_approval_event",
+      "skillId": "event_publish",
+      "label": "Publish approval request event",
+      "dependsOn": ["generate_deliverable"],
+      "args": {
+        "topic": "user.approval.requested",
+        "data": {
+          "workflow": "client-approval-template",
+          "approver": "client-ops@example.com",
+          "content": "{{generate_deliverable.result}}"
+        }
+      }
+    },
+    {
+      "id": "record_audit_checkpoint",
+      "skillId": "audit_stats",
+      "label": "Record current audit stats snapshot",
+      "dependsOn": ["publish_approval_event"],
+      "onError": "skip"
+    }
+  ]
+}

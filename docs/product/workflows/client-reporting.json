@@ -1,0 +1,37 @@
+{
+  "id": "client-reporting-template",
+  "name": "Client Reporting",
+  "description": "Recurring client reporting flow with data pull, analysis, and narrative generation.",
+  "maxConcurrency": 4,
+  "steps": [
+    {
+      "id": "fetch_metrics",
+      "skillId": "fetch_url",
+      "label": "Fetch source metrics",
+      "args": {
+        "url": "https://example.com/client/metrics.json",
+        "format": "json"
+      },
+      "onError": "retry",
+      "maxRetries": 2
+    },
+    {
+      "id": "shape_metrics",
+      "skillId": "sandbox_execute",
+      "label": "Normalize metrics payload",
+      "dependsOn": ["fetch_metrics"],
+      "args": {
+        "code": "const payload = JSON.parse(String(await skill('fetch_url', { url: 'https://example.com/client/metrics.json', format: 'json' }))); return { total: payload.length ?? 0, sample: payload.slice?.(0, 5) ?? payload };"
+      }
+    },
+    {
+      "id": "draft_report",
+      "skillId": "ask_claude",
+      "label": "Draft client report summary",
+      "dependsOn": ["shape_metrics"],
+      "args": {
+        "prompt": "Create a concise weekly client report from this data: {{shape_metrics.result}}. Include wins, risks, and next actions."
+      }
+    }
+  ]
+}

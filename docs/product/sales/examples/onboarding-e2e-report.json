@@ -1,0 +1,415 @@
+{
+  "generatedAt": "2026-03-11T13:20:02.869Z",
+  "session": {
+    "id": "b216c7bf-7adb-4476-96a4-bdd453b1333f",
+    "customerName": "Pilot Agency GmbH",
+    "product": "lead-to-cash",
+    "connector": "dynamics",
+    "status": "active",
+    "metadata": {
+      "owner": "ops@pilot-agency.example",
+      "segment": "mid-market"
+    },
+    "createdAt": "2026-03-11T13:20:02.861Z",
+    "updatedAt": "2026-03-11T13:20:02.861Z"
+  },
+  "baseline": {
+    "id": "7bf8252f-2982-4394-b077-6b0f506c0443",
+    "onboardingId": "b216c7bf-7adb-4476-96a4-bdd453b1333f",
+    "phase": "baseline",
+    "metrics": {
+      "capturedAt": "2026-03-11T13:20:02.865Z",
+      "since": "2026-03-11T13:20:02.861Z",
+      "product": "lead-to-cash",
+      "connectorScope": "dynamics",
+      "productKpis": {
+        "product": "lead-to-cash",
+        "timeframe": {
+          "since": "2026-03-11T13:20:02.861Z"
+        },
+        "workflowRuns": {
+          "total": 0,
+          "completed": null,
+          "failed": null,
+          "successRatePct": 0
+        },
+        "sync": {
+          "successfulRuns": null,
+          "failedRuns": null,
+          "distinctEntitiesTouched": 0
+        },
+        "revenueSignal": {
+          "kpi": "Lead leakage prevention",
+          "proxyValue": null,
+          "unit": "lead/deal sync successes"
+        }
+      },
+      "connectorKpis": {
+        "timeframe": {
+          "since": "2026-03-11T13:20:02.861Z"
+        },
+        "connectors": {
+          "total": 0,
+          "healthy": null,
+          "degraded": null,
+          "unhealthy": null,
+          "renewalDue": 0
+        },
+        "renewals": {
+          "totalRuns": 0,
+          "successfulRuns": null,
+          "failedRuns": null,
+          "successRatePct": 0
+        },
+        "alerting": {
+          "renewalBacklog": false,
+          "unhealthyConnectors": null,
+          "degradedConnectors": null
+        }
+      },
+      "connectors": [
+        {
+          "connector": "odoo",
+          "enabled": false,
+          "authMode": "api-key",
+          "health": "unhealthy",
+          "tokenStatus": "unknown",
+          "renewalDue": false,
+          "lastError": "Connector not configured"
+        },
+        {
+          "connector": "business-central",
+          "enabled": false,
+          "authMode": "api-key",
+          "health": "unhealthy",
+          "tokenStatus": "unknown",
+          "renewalDue": false,
+          "lastError": "Connector not configured"
+        },
+        {
+          "connector": "dynamics",
+          "enabled": false,
+          "authMode": "api-key",
+          "health": "unhealthy",
+          "tokenStatus": "unknown",
+          "renewalDue": false,
+          "lastError": "Connector not configured"
+        }
+      ],
+      "derived": {
+        "completedRuns": 0,
+        "failedRuns": 0,
+        "totalRuns": 0,
+        "failureRatePct": 0,
+        "successfulSyncs": 0,
+        "manualStepsRemoved": 0,
+        "timeSavedHours": 0,
+        "estimatedValueEur": 0
+      }
+    },
+    "createdAt": "2026-03-11T13:20:02.865Z"
+  },
+  "current": {
+    "id": "20af7225-f1bd-48f6-9382-1214823229e7",
+    "onboardingId": "b216c7bf-7adb-4476-96a4-bdd453b1333f",
+    "phase": "current",
+    "metrics": {
+      "capturedAt": "2026-03-11T13:20:02.868Z",
+      "since": "2026-03-11T13:20:02.861Z",
+      "product": "lead-to-cash",
+      "connectorScope": "dynamics",
+      "productKpis": {
+        "product": "lead-to-cash",
+        "timeframe": {
+          "since": "2026-03-11T13:20:02.861Z"
+        },
+        "workflowRuns": {
+          "total": 6,
+          "completed": 6,
+          "failed": 0,
+          "successRatePct": 100
+        },
+        "sync": {
+          "successfulRuns": 6,
+          "failedRuns": 0,
+          "distinctEntitiesTouched": 6
+        },
+        "revenueSignal": {
+          "kpi": "Lead leakage prevention",
+          "proxyValue": 6,
+          "unit": "lead/deal sync successes"
+        }
+      },
+      "connectorKpis": {
+        "timeframe": {
+          "since": "2026-03-11T13:20:02.861Z"
+        },
+        "connectors": {
+          "total": 1,
+          "healthy": 1,
+          "degraded": 0,
+          "unhealthy": 0,
+          "renewalDue": 0
+        },
+        "renewals": {
+          "totalRuns": 0,
+          "successfulRuns": null,
+          "failedRuns": null,
+          "successRatePct": 0
+        },
+        "alerting": {
+          "renewalBacklog": false,
+          "unhealthyConnectors": 0,
+          "degradedConnectors": 0
+        }
+      },
+      "connectors": [
+        {
+          "connector": "dynamics",
+          "enabled": true,
+          "authMode": "oauth",
+          "health": "healthy",
+          "lastSyncedAt": "2026-03-11T13:20:02.868Z",
+          "tokenStatus": "unknown",
+          "renewalDue": false
+        }
+      ],
+      "derived": {
+        "completedRuns": 6,
+        "failedRuns": 0,
+        "totalRuns": 6,
+        "failureRatePct": 0,
+        "successfulSyncs": 6,
+        "manualStepsRemoved": 18,
+        "timeSavedHours": 7.8,
+        "estimatedValueEur": 663
+      }
+    },
+    "createdAt": "2026-03-11T13:20:02.868Z"
+  },
+  "report": {
+    "session": {
+      "id": "b216c7bf-7adb-4476-96a4-bdd453b1333f",
+      "customerName": "Pilot Agency GmbH",
+      "product": "lead-to-cash",
+      "connector": "dynamics",
+      "status": "active",
+      "metadata": {
+        "owner": "ops@pilot-agency.example",
+        "segment": "mid-market"
+      },
+      "createdAt": "2026-03-11T13:20:02.861Z",
+      "updatedAt": "2026-03-11T13:20:02.861Z"
+    },
+    "baseline": {
+      "id": "7bf8252f-2982-4394-b077-6b0f506c0443",
+      "onboardingId": "b216c7bf-7adb-4476-96a4-bdd453b1333f",
+      "phase": "baseline",
+      "metrics": {
+        "capturedAt": "2026-03-11T13:20:02.865Z",
+        "since": "2026-03-11T13:20:02.861Z",
+        "product": "lead-to-cash",
+        "connectorScope": "dynamics",
+        "productKpis": {
+          "product": "lead-to-cash",
+          "timeframe": {
+            "since": "2026-03-11T13:20:02.861Z"
+          },
+          "workflowRuns": {
+            "total": 0,
+            "completed": null,
+            "failed": null,
+            "successRatePct": 0
+          },
+          "sync": {
+            "successfulRuns": null,
+            "failedRuns": null,
+            "distinctEntitiesTouched": 0
+          },
+          "revenueSignal": {
+            "kpi": "Lead leakage prevention",
+            "proxyValue": null,
+            "unit": "lead/deal sync successes"
+          }
+        },
+        "connectorKpis": {
+          "timeframe": {
+            "since": "2026-03-11T13:20:02.861Z"
+          },
+          "connectors": {
+            "total": 0,
+            "healthy": null,
+            "degraded": null,
+            "unhealthy": null,
+            "renewalDue": 0
+          },
+          "renewals": {
+            "totalRuns": 0,
+            "successfulRuns": null,
+            "failedRuns": null,
+            "successRatePct": 0
+          },
+          "alerting": {
+            "renewalBacklog": false,
+            "unhealthyConnectors": null,
+            "degradedConnectors": null
+          }
+        },
+        "connectors": [
+          {
+            "connector": "odoo",
+            "enabled": false,
+            "authMode": "api-key",
+            "health": "unhealthy",
+            "tokenStatus": "unknown",
+            "renewalDue": false,
+            "lastError": "Connector not configured"
+          },
+          {
+            "connector": "business-central",
+            "enabled": false,
+            "authMode": "api-key",
+            "health": "unhealthy",
+            "tokenStatus": "unknown",
+            "renewalDue": false,
+            "lastError": "Connector not configured"
+          },
+          {
+            "connector": "dynamics",
+            "enabled": false,
+            "authMode": "api-key",
+            "health": "unhealthy",
+            "tokenStatus": "unknown",
+            "renewalDue": false,
+            "lastError": "Connector not configured"
+          }
+        ],
+        "derived": {
+          "completedRuns": 0,
+          "failedRuns": 0,
+          "totalRuns": 0,
+          "failureRatePct": 0,
+          "successfulSyncs": 0,
+          "manualStepsRemoved": 0,
+          "timeSavedHours": 0,
+          "estimatedValueEur": 0
+        }
+      },
+      "createdAt": "2026-03-11T13:20:02.865Z"
+    },
+    "current": {
+      "id": "20af7225-f1bd-48f6-9382-1214823229e7",
+      "onboardingId": "b216c7bf-7adb-4476-96a4-bdd453b1333f",
+      "phase": "current",
+      "metrics": {
+        "capturedAt": "2026-03-11T13:20:02.868Z",
+        "since": "2026-03-11T13:20:02.861Z",
+        "product": "lead-to-cash",
+        "connectorScope": "dynamics",
+        "productKpis": {
+          "product": "lead-to-cash",
+          "timeframe": {
+            "since": "2026-03-11T13:20:02.861Z"
+          },
+          "workflowRuns": {
+            "total": 6,
+            "completed": 6,
+            "failed": 0,
+            "successRatePct": 100
+          },
+          "sync": {
+            "successfulRuns": 6,
+            "failedRuns": 0,
+            "distinctEntitiesTouched": 6
+          },
+          "revenueSignal": {
+            "kpi": "Lead leakage prevention",
+            "proxyValue": 6,
+            "unit": "lead/deal sync successes"
+          }
+        },
+        "connectorKpis": {
+          "timeframe": {
+            "since": "2026-03-11T13:20:02.861Z"
+          },
+          "connectors": {
+            "total": 1,
+            "healthy": 1,
+            "degraded": 0,
+            "unhealthy": 0,
+            "renewalDue": 0
+          },
+          "renewals": {
+            "totalRuns": 0,
+            "successfulRuns": null,
+            "failedRuns": null,
+            "successRatePct": 0
+          },
+          "alerting": {
+            "renewalBacklog": false,
+            "unhealthyConnectors": 0,
+            "degradedConnectors": 0
+          }
+        },
+        "connectors": [
+          {
+            "connector": "dynamics",
+            "enabled": true,
+            "authMode": "oauth",
+            "health": "healthy",
+            "lastSyncedAt": "2026-03-11T13:20:02.868Z",
+            "tokenStatus": "unknown",
+            "renewalDue": false
+          }
+        ],
+        "derived": {
+          "completedRuns": 6,
+          "failedRuns": 0,
+          "totalRuns": 6,
+          "failureRatePct": 0,
+          "successfulSyncs": 6,
+          "manualStepsRemoved": 18,
+          "timeSavedHours": 7.8,
+          "estimatedValueEur": 663
+        }
+      },
+      "createdAt": "2026-03-11T13:20:02.868Z"
+    },
+    "delta": {
+      "completedRuns": {
+        "current": 6,
+        "baseline": 0,
+        "deltaAbs": 6,
+        "deltaPct": null
+      },
+      "failureRatePct": {
+        "current": 0,
+        "baseline": 0,
+        "deltaAbs": 0,
+        "deltaPct": null
+      },
+      "manualStepsRemoved": {
+        "current": 18,
+        "baseline": 0,
+        "deltaAbs": 18,
+        "deltaPct": null
+      },
+      "timeSavedHours": {
+        "current": 7.8,
+        "baseline": 0,
+        "deltaAbs": 7.8,
+        "deltaPct": null
+      },
+      "estimatedValueEur": {
+        "current": 663,
+        "baseline": 0,
+        "deltaAbs": 663,
+        "deltaPct": null
+      }
+    },
+    "recommendation": {
+      "readyForExpansion": false,
+      "nextAction": "Continue optimization and run weekly KPI review until thresholds are met."
+    }
+  }
+}

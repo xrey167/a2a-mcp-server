@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { createApiKey, validateApiKey, isSkillAllowed, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed } from "../auth.js";
-import { existsSync, unlinkSync, mkdirSync, readFileSync, chmodSync } from "fs";
+import { existsSync, unlinkSync, mkdirSync, readFileSync, chmodSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -107,6 +107,22 @@ describe("auth", () => {
     for (const k of keys) {
       expect((k as any).keyHash).toBeUndefined();
     }
+  });
+
+  test("cache reloads when auth.json is modified externally", () => {
+    createApiKey("external-old", "admin");
+    expect(listApiKeys()).toHaveLength(1);
+
+    writeFileSync(
+      AUTH_FILE,
+      JSON.stringify({
+        keys: [],
+      }, null, 2),
+      { mode: 0o600 },
+    );
+    chmodSync(AUTH_FILE, 0o600);
+
+    expect(listApiKeys()).toHaveLength(0);
   });
 
   test("getRolePermissions returns all roles", () => {
