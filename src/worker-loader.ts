@@ -22,7 +22,7 @@ function getWorkersDirectory(): string {
 /**
  * Scan ~/.a2a-mcp/workers/ for user-defined worker directories.
  * Each directory must contain an index.ts that exports a Fastify server.
- * Port is assigned automatically starting from 8090 (or read from worker.json).
+ * Port is assigned automatically starting from 8095 (or read from worker.json).
  */
 export function discoverUserWorkers(): UserWorker[] {
   if (!existsSync(getWorkersDirectory())) return [];
