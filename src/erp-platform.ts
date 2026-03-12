@@ -8906,12 +8906,25 @@ function computeCustomer360InteractionDates(
   quotes: QuoteToOrderRecordRow[],
   commRows: QuoteCommunicationEventRow[],
 ): InteractionDatesResult {
-  const allDates: number[] = [];
-  for (const q of quotes) allDates.push(new Date(q.created_at).getTime());
-  for (const c of commRows) allDates.push(new Date(c.occurred_at).getTime());
+  let minTime: number | null = null;
+  let maxTime: number | null = null;
 
-  const firstInteractionAt = allDates.length > 0 ? new Date(Math.min(...allDates)).toISOString() : null;
-  const lastInteractionAt = allDates.length > 0 ? new Date(Math.max(...allDates)).toISOString() : null;
+  for (const q of quotes) {
+    const t = new Date(q.created_at).getTime();
+    if (Number.isNaN(t)) continue;
+    if (minTime === null || t < minTime) minTime = t;
+    if (maxTime === null || t > maxTime) maxTime = t;
+  }
+
+  for (const c of commRows) {
+    const t = new Date(c.occurred_at).getTime();
+    if (Number.isNaN(t)) continue;
+    if (minTime === null || t < minTime) minTime = t;
+    if (maxTime === null || t > maxTime) maxTime = t;
+  }
+
+  const firstInteractionAt = minTime !== null ? new Date(minTime).toISOString() : null;
+  const lastInteractionAt = maxTime !== null ? new Date(maxTime).toISOString() : null;
   const daysSinceLastInteraction = lastInteractionAt
     ? (Date.now() - new Date(lastInteractionAt).getTime()) / 86_400_000
     : 999;
