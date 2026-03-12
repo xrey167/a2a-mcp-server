@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/protocol-MCP_(Anthropic)-6366f1" alt="MCP" />
   <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
   <img src="https://img.shields.io/badge/protocol-ACP_(Zed)-ef4444" alt="ACP" />
-  <img src="https://img.shields.io/badge/agents-8_workers-f59e0b" alt="Agents" />
+  <img src="https://img.shields.io/badge/agents-14_workers-f59e0b" alt="Agents" />
   <img src="https://img.shields.io/badge/MCP_tools-35-8b5cf6" alt="Tools" />
   <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
 </p>
@@ -96,7 +96,9 @@ Operational and sales playbooks live in [`docs/product/`](docs/product/README.md
 │  │                  Worker Fleet                       │    │
 │  │  shell:8081  web:8082  ai:8083  code:8084          │    │
 │  │  knowledge:8085  design:8086  factory:8087         │    │
-│  │  data:8088  [user-workers:8090+]                   │    │
+│  │  data:8088  news:8089  market:8090  signal:8091   │    │
+│  │  monitor:8092  infra:8093  climate:8094            │    │
+│  │  [user-workers:8095+]                              │    │
 │  └────────────────────────────────────────────────────┘    │
 │                                                            │
 │  ┌──────────────────────────────────────────────────────┐  │
@@ -128,7 +130,7 @@ bun install
 ### Initialize Configuration
 
 ```bash
-# Full profile — all 8 workers
+# Full profile — all 14 workers
 bun run init
 
 # Lite profile — shell + web + ai workers only
@@ -194,14 +196,21 @@ Each worker is a standalone Fastify microservice spawned as a subprocess. Worker
 | **design** | 8086 | `enhance_ui_prompt`, `suggest_screens`, `design_critique`, `remember`, `recall` | UI/UX design assistance powered by Google Gemini 2.0 Flash |
 | **factory** | 8087 | `normalize_intent`, `create_project`, `quality_gate`, `list_pipelines`, `list_templates`, `remember`, `recall` | Full project generation with 6 pipelines and "Ralph Mode" quality gate |
 | **data** | 8088 | `parse_csv`, `parse_json`, `transform_data`, `analyze_data`, `pivot_table`, `remember`, `recall` | CSV/JSON parsing, 12 transform operations, statistical analysis, pivot tables |
+| **news** | 8089 | `fetch_rss`, `aggregate_feeds`, `classify_news`, `cluster_news`, `detect_signals`, `remember`, `recall` | RSS/Atom feed aggregation, news clustering, signal detection |
+| **market** | 8090 | `fetch_quote`, `price_history`, `technical_analysis`, `screen_market`, `detect_anomalies`, `correlation`, `remember`, `recall` | Real-time quotes, technical indicators, anomaly detection, correlation |
+| **signal** | 8091 | `aggregate_signals`, `classify_threat`, `detect_convergence`, `baseline_compare`, `instability_index`, `remember`, `recall` | Multi-source signal fusion, threat classification, Country Instability Index |
+| **monitor** | 8092 | `track_conflicts`, `detect_surge`, `theater_posture`, `track_vessels`, `check_freshness`, `watchlist_check`, `remember`, `recall` | Conflict tracking, military surge detection, vessel monitoring, watchlists |
+| **infra** | 8093 | `cascade_analysis`, `supply_chain_map`, `chokepoint_assess`, `redundancy_score`, `dependency_graph`, `remember`, `recall` | Infrastructure cascade analysis, supply chain mapping, chokepoint assessment |
+| **climate** | 8094 | `fetch_earthquakes`, `fetch_wildfires`, `fetch_natural_events`, `assess_exposure`, `climate_anomalies`, `event_correlate`, `remember`, `recall` | USGS earthquakes, NASA FIRMS wildfires, EONET events, exposure assessment |
 
 ### Worker Profiles
 
 | Profile | Workers | Use Case |
 |---------|---------|----------|
-| `full` | All 8 workers | Full capability |
+| `full` | All 14 workers | Full capability |
 | `lite` | shell, web, ai | Lightweight setup for simple tasks |
 | `data` | shell, web, ai, data | Data analysis focused |
+| `osint` | shell, web, ai, news, market, signal, monitor, infra, climate | OSINT and intelligence monitoring |
 
 ### User-Space Workers
 
@@ -211,7 +220,7 @@ Create custom workers at `~/.a2a-mcp/workers/<name>/`:
 a2a-mcp-server create-worker my-custom-worker
 ```
 
-This scaffolds a complete Fastify worker with AgentCard, health check, and A2A task endpoint. User workers are auto-discovered and assigned ports starting at 8090.
+This scaffolds a complete Fastify worker with AgentCard, health check, and A2A task endpoint. User workers are auto-discovered and assigned ports starting at 8095.
 
 ### Community Worker Registry
 
