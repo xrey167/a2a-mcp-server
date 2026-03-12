@@ -8824,7 +8824,13 @@ export function getCustomer360Profile(
     : 0;
 
   // 6. Revenue graph contacts
-  const accountKey = `account:${customerExternalId.trim().toLowerCase()}`;
+  // Look up the account entity by external_id to get the correct entity_key
+  const accountEntity = db.query<RevenueGraphEntityRow, [string, string]>(
+    `SELECT entity_key FROM revenue_graph_entities
+     WHERE workspace_id = ? AND entity_type = 'account' AND external_id = ?
+     LIMIT 1`,
+  ).get(workspaceId, customerExternalId);
+  const accountKey = accountEntity?.entity_key ?? revenueGraphKey("account", customerExternalId);
   const contactEdges = db.query<RevenueGraphEdgeRow, [string, string]>(
     `SELECT * FROM revenue_graph_edges
      WHERE workspace_id = ? AND from_entity_key = ? AND relation IN ('has_contact', 'employs')`,
