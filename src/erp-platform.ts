@@ -8699,7 +8699,7 @@ export function getCustomer360Profile(
   workspaceIdInput: unknown,
   customerExternalIdInput: unknown,
   forceRefreshInput: unknown = false,
-): Record<string, unknown> {
+): Customer360Profile { // TODO: Define Customer360Profile interface
   const workspaceId = z.string().min(1).parse(workspaceIdInput);
   const customerExternalId = z.string().min(1).parse(customerExternalIdInput);
   const forceRefresh = z.boolean().optional().default(false).parse(forceRefreshInput);
