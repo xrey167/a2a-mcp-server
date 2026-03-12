@@ -123,6 +123,14 @@ const ErpConfigSchema = z.object({
   snapshotOutputDir: z.string().optional().default(join(getConfigDir(), "reports", "connector-renewals")),
   /** Optional HMAC signing key for snapshot manifests (prefer env in production) */
   snapshotSigningKey: z.string().optional(),
+  /** Enable periodic quote follow-up writeback sweeps */
+  followupWritebackEnabled: z.boolean().optional().default(false),
+  /** Follow-up writeback sweep interval in ms (default: 15m) */
+  followupWritebackIntervalMs: z.number().int().positive().optional().default(15 * 60 * 1000),
+  /** Random jitter added to follow-up writeback sweep in ms (default: 60s) */
+  followupWritebackJitterMs: z.number().int().min(0).optional().default(60_000),
+  /** Max actions per workspace per follow-up writeback sweep */
+  followupWritebackBatchLimit: z.number().int().positive().optional().default(20),
 });
 
 const FederationConfigSchema = z.object({
@@ -261,6 +269,10 @@ let __config: Config | null = null;
  *   A2A_ERP_SNAPSHOT_RETENTION_DAYS → erp.snapshotRetentionDays
  *   A2A_ERP_SNAPSHOT_OUTPUT_DIR → erp.snapshotOutputDir
  *   A2A_ERP_SNAPSHOT_SIGNING_KEY → erp.snapshotSigningKey
+ *   A2A_ERP_FOLLOWUP_WRITEBACK_ENABLED → erp.followupWritebackEnabled
+ *   A2A_ERP_FOLLOWUP_WRITEBACK_INTERVAL_MS → erp.followupWritebackIntervalMs
+ *   A2A_ERP_FOLLOWUP_WRITEBACK_JITTER_MS → erp.followupWritebackJitterMs
+ *   A2A_ERP_FOLLOWUP_WRITEBACK_LIMIT → erp.followupWritebackBatchLimit
  *   A2A_SANDBOX_TIMEOUT → sandbox.timeout
  *   A2A_MAX_RESPONSE_SIZE → truncation.maxResponseSize
  */
@@ -311,6 +323,21 @@ export function loadConfig(): Config {
   }
   if (process.env.A2A_ERP_SNAPSHOT_SIGNING_KEY) {
     raw.erp = { ...(raw.erp as object ?? {}), snapshotSigningKey: process.env.A2A_ERP_SNAPSHOT_SIGNING_KEY };
+  }
+  if (process.env.A2A_ERP_FOLLOWUP_WRITEBACK_ENABLED) {
+    raw.erp = {
+      ...(raw.erp as object ?? {}),
+      followupWritebackEnabled: String(process.env.A2A_ERP_FOLLOWUP_WRITEBACK_ENABLED).toLowerCase() !== "false",
+    };
+  }
+  if (process.env.A2A_ERP_FOLLOWUP_WRITEBACK_INTERVAL_MS) {
+    raw.erp = { ...(raw.erp as object ?? {}), followupWritebackIntervalMs: parseInt(process.env.A2A_ERP_FOLLOWUP_WRITEBACK_INTERVAL_MS, 10) };
+  }
+  if (process.env.A2A_ERP_FOLLOWUP_WRITEBACK_JITTER_MS) {
+    raw.erp = { ...(raw.erp as object ?? {}), followupWritebackJitterMs: parseInt(process.env.A2A_ERP_FOLLOWUP_WRITEBACK_JITTER_MS, 10) };
+  }
+  if (process.env.A2A_ERP_FOLLOWUP_WRITEBACK_LIMIT) {
+    raw.erp = { ...(raw.erp as object ?? {}), followupWritebackBatchLimit: parseInt(process.env.A2A_ERP_FOLLOWUP_WRITEBACK_LIMIT, 10) };
   }
   if (process.env.A2A_API_KEY) {
     raw.server = { ...(raw.server as object ?? {}), apiKey: process.env.A2A_API_KEY };

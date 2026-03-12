@@ -39,6 +39,7 @@ __pycache__/
 
 # local workspace files
 .claude/
+.codex/
 AGENTS.md
 server.log
 PRODUCT_MARKET_FIT.md

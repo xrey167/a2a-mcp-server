@@ -23,7 +23,7 @@ import { memory } from "./memory.js";
 import { createTask, markWorking, markCompleted, markFailed, markCanceled, emitProgress, getTask, listTasks, pruneTasks, toA2AResult, taskEvents } from "./task-store.js";
 import { initAgentRegistry, registerAgent, unregisterAgent, getExternalCards, getRegistryEntries, getAgentApiKey } from "./agent-registry.js";
 import { AgentError } from "./errors.js";
-import { createHash, createHmac, randomUUID } from "crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "crypto";
 import { executeSandbox, setAdapters } from "./sandbox.js";
 import { sandboxStore } from "./sandbox-store.js";
 import { sanitizeForPrompt } from "./prompt-sanitizer.js";
@@ -56,21 +56,56 @@ import {
   buildConnectorRenewalSnapshot,
   captureOnboardingSnapshot,
   connectConnector,
+  createWizardSessionState,
   createOnboardingSession,
   createPilotLaunchRun,
   decideQuoteToOrderApproval,
   getExecutiveAnalytics,
+  getForecastQualityAnalytics,
   getOpsAnalytics,
+  getQuotePersonalityInsights,
+  getQuoteCommunicationAnalytics,
+  getQuoteCommunicationThreadSignals,
+  getRevenueGraphEntity,
+  getRevenueIntelligenceAnalytics,
   getQuoteToOrderPipeline,
+  getTrustConsentStatus,
+  getWizardSessionReport,
+  getWizardSessionState,
   exportConnectorRenewalsCsv,
   getCommercialKpis,
   listOnboardingSessions,
+  listWizardSessionStates,
   listConnectorRenewals,
   listMasterDataMappings,
+  listQuoteMailboxConnections,
+  listQuoteFollowupActions,
+  importQuoteMailboxCommunications,
+  approveQuoteAutopilotProposal,
+  createQuoteNextActionRecommendation,
+  disableQuoteMailboxConnection,
+  pullQuoteMailboxCommunications,
+  refreshQuoteMailboxConnection,
+  rejectQuoteAutopilotProposal,
+  runQuoteDealRescue,
+  syncQuoteCommunicationThreads,
+  writebackQuoteFollowupAction,
+  writebackQuoteFollowupBatch,
+  runScheduledFollowupWritebacks,
   listPilotLaunchRuns,
   listWorkflowSlaIncidents,
+  launchWizardSession,
+  overrideWizardGate,
+  recordWizardConnectorConnection,
   recordCommercialEvent,
+  runWizardConnectorTest,
+  runWizardMasterDataAutoSync,
+  runWizardQuoteToOrderDryRun,
+  runQuoteFollowupEngine,
+  syncRevenueGraphWorkspace,
   syncMasterDataEntity,
+  ingestQuoteCommunication,
+  upsertQuoteMailboxConnection,
   syncQuoteToOrderOrder,
   syncQuoteToOrderQuote,
   escalateWorkflowSlaBreaches,
@@ -78,6 +113,8 @@ import {
   getConnectorStatus,
   getWorkflowSlaStatus,
   updateMasterDataMapping,
+  updateQuoteFollowupAction,
+  updateTrustConsent,
   updateWorkflowSlaIncidentStatus,
   getProductKpis,
   listConnectorStatuses,
@@ -3309,6 +3346,327 @@ function checkAuth(request: { ip: string; headers: Record<string, string | strin
   return false;
 }
 
+interface WizardWebSession {
+  token: string;
+  keyPrefix: string;
+  name: string;
+  role: ApiKeyEntry["role"];
+  workspace?: string;
+  expiresAt: number;
+}
+
+const WIZARD_SESSION_COOKIE = "a2a_wizard_session";
+const WIZARD_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const wizardWebSessions = new Map<string, WizardWebSession>();
+
+function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  if (!cookieHeader) return {};
+  const parts = cookieHeader.split(";").map((part) => part.trim()).filter(Boolean);
+  const out: Record<string, string> = {};
+  for (const part of parts) {
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+    const rawKey = part.slice(0, idx).trim();
+    const rawValue = part.slice(idx + 1).trim();
+    const key = (() => {
+      try { return decodeURIComponent(rawKey); } catch { return rawKey; }
+    })();
+    const value = (() => {
+      try { return decodeURIComponent(rawValue); } catch { return rawValue; }
+    })();
+    out[key] = value;
+  }
+  return out;
+}
+
+function pruneWizardWebSessions(): void {
+  const now = Date.now();
+  for (const [token, session] of wizardWebSessions.entries()) {
+    if (session.expiresAt <= now) wizardWebSessions.delete(token);
+  }
+}
+
+function setWizardSessionCookie(reply: { header: (name: string, value: string) => void }, token: string, secure: boolean): void {
+  const attrs = [
+    `${WIZARD_SESSION_COOKIE}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    `Max-Age=${Math.floor(WIZARD_SESSION_TTL_MS / 1000)}`,
+  ];
+  if (secure) attrs.push("Secure");
+  reply.header("Set-Cookie", attrs.join("; "));
+}
+
+function clearWizardSessionCookie(reply: { header: (name: string, value: string) => void }, secure: boolean): void {
+  const attrs = [
+    `${WIZARD_SESSION_COOKIE}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    "Max-Age=0",
+  ];
+  if (secure) attrs.push("Secure");
+  reply.header("Set-Cookie", attrs.join("; "));
+}
+
+function getWizardWebSession(request: {
+  headers: Record<string, string | string[] | undefined>;
+}): WizardWebSession | null {
+  pruneWizardWebSessions();
+  const rawCookie = request.headers["cookie"];
+  const cookieHeader = Array.isArray(rawCookie) ? rawCookie[0] : rawCookie;
+  const cookies = parseCookies(cookieHeader);
+  const token = cookies[WIZARD_SESSION_COOKIE];
+  if (!token) return null;
+  const session = wizardWebSessions.get(token);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    wizardWebSessions.delete(token);
+    return null;
+  }
+  return session;
+}
+
+function startWizardWebSession(entry: ApiKeyEntry): WizardWebSession {
+  const token = `${randomUUID()}${randomUUID().replace(/-/g, "")}`;
+  const session: WizardWebSession = {
+    token,
+    keyPrefix: entry.prefix,
+    name: entry.name,
+    role: entry.role,
+    workspace: entry.workspace,
+    expiresAt: Date.now() + WIZARD_SESSION_TTL_MS,
+  };
+  wizardWebSessions.set(token, session);
+  return session;
+}
+
+function listWizardAccessibleWorkspaces(session: WizardWebSession): ReturnType<typeof listWorkspaces> {
+  const all = listWorkspaces();
+  if (session.role === "admin" && !session.workspace) return all;
+  if (session.workspace) return all.filter((ws) => ws.id === session.workspace);
+  return all.filter((ws) => ws.members.some((member) => member.keyPrefix === session.keyPrefix));
+}
+
+function requireWizardWriteRole(session: WizardWebSession): void {
+  if (session.role === "viewer") {
+    throw new Error("Viewer keys are read-only in the wizard.");
+  }
+}
+
+function requireWizardWorkspaceAccess(session: WizardWebSession, workspaceId: string, write: boolean): void {
+  if (write) requireWizardWriteRole(session);
+  if (session.workspace && session.workspace !== workspaceId) {
+    throw new Error(`Session is scoped to workspace '${session.workspace}', not '${workspaceId}'.`);
+  }
+  const workspace = getWorkspace(workspaceId);
+  if (!workspace) {
+    throw new Error(`Workspace '${workspaceId}' not found.`);
+  }
+  if (session.role === "admin") return;
+  if (workspace.members.some((member) => member.keyPrefix === session.keyPrefix)) return;
+  if (session.workspace === workspaceId) return;
+  throw new Error(`Workspace access denied for '${workspaceId}'.`);
+}
+
+function wizardSessionWorkspaceId(payload: Record<string, unknown>): string {
+  const workspaceId = payload.workspaceId;
+  if (typeof workspaceId !== "string" || workspaceId.length === 0) {
+    throw new Error("Wizard session payload is missing workspaceId.");
+  }
+  return workspaceId;
+}
+
+type WizardMailboxOAuthProvider = "gmail" | "outlook";
+
+interface WizardMailboxOAuthTransaction {
+  state: string;
+  provider: WizardMailboxOAuthProvider;
+  workspaceId: string;
+  userId: string;
+  tenantId?: string;
+  clientId: string;
+  clientSecret?: string;
+  tokenEndpoint: string;
+  scopes: string[];
+  codeVerifier: string;
+  initiatedBy: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+const WIZARD_MAILBOX_OAUTH_TTL_MS = 10 * 60 * 1000;
+const wizardMailboxOauthTransactions = new Map<string, WizardMailboxOAuthTransaction>();
+
+function pruneWizardMailboxOauthTransactions(): void {
+  const now = Date.now();
+  for (const [state, tx] of wizardMailboxOauthTransactions.entries()) {
+    if (tx.expiresAt <= now) wizardMailboxOauthTransactions.delete(state);
+  }
+}
+
+function createPkcePair(): { verifier: string; challenge: string } {
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return { verifier, challenge };
+}
+
+function wizardOAuthBaseUrl(request: { headers: Record<string, string | string[] | undefined> }): string {
+  const xfProto = request.headers["x-forwarded-proto"];
+  const forwardedProto = Array.isArray(xfProto) ? xfProto[0] : xfProto;
+  const xfHost = request.headers["x-forwarded-host"];
+  const forwardedHost = Array.isArray(xfHost) ? xfHost[0] : xfHost;
+  const hostHeader = request.headers["host"];
+  const host = forwardedHost || (Array.isArray(hostHeader) ? hostHeader[0] : hostHeader) || `localhost:${CONFIG.server.port}`;
+  const proto = forwardedProto || "http";
+  return `${proto}://${host}`;
+}
+
+function wizardMailboxOAuthPreset(provider: WizardMailboxOAuthProvider, tenantId?: string): {
+  authEndpoint: string;
+  tokenEndpoint: string;
+  scopes: string[];
+  authorizeParams: Record<string, string>;
+} {
+  if (provider === "gmail") {
+    return {
+      authEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+      tokenEndpoint: "https://oauth2.googleapis.com/token",
+      scopes: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "openid",
+        "email",
+      ],
+      authorizeParams: {
+        access_type: "offline",
+        prompt: "consent",
+        include_granted_scopes: "true",
+      },
+    };
+  }
+  const tenant = tenantId && tenantId.length > 0 ? tenantId : "common";
+  return {
+    authEndpoint: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`,
+    tokenEndpoint: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`,
+    scopes: ["offline_access", "Mail.Read", "User.Read"],
+    authorizeParams: {
+      response_mode: "query",
+    },
+  };
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function renderWizardMailboxOAuthPage(input: {
+  ok: boolean;
+  title: string;
+  message: string;
+  payload: Record<string, unknown>;
+}): string {
+  const payloadJson = JSON.stringify({
+    ...input.payload,
+    type: "wizard-mailbox-oauth",
+  }).replaceAll("<", "\\u003c");
+  const color = input.ok ? "#0f766e" : "#b91c1c";
+  const title = escapeHtml(input.title);
+  const message = escapeHtml(input.message);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${title}</title>
+  <style>
+    body{margin:0;background:#f8fafc;color:#0f172a;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+    .wrap{max-width:640px;margin:0 auto;padding:36px 20px}
+    .card{background:#fff;border:1px solid #dbe3ef;border-radius:14px;padding:18px}
+    h1{margin:0 0 10px;font-size:1.2rem;color:${color}}
+    p{margin:0 0 8px;color:#334155;line-height:1.5}
+    code{display:block;background:#0f172a;color:#e2e8f0;padding:10px;border-radius:10px;margin-top:12px;white-space:pre-wrap}
+    .row{margin-top:14px}
+    button{padding:9px 12px;border:1px solid #cbd5e1;background:#f8fafc;border-radius:10px;cursor:pointer}
+    a{color:#1d4ed8}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>${title}</h1>
+      <p>${message}</p>
+      <p>You can close this tab and continue in the Wizard.</p>
+      <div class="row">
+        <button onclick="window.close()">Close Window</button>
+        <a href="/wizard" target="_self" style="margin-left:12px">Back to Wizard</a>
+      </div>
+      <code id="payloadBox"></code>
+    </div>
+  </div>
+  <script>
+  (() => {
+    const payload = ${payloadJson};
+    document.getElementById("payloadBox").textContent = JSON.stringify(payload, null, 2);
+    try {
+      if (window.opener) window.opener.postMessage(payload, window.location.origin);
+    } catch {}
+    if (payload.status === "ok") {
+      setTimeout(() => { try { window.close(); } catch {} }, 1200);
+    }
+  })();
+  </script>
+</body>
+</html>`;
+}
+
+async function exchangeWizardMailboxOAuthCode(input: {
+  tokenEndpoint: string;
+  code: string;
+  clientId: string;
+  clientSecret?: string;
+  redirectUri: string;
+  codeVerifier: string;
+}): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string; grantedScope?: string }> {
+  const form = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: input.code,
+    client_id: input.clientId,
+    redirect_uri: input.redirectUri,
+    code_verifier: input.codeVerifier,
+  });
+  if (input.clientSecret) form.set("client_secret", input.clientSecret);
+  const res = await fetch(input.tokenEndpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json",
+    },
+    body: form.toString(),
+  });
+  const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+  if (!res.ok) {
+    const detail = typeof data.error_description === "string"
+      ? data.error_description
+      : (typeof data.error === "string" ? data.error : `HTTP ${res.status}`);
+    throw new Error(`OAuth token exchange failed: ${detail}`);
+  }
+  const accessToken = typeof data.access_token === "string" ? data.access_token : "";
+  if (!accessToken) throw new Error("OAuth token exchange returned no access_token.");
+  const refreshToken = typeof data.refresh_token === "string" ? data.refresh_token : undefined;
+  const expiresInRaw = Number(data.expires_in);
+  const expiresAt = Number.isFinite(expiresInRaw) && expiresInRaw > 0
+    ? new Date(Date.now() + (expiresInRaw * 1000)).toISOString()
+    : undefined;
+  const grantedScope = typeof data.scope === "string" ? data.scope : undefined;
+  return { accessToken, refreshToken, expiresAt, grantedScope };
+}
+
 // ── Worker health polling ────────────────────────────────────────
 async function pollWorkerHealth() {
   for (const w of WORKERS) {
@@ -3361,6 +3719,64 @@ async function pollWorkerHealth() {
 function randomJitterMs(maxJitterMs: number): number {
   if (maxJitterMs <= 0) return 0;
   return Math.floor(Math.random() * (maxJitterMs + 1));
+}
+
+function startFollowupWritebackScheduler(): () => void {
+  const enabled = CONFIG.erp.followupWritebackEnabled;
+  const intervalMs = Math.max(60_000, CONFIG.erp.followupWritebackIntervalMs);
+  const jitterMs = Math.max(0, CONFIG.erp.followupWritebackJitterMs);
+  if (!enabled) {
+    process.stderr.write("[q2o-writeback] scheduler disabled by config\n");
+    return () => {};
+  }
+  process.stderr.write(
+    `[q2o-writeback] scheduler enabled (interval=${intervalMs}ms, jitter<=${jitterMs}ms, limitPerWorkspace=${CONFIG.erp.followupWritebackBatchLimit})\n`,
+  );
+
+  let stopped = false;
+  let inFlight = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const runBatch = async () => {
+    if (inFlight) {
+      process.stderr.write("[q2o-writeback] previous run still in progress, skipping overlap\n");
+      return;
+    }
+    inFlight = true;
+    const startedAt = Date.now();
+    try {
+      const result = await runScheduledFollowupWritebacks({
+        limitPerWorkspace: CONFIG.erp.followupWritebackBatchLimit,
+        statusOnSuccess: "sent",
+        maxRetries: 2,
+      }) as { workspaceCount: number; processedCount: number; failedCount: number };
+      process.stderr.write(
+        `[q2o-writeback] run complete: workspaces=${result.workspaceCount} processed=${result.processedCount} failed=${result.failedCount} durationMs=${Date.now() - startedAt}\n`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[q2o-writeback] run failed: ${msg}\n`);
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const scheduleNext = () => {
+    if (stopped) return;
+    const delay = intervalMs + randomJitterMs(jitterMs);
+    timer = setTimeout(async () => {
+      await runBatch();
+      scheduleNext();
+    }, delay);
+    timer.unref?.();
+  };
+
+  scheduleNext();
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
 }
 
 function startConnectorRenewalScheduler(): () => void {
@@ -4153,8 +4569,8 @@ async function startHttpServer() {
     };
   });
 
-  // Health check for orchestrator itself
-  app.get("/healthz", async () => {
+  // Detailed orchestrator health snapshot
+  app.get("/healthz/details", async () => {
     const workerStatus: Record<string, boolean> = {};
     for (const w of WORKERS) {
       workerStatus[w.name] = workerHealth.get(w.name)?.healthy ?? false;
@@ -4403,6 +4819,421 @@ async function startHttpServer() {
       return { error: errMsg };
     }
   });
+
+  // ── Wizard APIs (session cookie auth) ────────────────────────
+  const wizardAuth = (
+    request: { headers: Record<string, string | string[] | undefined> },
+    reply: { code: (n: number) => void },
+    write = false,
+  ): WizardWebSession | null => {
+    const session = getWizardWebSession(request);
+    if (!session) {
+      reply.code(401);
+      return null;
+    }
+    if (write && session.role === "viewer") {
+      reply.code(403);
+      return null;
+    }
+    return session;
+  };
+
+  app.post<{ Body: { apiKey?: string } }>("/v1/wizard/auth/login", async (request, reply) => {
+    try {
+      const body = z.object({ apiKey: z.string().min(1) }).strict().parse(request.body ?? {});
+      const entry = validateApiKey(body.apiKey);
+      if (!entry) {
+        reply.code(401);
+        return { error: "Invalid or expired API key." };
+      }
+      const session = startWizardWebSession(entry);
+      setWizardSessionCookie(reply, session.token, ((request as any).protocol ?? "").toLowerCase() === "https");
+      return {
+        status: "ok",
+        user: {
+          name: session.name,
+          role: session.role,
+          keyPrefix: session.keyPrefix,
+          workspace: session.workspace ?? null,
+        },
+        readOnly: session.role === "viewer",
+        expiresAt: new Date(session.expiresAt).toISOString(),
+      };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post("/v1/wizard/auth/logout", async (request, reply) => {
+    const session = getWizardWebSession(request as any);
+    if (session) wizardWebSessions.delete(session.token);
+    clearWizardSessionCookie(reply, ((request as any).protocol ?? "").toLowerCase() === "https");
+    return { status: "ok" };
+  });
+
+  app.get("/v1/wizard/bootstrap", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, false);
+    if (!session) return { error: "Unauthorized" };
+    const accessibleWorkspaces = listWizardAccessibleWorkspaces(session);
+    const workspaceIds = new Set(accessibleWorkspaces.map((workspace) => workspace.id));
+    const sessionsRaw = listWizardSessionStates({ limit: 50 }).items;
+    const sessions = sessionsRaw.filter((item) => {
+      const record = (item && typeof item === "object" && !Array.isArray(item)) ? item as Record<string, unknown> : {};
+      const workspaceId = typeof record.workspaceId === "string" ? record.workspaceId : "";
+      if (session.role === "admin" && !session.workspace) return true;
+      if (session.workspace) return workspaceId === session.workspace;
+      return workspaceIds.has(workspaceId);
+    });
+    return {
+      user: {
+        name: session.name,
+        role: session.role,
+        keyPrefix: session.keyPrefix,
+        workspace: session.workspace ?? null,
+      },
+      readOnly: session.role === "viewer",
+      workspaces: accessibleWorkspaces,
+      sessions,
+      defaults: {
+        product: "quote-to-order",
+        requiredConnectors: ["odoo", "business-central", "dynamics"],
+        launchPolicy: "warn_and_continue_with_override",
+      },
+    };
+  });
+
+  app.post<{ Body: { customerName?: string; workspaceId?: string; workspaceName?: string; product?: string } }>("/v1/wizard/sessions", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const body = z.object({
+        customerName: z.string().min(1),
+        workspaceId: z.string().min(1).optional(),
+        workspaceName: z.string().min(1).optional(),
+        product: z.enum(["quote-to-order", "lead-to-cash", "collections"]).optional(),
+      }).strict().parse(request.body ?? {});
+
+      let workspaceId = body.workspaceId;
+      if (!workspaceId) {
+        if (session.workspace) {
+          workspaceId = session.workspace;
+        } else {
+          if (!body.workspaceName) throw new Error("Provide workspaceId or workspaceName.");
+          const workspace = createWorkspace(body.workspaceName, session.keyPrefix, session.name);
+          workspaceId = workspace.id;
+        }
+      }
+      requireWizardWorkspaceAccess(session, workspaceId, true);
+      return createWizardSessionState({
+        workspaceId,
+        customerName: body.customerName,
+        product: body.product ?? "quote-to-order",
+        createdBy: session.name,
+        workspaceIsolationOk: true,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/v1/wizard/sessions/:id", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, false);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const payload = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(payload), false);
+      return payload;
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; type: string }; Body: Record<string, unknown> }>("/v1/wizard/sessions/:id/connectors/:type/connect", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      const connectorType = validateConnectorType(request.params.type);
+      const connector = connectConnector(connectorType, request.body ?? {});
+      const updatedSession = recordWizardConnectorConnection(request.params.id, connectorType, connector);
+      return { status: "connected", connector, session: updatedSession };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; type: string }; Body: Record<string, unknown> }>("/v1/wizard/sessions/:id/connectors/:type/test", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      const connectorType = validateConnectorType(request.params.type);
+      return await runWizardConnectorTest(request.params.id, connectorType, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/wizard/sessions/:id/master-data/auto-sync", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      return runWizardMasterDataAutoSync(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/wizard/sessions/:id/q2o/dry-run", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      return runWizardQuoteToOrderDryRun(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; gateId: string }; Body: { reason?: string; approvedBy?: string } }>("/v1/wizard/sessions/:id/gates/:gateId/override", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      return overrideWizardGate(request.params.id, request.params.gateId, {
+        reason: request.body?.reason,
+        approvedBy: request.body?.approvedBy ?? session.name,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { mode?: "sandbox" | "production" } }>("/v1/wizard/sessions/:id/launch", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, true);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), true);
+      return launchWizardSession(request.params.id, { mode: request.body?.mode });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/v1/wizard/sessions/:id/report", async (request, reply) => {
+    const session = wizardAuth(request as any, reply as any, false);
+    if (!session) return { error: "Unauthorized" };
+    try {
+      const wizardState = getWizardSessionState(request.params.id);
+      requireWizardWorkspaceAccess(session, wizardSessionWorkspaceId(wizardState), false);
+      return getWizardSessionReport(request.params.id);
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; provider: string }; Body: Record<string, unknown> }>(
+    "/v1/wizard/sessions/:id/mailboxes/:provider/oauth/start",
+    async (request, reply) => {
+      const session = wizardAuth(request as any, reply as any, true);
+      if (!session) return { error: "Unauthorized" };
+      try {
+        const wizardState = getWizardSessionState(request.params.id);
+        const workspaceId = wizardSessionWorkspaceId(wizardState);
+        requireWizardWorkspaceAccess(session, workspaceId, true);
+        const provider = z.enum(["gmail", "outlook"]).parse(request.params.provider) as WizardMailboxOAuthProvider;
+        const body = z.object({
+          clientId: z.string().min(1),
+          clientSecret: z.string().optional(),
+          userId: z.string().min(1).optional().default("me"),
+          tenantId: z.string().optional(),
+          scopes: z.array(z.string().min(1)).optional(),
+          loginHint: z.string().optional(),
+        }).strict().parse(request.body ?? {});
+        const preset = wizardMailboxOAuthPreset(provider, body.tenantId);
+        const scopes = (body.scopes && body.scopes.length > 0) ? body.scopes : preset.scopes;
+        const state = randomBytes(24).toString("hex");
+        const pkce = createPkcePair();
+        const createdAt = Date.now();
+        const expiresAt = createdAt + WIZARD_MAILBOX_OAUTH_TTL_MS;
+        const redirectUri = `${wizardOAuthBaseUrl(request as any)}/v1/wizard/mailboxes/oauth/callback`;
+        const params = new URLSearchParams({
+          response_type: "code",
+          client_id: body.clientId,
+          redirect_uri: redirectUri,
+          scope: scopes.join(" "),
+          state,
+          code_challenge: pkce.challenge,
+          code_challenge_method: "S256",
+          ...preset.authorizeParams,
+        });
+        if (body.loginHint) params.set("login_hint", body.loginHint);
+        const authUrl = `${preset.authEndpoint}?${params.toString()}`;
+        wizardMailboxOauthTransactions.set(state, {
+          state,
+          provider,
+          workspaceId,
+          userId: body.userId,
+          tenantId: body.tenantId,
+          clientId: body.clientId,
+          clientSecret: body.clientSecret,
+          tokenEndpoint: preset.tokenEndpoint,
+          scopes,
+          codeVerifier: pkce.verifier,
+          initiatedBy: session.name,
+          createdAt,
+          expiresAt,
+        });
+        return {
+          status: "pending",
+          provider,
+          workspaceId,
+          userId: body.userId,
+          authUrl,
+          expiresAt: new Date(expiresAt).toISOString(),
+        };
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.get<{ Querystring: { state?: string; code?: string; error?: string; error_description?: string } }>(
+    "/v1/wizard/mailboxes/oauth/callback",
+    async (request, reply) => {
+      const query = request.query ?? {};
+      const providerFromState = (() => {
+        if (!query.state) return "unknown";
+        const tx = wizardMailboxOauthTransactions.get(query.state);
+        return tx?.provider ?? "unknown";
+      })();
+      const errorPayloadBase = {
+        status: "error",
+        provider: providerFromState,
+      };
+
+      if (query.error) {
+        reply.type("text/html");
+        reply.code(400);
+        return renderWizardMailboxOAuthPage({
+          ok: false,
+          title: "OAuth failed",
+          message: `${query.error}${query.error_description ? `: ${query.error_description}` : ""}`,
+          payload: {
+            ...errorPayloadBase,
+            reason: query.error,
+          },
+        });
+      }
+      if (!query.state || !query.code) {
+        reply.type("text/html");
+        reply.code(400);
+        return renderWizardMailboxOAuthPage({
+          ok: false,
+          title: "OAuth callback invalid",
+          message: "Missing code or state.",
+          payload: {
+            ...errorPayloadBase,
+            reason: "missing_code_or_state",
+          },
+        });
+      }
+
+      pruneWizardMailboxOauthTransactions();
+      const tx = wizardMailboxOauthTransactions.get(query.state);
+      if (!tx || tx.expiresAt <= Date.now()) {
+        if (tx) wizardMailboxOauthTransactions.delete(query.state);
+        reply.type("text/html");
+        reply.code(400);
+        return renderWizardMailboxOAuthPage({
+          ok: false,
+          title: "OAuth session expired",
+          message: "The OAuth state is missing or expired. Start the flow again from the wizard.",
+          payload: {
+            ...errorPayloadBase,
+            reason: "state_expired",
+          },
+        });
+      }
+
+      wizardMailboxOauthTransactions.delete(query.state);
+      try {
+        const redirectUri = `${wizardOAuthBaseUrl(request as any)}/v1/wizard/mailboxes/oauth/callback`;
+        const tokens = await exchangeWizardMailboxOAuthCode({
+          tokenEndpoint: tx.tokenEndpoint,
+          code: query.code,
+          clientId: tx.clientId,
+          clientSecret: tx.clientSecret,
+          redirectUri,
+          codeVerifier: tx.codeVerifier,
+        });
+        upsertQuoteMailboxConnection(tx.workspaceId, {
+          provider: tx.provider,
+          userId: tx.userId,
+          tenantId: tx.tenantId,
+          clientId: tx.clientId,
+          clientSecret: tx.clientSecret,
+          refreshToken: tokens.refreshToken,
+          accessToken: tokens.accessToken,
+          accessTokenExpiresAt: tokens.expiresAt,
+          tokenEndpoint: tx.tokenEndpoint,
+          scopes: tx.scopes,
+          metadata: {
+            source: "wizard-oauth",
+            connectedBy: tx.initiatedBy,
+            connectedAt: new Date().toISOString(),
+            grantedScope: tokens.grantedScope,
+          },
+          enabled: true,
+        });
+        reply.type("text/html");
+        return renderWizardMailboxOAuthPage({
+          ok: true,
+          title: "Mailbox connected",
+          message: `${tx.provider} mailbox for workspace '${tx.workspaceId}' has been connected.`,
+          payload: {
+            status: "ok",
+            provider: tx.provider,
+            workspaceId: tx.workspaceId,
+            userId: tx.userId,
+          },
+        });
+      } catch (err) {
+        reply.type("text/html");
+        reply.code(400);
+        return renderWizardMailboxOAuthPage({
+          ok: false,
+          title: "OAuth exchange failed",
+          message: err instanceof Error ? err.message : String(err),
+          payload: {
+            status: "error",
+            provider: tx.provider,
+            workspaceId: tx.workspaceId,
+            userId: tx.userId,
+            reason: "token_exchange_failed",
+          },
+        });
+      }
+    },
+  );
 
   // ── ERP Expansion APIs ───────────────────────────────────────
   app.post<{ Params: { type: string }; Body: unknown }>("/v1/connectors/:type/connect", async (request, reply) => {
@@ -4924,6 +5755,375 @@ async function startHttpServer() {
     }
   });
 
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/revenue-graph/workspaces/:id/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return syncRevenueGraphWorkspace(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string; entityType: string; entityId: string }; Querystring: { includeNeighbors?: string; neighborLimit?: string } }>(
+    "/v1/revenue-graph/workspaces/:id/entities/:entityType/:entityId",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const includeNeighbors = request.query?.includeNeighbors === undefined
+          ? undefined
+          : request.query.includeNeighbors === "true";
+        const neighborLimitRaw = request.query?.neighborLimit;
+        const neighborLimit = typeof neighborLimitRaw === "string" && neighborLimitRaw.length > 0
+          ? Number(neighborLimitRaw)
+          : undefined;
+        return getRevenueGraphEntity(
+          request.params.id,
+          request.params.entityType,
+          request.params.entityId,
+          { includeNeighbors, neighborLimit },
+        );
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string; quoteId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/communications/:quoteId/ingest", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return ingestQuoteCommunication(request.params.id, request.params.quoteId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/communications/import", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return importQuoteMailboxCommunications(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/mailboxes/connect", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return upsertQuoteMailboxConnection(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { provider?: string; userId?: string } }>("/v1/quote-to-order/workspaces/:id/mailboxes", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return listQuoteMailboxConnections(request.params.id, {
+        provider: request.query?.provider,
+        userId: request.query?.userId,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; provider: string }; Body: Record<string, unknown>; Querystring: { userId?: string; force?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/mailboxes/:provider/refresh",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const body = {
+          ...(request.body ?? {}),
+          userId: (request.body?.userId as string | undefined) ?? request.query?.userId,
+          force: (request.body?.force as boolean | undefined) ?? (request.query?.force === "true"),
+        };
+        return await refreshQuoteMailboxConnection(request.params.id, request.params.provider, body);
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string; provider: string }; Querystring: { userId?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/mailboxes/:provider",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        return disableQuoteMailboxConnection(request.params.id, request.params.provider, {
+          userId: request.query?.userId,
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/communications/pull", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await pullQuoteMailboxCommunications(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/communications/threads/sync", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await syncQuoteCommunicationThreads(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string; threadId: string }; Querystring: { since?: string; includeEvents?: string; eventLimit?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/communications/threads/:threadId/signals",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const includeEvents = request.query?.includeEvents === undefined
+          ? undefined
+          : request.query.includeEvents === "true";
+        const eventLimitRaw = request.query?.eventLimit;
+        const eventLimit = typeof eventLimitRaw === "string" && eventLimitRaw.length > 0 ? Number(eventLimitRaw) : undefined;
+        return getQuoteCommunicationThreadSignals(request.params.id, request.params.threadId, {
+          since: request.query?.since,
+          includeEvents,
+          eventLimit,
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/followups/run", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return runQuoteFollowupEngine(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { status?: string; actionType?: string; limit?: string } }>("/v1/quote-to-order/workspaces/:id/followups", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listQuoteFollowupActions(request.params.id, {
+        status: request.query?.status,
+        actionType: request.query?.actionType,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.patch<{ Params: { id: string; actionId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/followups/:actionId", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return updateQuoteFollowupAction(request.params.id, request.params.actionId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; actionId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/followups/:actionId/writeback", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await writebackQuoteFollowupAction(request.params.id, request.params.actionId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/followups/writeback", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await writebackQuoteFollowupBatch(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: Record<string, unknown> }>("/v1/quote-to-order/followups/writeback/scheduled-run", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await runScheduledFollowupWritebacks(request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { since?: string; stagnationHours?: string } }>("/v1/quote-to-order/workspaces/:id/communications/kpis", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const stagnationHoursRaw = request.query?.stagnationHours;
+      const stagnationHours = typeof stagnationHoursRaw === "string" && stagnationHoursRaw.length > 0
+        ? Number(stagnationHoursRaw)
+        : undefined;
+      return getQuoteCommunicationAnalytics(request.params.id, {
+        since: request.query?.since,
+        stagnationHours,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { since?: string; quoteExternalId?: string; limit?: string; minConfidence?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/communications/personality",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const limitRaw = request.query?.limit;
+        const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+        const minConfidenceRaw = request.query?.minConfidence;
+        const minConfidence = typeof minConfidenceRaw === "string" && minConfidenceRaw.length > 0
+          ? Number(minConfidenceRaw)
+          : undefined;
+        return getQuotePersonalityInsights(request.params.id, {
+          since: request.query?.since,
+          quoteExternalId: request.query?.quoteExternalId,
+          limit,
+          minConfidence,
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/recommendations/next-action", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return createQuoteNextActionRecommendation(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; proposalId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/autopilot/proposals/:proposalId/approve", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return await approveQuoteAutopilotProposal(request.params.id, request.params.proposalId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string; proposalId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/autopilot/proposals/:proposalId/reject", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return rejectQuoteAutopilotProposal(request.params.id, request.params.proposalId, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/deal-rescue/run", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return runQuoteDealRescue(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   app.post<{ Params: { entity: string }; Body: Record<string, unknown> }>("/v1/erp/master-data/:entity/sync", async (request, reply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
@@ -5002,6 +6202,74 @@ async function startHttpServer() {
     }
   });
 
+  app.get<{ Querystring: { workspaceId?: string; since?: string } }>("/v1/analytics/revenue-intelligence", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return getRevenueIntelligenceAnalytics({
+        workspaceId: request.query?.workspaceId,
+        since: request.query?.since,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { workspaceId?: string; since?: string; minSamples?: string } }>("/v1/analytics/forecast-quality", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const minSamplesRaw = request.query?.minSamples;
+      const minSamples = typeof minSamplesRaw === "string" && minSamplesRaw.length > 0 ? Number(minSamplesRaw) : undefined;
+      return getForecastQualityAnalytics({
+        workspaceId: request.query?.workspaceId,
+        since: request.query?.since,
+        minSamples,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Querystring: { workspaceId?: string; contactKey?: string; limit?: string } }>("/v1/trust/consent/status", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const workspaceId = request.query?.workspaceId ?? "default";
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return getTrustConsentStatus({
+        workspaceId,
+        contactKey: request.query?.contactKey,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: Record<string, unknown> }>("/v1/trust/consent/update", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return updateTrustConsent(request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   app.get<{ Params: { sessionId: string } }>("/v1/analytics/onboarding/:sessionId/report", async (request, reply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
@@ -5071,6 +6339,857 @@ async function startHttpServer() {
 
   // ── Metrics HTTP endpoint ─────────────────────────────────────
   app.get("/metrics", async () => getMetricsSnapshot());
+
+  // ── ERP Wizard UI ─────────────────────────────────────────────
+  app.get("/wizard", async (_req, reply) => {
+    reply.type("text/html");
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ERP Wizard</title>
+<style>
+:root{
+  --bg:#f6f8fb;--card:#ffffff;--line:#d6dbe5;--ink:#0f172a;--muted:#475569;--ok:#0f766e;--warn:#b45309;--bad:#b91c1c;--accent:#1d4ed8;
+}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,#eef3fb 0%,#f8fafc 60%);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink)}
+.shell{max-width:1180px;margin:0 auto;padding:20px}
+h1{margin:0 0 8px;font-size:1.45rem}
+.sub{margin:0 0 18px;color:var(--muted)}
+.grid{display:grid;grid-template-columns:340px 1fr;gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+input,select,button,textarea{font:inherit}
+input,select,textarea{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff}
+button{padding:9px 12px;border:1px solid #cbd5e1;background:#f8fafc;border-radius:10px;cursor:pointer}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.danger{background:#fff;color:var(--bad);border-color:#fecaca}
+button:disabled{opacity:.55;cursor:not-allowed}
+.list{display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto}
+.item{padding:10px;border:1px solid #dbe3ef;border-radius:10px;background:#f8fbff;cursor:pointer}
+.item.active{border-color:#93c5fd;background:#eef5ff}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.72rem}
+.b-ok{background:#dcfce7;color:#166534}.b-warn{background:#fef3c7;color:#92400e}.b-bad{background:#fee2e2;color:#991b1b}
+.b-muted{background:#e2e8f0;color:#334155}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e2e8f0;padding:12px;border-radius:10px;font-size:.78rem;max-height:340px;overflow:auto}
+.hidden{display:none}
+.mt{margin-top:10px}
+.section-title{font-size:.94rem;font-weight:700;margin:0 0 8px}
+.gate{padding:8px;border:1px solid #dbe3ef;border-radius:10px;margin-bottom:8px;background:#fff}
+.fix{font-size:.78rem;color:#334155}
+@media (max-width:980px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+  <div class="shell">
+    <h1>Quote-to-Order ERP Wizard</h1>
+    <p class="sub">Connect Odoo + Business Central + Dynamics, run dry-run, review gates, and launch with full KPI traceability.</p>
+
+    <div id="authCard" class="card">
+      <div class="section-title">Sign In</div>
+      <div class="row">
+        <input id="apiKeyInput" type="password" placeholder="a2a_k_..." />
+        <button id="loginBtn" class="primary">Login</button>
+      </div>
+      <div class="fix mt">No key yet? Run <span class="mono">bun src/cli.ts auth-create-key --name wizard-admin --role admin</span></div>
+      <div id="authMsg" class="mt"></div>
+    </div>
+
+    <div id="appRoot" class="hidden">
+      <div class="row" style="justify-content:space-between;margin:12px 0 10px">
+        <div id="userLine" class="mono"></div>
+        <div class="row">
+          <button id="refreshBootstrapBtn">Refresh</button>
+          <button id="logoutBtn">Logout</button>
+        </div>
+      </div>
+      <div class="grid">
+        <div>
+          <div class="card">
+            <div class="section-title">Create Wizard Session</div>
+            <label>Customer Name</label>
+            <input id="customerNameInput" placeholder="Acme GmbH" />
+            <label class="mt">Workspace</label>
+            <select id="workspaceSelect"></select>
+            <label class="mt">Or new workspace name</label>
+            <input id="workspaceNameInput" placeholder="Acme Workspace" />
+            <div class="row mt">
+              <button id="createSessionBtn" class="primary">Create Session</button>
+            </div>
+            <div id="createMsg" class="mt"></div>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Sessions</div>
+            <div id="sessionList" class="list"></div>
+          </div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="section-title">Actions</div>
+            <div class="row">
+              <button data-action="connect-odoo">Connect Odoo</button>
+              <button data-action="connect-business-central">Connect BC</button>
+              <button data-action="connect-dynamics">Connect Dynamics</button>
+            </div>
+            <div class="row mt">
+              <button data-action="test-odoo">Test Odoo</button>
+              <button data-action="test-business-central">Test BC</button>
+              <button data-action="test-dynamics">Test Dynamics</button>
+            </div>
+            <div class="row mt">
+              <button data-action="master-sync">Master Data Auto-Sync</button>
+              <button data-action="q2o-dry-run">Q2O Dry-Run</button>
+            </div>
+            <div class="row mt">
+              <button data-action="launch-sandbox">Launch Sandbox</button>
+              <button data-action="launch-production" class="primary">Launch Production</button>
+              <button data-action="load-report">Load Report</button>
+            </div>
+            <div class="row mt">
+              <button data-action="run-followups">Run Auto Follow-ups</button>
+              <button data-action="load-comms-kpis">Load Comms + Deal KPIs</button>
+              <button data-action="load-personality-insights">Load Personality Insights</button>
+              <button data-action="writeback-followups">Writeback Open Follow-ups</button>
+            </div>
+            <div class="row mt">
+              <button data-action="sync-revenue-graph">Sync Revenue Graph</button>
+              <button data-action="load-thread-signals">Load Thread Signals</button>
+              <button data-action="recommend-next-action">Recommend Next Action</button>
+              <button data-action="approve-proposal">Approve Proposal</button>
+              <button data-action="reject-proposal">Reject Proposal</button>
+              <button data-action="run-deal-rescue">Run Deal Rescue</button>
+              <button data-action="load-revenue-intel">Load Revenue Intelligence</button>
+            </div>
+            <div class="row mt">
+              <button data-action="import-gmail-demo">Import Gmail Demo Mail</button>
+              <button data-action="import-outlook-demo">Import Outlook Demo Mail</button>
+              <button data-action="pull-gmail-mailbox">Pull Gmail API</button>
+              <button data-action="pull-outlook-mailbox">Pull Outlook API</button>
+            </div>
+            <div class="row mt">
+              <button data-action="oauth-connect-gmail">OAuth Connect Gmail</button>
+              <button data-action="oauth-connect-outlook">OAuth Connect Outlook</button>
+            </div>
+            <div class="row mt">
+              <button data-action="connect-gmail-mailbox">Connect Gmail Mailbox</button>
+              <button data-action="connect-outlook-mailbox">Connect Outlook Mailbox</button>
+              <button data-action="refresh-gmail-mailbox">Refresh Gmail Token</button>
+              <button data-action="refresh-outlook-mailbox">Refresh Outlook Token</button>
+              <button data-action="list-mailbox-connections">List Mailboxes</button>
+            </div>
+            <div id="actionMsg" class="mt"></div>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Gates</div>
+            <div id="gatesPane"></div>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Session JSON</div>
+            <pre id="sessionJson">{}</pre>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Report JSON</div>
+            <pre id="reportJson">{}</pre>
+          </div>
+          <div class="card mt">
+            <div class="section-title">Revenue Intelligence</div>
+            <div class="row">
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Conversion Lift</div>
+                <div id="riConversionLift" class="mono">-</div>
+              </div>
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Recovered Revenue</div>
+                <div id="riRecoveredRevenue" class="mono">-</div>
+              </div>
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Forecast Error</div>
+                <div id="riForecastError" class="mono">-</div>
+              </div>
+            </div>
+            <div class="row mt">
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Follow-up SLA</div>
+                <div id="riFollowupSla" class="mono">-</div>
+              </div>
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Silent Deals</div>
+                <div id="riSilentDeals" class="mono">-</div>
+              </div>
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Consent Coverage</div>
+                <div id="riConsentCoverage" class="mono">-</div>
+              </div>
+            </div>
+            <div class="row mt">
+              <div class="item" style="flex:1;min-width:170px">
+                <div class="fix">Time to 1st Conversion</div>
+                <div id="riTimeToFirstConversion" class="mono">-</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+<script>
+(() => {
+  let bootstrapData = null;
+  let selectedSessionId = "";
+  let lastAutopilotProposalId = "";
+
+  const $ = (id) => document.getElementById(id);
+  const authCard = $("authCard");
+  const appRoot = $("appRoot");
+  const authMsg = $("authMsg");
+  const createMsg = $("createMsg");
+  const actionMsg = $("actionMsg");
+  const sessionJson = $("sessionJson");
+  const reportJson = $("reportJson");
+  const sessionList = $("sessionList");
+  const workspaceSelect = $("workspaceSelect");
+  const gatesPane = $("gatesPane");
+  const userLine = $("userLine");
+  const riConversionLift = $("riConversionLift");
+  const riRecoveredRevenue = $("riRecoveredRevenue");
+  const riForecastError = $("riForecastError");
+  const riFollowupSla = $("riFollowupSla");
+  const riSilentDeals = $("riSilentDeals");
+  const riConsentCoverage = $("riConsentCoverage");
+  const riTimeToFirstConversion = $("riTimeToFirstConversion");
+
+  function fmtNum(value, digits) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return "-";
+    return num.toFixed(digits);
+  }
+
+  function fmtPct(value) {
+    const out = fmtNum(value, 1);
+    return out === "-" ? "-" : out + "%";
+  }
+
+  function fmtEur(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return "-";
+    return "€" + Math.round(num).toLocaleString();
+  }
+
+  function setKpi(el, value) {
+    if (!el) return;
+    el.textContent = value;
+  }
+
+  function resetRevenuePanel() {
+    setKpi(riConversionLift, "-");
+    setKpi(riRecoveredRevenue, "-");
+    setKpi(riForecastError, "-");
+    setKpi(riFollowupSla, "-");
+    setKpi(riSilentDeals, "-");
+    setKpi(riConsentCoverage, "-");
+    setKpi(riTimeToFirstConversion, "-");
+  }
+
+  async function getCurrentSession() {
+    if (!selectedSessionId) throw new Error("Select a session first.");
+    return await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+  }
+
+  async function loadRevenuePanel(workspaceId) {
+    const intelligence = await api("GET", "/v1/analytics/revenue-intelligence?workspaceId=" + encodeURIComponent(workspaceId));
+    const consent = await api("GET", "/v1/trust/consent/status?workspaceId=" + encodeURIComponent(workspaceId) + "&limit=200");
+
+    const metrics = intelligence.metrics || {};
+    setKpi(riConversionLift, fmtPct(metrics.conversionLiftPct));
+    setKpi(riRecoveredRevenue, fmtEur(metrics.recoveredRevenueEur));
+    setKpi(riForecastError, fmtPct(metrics.forecastErrorPct));
+    setKpi(riFollowupSla, fmtPct(metrics.followupSlaAdherencePct));
+    setKpi(riSilentDeals, Number(metrics.silentDealCount || 0).toString());
+    setKpi(riTimeToFirstConversion, metrics.timeToFirstOrderConversionHours === null || metrics.timeToFirstOrderConversionHours === undefined
+      ? "-"
+      : fmtNum(metrics.timeToFirstOrderConversionHours, 2) + "h");
+
+    const summary = consent.summary || {};
+    const optIn = Number(summary.opt_in || 0);
+    const optOut = Number(summary.opt_out || 0);
+    const unknown = Number(summary.unknown || 0);
+    const known = optIn + optOut;
+    const total = known + unknown;
+    const coverage = total > 0 ? Math.round((known / total) * 100) : 0;
+    setKpi(riConsentCoverage, coverage + "% known (" + optIn + " in / " + optOut + " out)");
+    return { intelligence, consent };
+  }
+
+  const defaultConnectPayload = (connector) => {
+    if (connector === "odoo") {
+      return {
+        authMode: "api-key",
+        config: { apiKey: "replace-with-odoo-api-key" },
+        metadata: { odooPlan: "custom" },
+        enabled: true
+      };
+    }
+    if (connector === "business-central") {
+      return {
+        authMode: "oauth",
+        config: { baseUrl: "https://api.businesscentral.dynamics.com", accessToken: "replace-with-token" },
+        metadata: { webhookExpiresAt: new Date(Date.now() + (48 * 60 * 60 * 1000)).toISOString() },
+        enabled: true
+      };
+    }
+    return {
+      authMode: "oauth",
+      config: { baseUrl: "https://example.crm.dynamics.com", accessToken: "replace-with-token" },
+      metadata: {},
+      enabled: true
+    };
+  };
+
+  window.addEventListener("message", async (event) => {
+    if (event.origin !== window.location.origin) return;
+    const data = (event && typeof event.data === "object" && event.data) ? event.data : {};
+    if (data.type !== "wizard-mailbox-oauth") return;
+    if (data.status === "ok") {
+      setMessage(actionMsg, "Mailbox OAuth connected: " + data.provider, "ok");
+      try {
+        if (selectedSessionId) {
+          const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+          const connections = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/mailboxes");
+          reportJson.textContent = JSON.stringify({
+            oauthCallback: data,
+            connections,
+          }, null, 2);
+          await refreshBootstrap();
+          await loadSession(selectedSessionId);
+        }
+      } catch (err) {
+        setMessage(actionMsg, String(err.message || err), "error");
+      }
+      return;
+    }
+    setMessage(actionMsg, "Mailbox OAuth failed: " + (data.reason || "unknown"), "error");
+    reportJson.textContent = JSON.stringify(data, null, 2);
+  });
+
+  async function api(method, url, body) {
+    const init = { method, headers: { "Content-Type": "application/json" } };
+    if (body !== undefined) init.body = JSON.stringify(body);
+    const res = await fetch(url, init);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  }
+
+  function setMessage(el, text, kind) {
+    el.textContent = text || "";
+    el.style.color = kind === "error" ? "#b91c1c" : (kind === "ok" ? "#0f766e" : "#334155");
+  }
+
+  function badge(status) {
+    if (status === "green" || status === "done" || status === "launched") return '<span class="badge b-ok">' + status + "</span>";
+    if (status === "overridden" || status === "pending" || status === "active") return '<span class="badge b-warn">' + status + "</span>";
+    if (status === "red" || status === "blocked") return '<span class="badge b-bad">' + status + "</span>";
+    return '<span class="badge b-muted">' + status + "</span>";
+  }
+
+  function renderBootstrap() {
+    if (!bootstrapData) return;
+    userLine.textContent = "user=" + bootstrapData.user.name + " role=" + bootstrapData.user.role + " workspaceScope=" + (bootstrapData.user.workspace || "global");
+    workspaceSelect.innerHTML = "";
+    (bootstrapData.workspaces || []).forEach((ws) => {
+      const opt = document.createElement("option");
+      opt.value = ws.id;
+      opt.textContent = ws.name + " (" + ws.id + ")";
+      workspaceSelect.appendChild(opt);
+    });
+    sessionList.innerHTML = "";
+    (bootstrapData.sessions || []).forEach((session) => {
+      const el = document.createElement("div");
+      el.className = "item" + (selectedSessionId === session.id ? " active" : "");
+      el.innerHTML = "<div><strong>" + session.customerName + "</strong></div><div class='mono'>" + session.id + "</div><div>" + badge(session.status) + "</div>";
+      el.onclick = () => { loadSession(session.id); };
+      sessionList.appendChild(el);
+    });
+  }
+
+  function renderGates(session) {
+    gatesPane.innerHTML = "";
+    const gates = Array.isArray(session.gates) ? session.gates : [];
+    gates.forEach((gate) => {
+      const wrap = document.createElement("div");
+      wrap.className = "gate";
+      wrap.innerHTML =
+        "<div><strong>" + gate.title + "</strong> " + badge(gate.status) + "</div>" +
+        "<div class='mono'>id=" + gate.id + " class=" + gate.class + "</div>" +
+        "<div class='fix'>" + (gate.reason || "") + "</div>" +
+        "<div class='fix'><em>Fix:</em> " + (gate.fixPath || "") + "</div>";
+      if (gate.class === "overridable" && gate.status === "red") {
+        const btn = document.createElement("button");
+        btn.textContent = "Override";
+        btn.onclick = async () => {
+          const reason = window.prompt("Override reason");
+          if (!reason) return;
+          const approvedBy = window.prompt("Approved by", bootstrapData.user.name || "ops");
+          if (!approvedBy) return;
+          try {
+            const updated = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/gates/" + gate.id + "/override", { reason, approvedBy });
+            sessionJson.textContent = JSON.stringify(updated, null, 2);
+            renderGates(updated);
+            setMessage(actionMsg, "Gate overridden: " + gate.id, "ok");
+          } catch (err) {
+            setMessage(actionMsg, String(err.message || err), "error");
+          }
+        };
+        wrap.appendChild(btn);
+      }
+      gatesPane.appendChild(wrap);
+    });
+  }
+
+  async function refreshBootstrap() {
+    try {
+      bootstrapData = await api("GET", "/v1/wizard/bootstrap");
+      authCard.classList.add("hidden");
+      appRoot.classList.remove("hidden");
+      renderBootstrap();
+      if (bootstrapData.readOnly) {
+        setMessage(actionMsg, "Read-only mode: viewer key detected.", "warn");
+      }
+    } catch {
+      bootstrapData = null;
+      authCard.classList.remove("hidden");
+      appRoot.classList.add("hidden");
+      resetRevenuePanel();
+    }
+  }
+
+  async function loadSession(id) {
+    try {
+      selectedSessionId = id;
+      const session = await api("GET", "/v1/wizard/sessions/" + id);
+      sessionJson.textContent = JSON.stringify(session, null, 2);
+      renderGates(session);
+      if (session && session.workspaceId) {
+        try {
+          await loadRevenuePanel(session.workspaceId);
+        } catch {}
+      }
+      renderBootstrap();
+      setMessage(actionMsg, "Session loaded.", "ok");
+    } catch (err) {
+      setMessage(actionMsg, String(err.message || err), "error");
+    }
+  }
+
+  $("loginBtn").onclick = async () => {
+    try {
+      await api("POST", "/v1/wizard/auth/login", { apiKey: $("apiKeyInput").value.trim() });
+      setMessage(authMsg, "Login successful.", "ok");
+      $("apiKeyInput").value = "";
+      await refreshBootstrap();
+    } catch (err) {
+      setMessage(authMsg, String(err.message || err), "error");
+    }
+  };
+
+  $("logoutBtn").onclick = async () => {
+    await api("POST", "/v1/wizard/auth/logout");
+    selectedSessionId = "";
+    lastAutopilotProposalId = "";
+    sessionJson.textContent = "{}";
+    reportJson.textContent = "{}";
+    gatesPane.innerHTML = "";
+    resetRevenuePanel();
+    await refreshBootstrap();
+  };
+
+  $("refreshBootstrapBtn").onclick = refreshBootstrap;
+
+  $("createSessionBtn").onclick = async () => {
+    try {
+      const customerName = $("customerNameInput").value.trim();
+      const workspaceName = $("workspaceNameInput").value.trim();
+      const workspaceId = workspaceName ? undefined : (workspaceSelect.value || undefined);
+      const payload = { customerName, workspaceId, workspaceName: workspaceName || undefined, product: "quote-to-order" };
+      const session = await api("POST", "/v1/wizard/sessions", payload);
+      selectedSessionId = session.id;
+      setMessage(createMsg, "Session created: " + session.id, "ok");
+      $("workspaceNameInput").value = "";
+      await refreshBootstrap();
+      await loadSession(session.id);
+    } catch (err) {
+      setMessage(createMsg, String(err.message || err), "error");
+    }
+  };
+
+  async function connectorAction(kind, connector) {
+    if (!selectedSessionId) return setMessage(actionMsg, "Select a session first.", "error");
+    try {
+      if (kind === "connect") {
+        const raw = window.prompt("Connector payload JSON", JSON.stringify(defaultConnectPayload(connector), null, 2));
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/connectors/" + connector + "/connect", payload);
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      } else {
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/connectors/" + connector + "/test", {});
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      }
+      await refreshBootstrap();
+      await loadSession(selectedSessionId);
+      setMessage(actionMsg, kind + " " + connector + " done.", "ok");
+    } catch (err) {
+      setMessage(actionMsg, String(err.message || err), "error");
+    }
+  }
+
+  async function doAction(action) {
+    if (!selectedSessionId && action !== "load-report") {
+      setMessage(actionMsg, "Select a session first.", "error");
+      return;
+    }
+    try {
+      if (action.startsWith("connect-")) return connectorAction("connect", action.slice("connect-".length));
+      if (action.startsWith("test-")) return connectorAction("test", action.slice("test-".length));
+      if (action === "master-sync") {
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/master-data/auto-sync", {});
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      } else if (action === "q2o-dry-run") {
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/q2o/dry-run", { amount: 1000, currency: "EUR", decidedBy: bootstrapData.user.name });
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      } else if (action === "launch-sandbox") {
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/launch", { mode: "sandbox" });
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      } else if (action === "launch-production") {
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/launch", { mode: "production" });
+        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      } else if (action === "load-report") {
+        if (!selectedSessionId) return setMessage(actionMsg, "Select a session first.", "error");
+        const out = await api("GET", "/v1/wizard/sessions/" + selectedSessionId + "/report");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "import-gmail-demo" || action === "import-outlook-demo") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const provider = action === "import-gmail-demo" ? "gmail" : "outlook";
+        const defaultQuoteId = "Q-DEMO-" + String(Date.now()).slice(-6);
+        const quoteExternalId = window.prompt("Quote External ID", defaultQuoteId);
+        if (!quoteExternalId) return;
+        const connectorType = provider === "outlook" ? "dynamics" : "odoo";
+        const domain = "yourcompany.com";
+        const messageId = provider + "-" + Date.now();
+        await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/quotes/sync", {
+          connectorType,
+          quoteExternalId,
+          state: "submitted",
+          amount: provider === "outlook" ? 18000 : 12000,
+          currency: "EUR",
+          idempotencyKey: "wizard-seed-" + messageId,
+          payload: { source: "wizard-demo-mail-import" },
+        });
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/import", {
+          provider,
+          workspaceDomains: [domain],
+          defaultConnectorType: connectorType,
+          runFollowupEngine: true,
+          followupAfterHours: 1,
+          now: new Date(Date.now() + (2 * 60 * 60 * 1000)).toISOString(),
+          assignedTo: bootstrapData.user.name,
+          messages: [
+            {
+              messageId,
+              threadId: "thread-" + messageId,
+              quoteExternalId,
+              subject: "Re: " + quoteExternalId + " budget and next steps",
+              bodyText: provider === "outlook"
+                ? "This is too expensive. We need a discount before we proceed."
+                : "Can you share a status update for this quote? We need approval this week.",
+              fromAddress: "buyer@customer.example",
+              toAddress: "ops@" + domain,
+              receivedAt: new Date().toISOString(),
+            },
+          ],
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "oauth-connect-gmail" || action === "oauth-connect-outlook") {
+        const provider = action === "oauth-connect-gmail" ? "gmail" : "outlook";
+        const defaultPayload = provider === "gmail"
+          ? {
+            clientId: "replace-with-google-client-id",
+            clientSecret: "replace-with-google-client-secret",
+            userId: "me",
+            scopes: [
+              "https://www.googleapis.com/auth/gmail.readonly",
+              "openid",
+              "email",
+            ],
+          }
+          : {
+            clientId: "replace-with-microsoft-client-id",
+            clientSecret: "replace-with-microsoft-client-secret",
+            tenantId: "common",
+            userId: "me",
+            scopes: ["offline_access", "Mail.Read", "User.Read"],
+          };
+        const raw = window.prompt("OAuth start payload JSON", JSON.stringify(defaultPayload, null, 2));
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/mailboxes/" + provider + "/oauth/start", payload);
+        reportJson.textContent = JSON.stringify(out, null, 2);
+        const popup = window.open(out.authUrl, "wizard-mailbox-oauth", "width=560,height=760");
+        if (!popup) {
+          setMessage(actionMsg, "Popup blocked. Open authUrl manually from report JSON.", "error");
+        } else {
+          popup.focus();
+          setMessage(actionMsg, "OAuth window opened for " + provider + ".", "ok");
+        }
+      } else if (action === "connect-gmail-mailbox" || action === "connect-outlook-mailbox") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const provider = action === "connect-gmail-mailbox" ? "gmail" : "outlook";
+        const userId = window.prompt("Mailbox userId", "me");
+        if (!userId) return;
+        const defaultPayload = provider === "gmail"
+          ? {
+            provider,
+            userId,
+            clientId: "replace-with-google-client-id",
+            clientSecret: "replace-with-google-client-secret",
+            refreshToken: "replace-with-google-refresh-token",
+            accessToken: "replace-with-google-access-token",
+            scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+            metadata: { source: "wizard" },
+            enabled: true,
+          }
+          : {
+            provider,
+            userId,
+            tenantId: "common",
+            clientId: "replace-with-microsoft-client-id",
+            clientSecret: "replace-with-microsoft-client-secret",
+            refreshToken: "replace-with-microsoft-refresh-token",
+            accessToken: "replace-with-microsoft-access-token",
+            scopes: ["Mail.Read", "offline_access"],
+            metadata: { source: "wizard" },
+            enabled: true,
+          };
+        const raw = window.prompt("Mailbox connection payload JSON", JSON.stringify(defaultPayload, null, 2));
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/mailboxes/connect", payload);
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "refresh-gmail-mailbox" || action === "refresh-outlook-mailbox") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const provider = action === "refresh-gmail-mailbox" ? "gmail" : "outlook";
+        const userId = window.prompt("Mailbox userId", "me");
+        if (!userId) return;
+        const force = window.confirm("Force token refresh now?");
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/mailboxes/" + provider + "/refresh", {
+          userId,
+          force,
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "list-mailbox-connections") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/mailboxes");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "pull-gmail-mailbox" || action === "pull-outlook-mailbox") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const provider = action === "pull-gmail-mailbox" ? "gmail" : "outlook";
+        const userId = window.prompt("Mailbox userId (stored connection)", "me");
+        if (!userId) return;
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/pull", {
+          provider,
+          userId,
+          useStoredConnection: true,
+          limit: 25,
+          workspaceDomains: ["yourcompany.com"],
+          runFollowupEngine: true,
+          followupAfterHours: 1,
+          now: new Date(Date.now() + (2 * 60 * 60 * 1000)).toISOString(),
+          assignedTo: bootstrapData.user.name,
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "run-followups") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/followups/run", {
+          followupAfterHours: 48,
+          assignedTo: bootstrapData.user.name,
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "writeback-followups") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/followups/writeback", {
+          status: "open",
+          limit: 20,
+          statusOnSuccess: "sent",
+          assignedTo: bootstrapData.user.name,
+        });
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-comms-kpis") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/kpis");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-personality-insights") {
+        const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
+        const out = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/personality");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "sync-revenue-graph") {
+        const currentSession = await getCurrentSession();
+        const raw = window.prompt(
+          "Revenue graph sync payload JSON",
+          JSON.stringify({
+            mode: "incremental",
+            includeCommunications: true,
+            includeMasterData: true,
+            limit: 5000,
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/revenue-graph/workspaces/" + currentSession.workspaceId + "/sync", payload);
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-thread-signals") {
+        const currentSession = await getCurrentSession();
+        let threadId = (window.prompt("Thread ID (empty = auto-select from latest sync)", "") || "").trim();
+        let autoSync = null;
+        if (!threadId) {
+          autoSync = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/threads/sync", {
+            source: "existing",
+            limit: 25,
+            windowDays: 30,
+          });
+          const threads = Array.isArray(autoSync && autoSync.threads)
+            ? autoSync.threads
+            : [];
+          if (threads.length > 0) {
+            const candidate = threads[0];
+            threadId = candidate && typeof candidate.threadId === "string" ? candidate.threadId : "";
+          }
+          if (!threadId) {
+            throw new Error("No communication thread found. Import or pull communication data first.");
+          }
+        }
+        const out = await api(
+          "GET",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/threads/" + encodeURIComponent(threadId)
+            + "/signals?includeEvents=true&eventLimit=100",
+        );
+        reportJson.textContent = JSON.stringify({
+          threadId,
+          autoSync,
+          signals: out,
+        }, null, 2);
+      } else if (action === "recommend-next-action") {
+        const currentSession = await getCurrentSession();
+        const quoteExternalId = window.prompt("Quote External ID", "Q-DEMO-" + String(Date.now()).slice(-6));
+        if (!quoteExternalId) return;
+        const raw = window.prompt(
+          "Recommendation payload JSON",
+          JSON.stringify({
+            quoteExternalId,
+            mode: "create_proposal",
+            requireApproval: true,
+            channel: "email",
+            assignedTo: bootstrapData.user.name,
+            metadata: { source: "wizard" },
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/recommendations/next-action", payload);
+        const proposal = out && out.proposal;
+        if (proposal && typeof proposal === "object" && typeof proposal.id === "string") {
+          lastAutopilotProposalId = proposal.id;
+        }
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "approve-proposal") {
+        const currentSession = await getCurrentSession();
+        const proposalId = (window.prompt("Proposal ID", lastAutopilotProposalId || "") || "").trim();
+        if (!proposalId) return;
+        const raw = window.prompt(
+          "Approve payload JSON",
+          JSON.stringify({
+            approvedBy: bootstrapData.user.name,
+            execute: true,
+            note: "Approved from wizard",
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api(
+          "POST",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/autopilot/proposals/" + encodeURIComponent(proposalId) + "/approve",
+          payload,
+        );
+        lastAutopilotProposalId = proposalId;
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "reject-proposal") {
+        const currentSession = await getCurrentSession();
+        const proposalId = (window.prompt("Proposal ID", lastAutopilotProposalId || "") || "").trim();
+        if (!proposalId) return;
+        const raw = window.prompt(
+          "Reject payload JSON",
+          JSON.stringify({
+            rejectedBy: bootstrapData.user.name,
+            reason: "Not aligned with customer context",
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api(
+          "POST",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/autopilot/proposals/" + encodeURIComponent(proposalId) + "/reject",
+          payload,
+        );
+        lastAutopilotProposalId = proposalId;
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "run-deal-rescue") {
+        const currentSession = await getCurrentSession();
+        const raw = window.prompt(
+          "Deal rescue payload JSON",
+          JSON.stringify({
+            mode: "batch",
+            minStagnationHours: 72,
+            maxQuotes: 25,
+            assignedTo: bootstrapData.user.name,
+            dryRun: false,
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api("POST", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/deal-rescue/run", payload);
+        const proposals = Array.isArray(out && out.proposals)
+          ? out.proposals
+          : [];
+        if (proposals.length > 0 && typeof proposals[0].id === "string") {
+          lastAutopilotProposalId = proposals[0].id;
+        }
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-revenue-intel") {
+        const currentSession = await getCurrentSession();
+        const out = await loadRevenuePanel(currentSession.workspaceId);
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      }
+      if (selectedSessionId) {
+        await refreshBootstrap();
+        await loadSession(selectedSessionId);
+      }
+      setMessage(actionMsg, "Action complete: " + action, "ok");
+    } catch (err) {
+      setMessage(actionMsg, String(err.message || err), "error");
+    }
+  }
+
+  Array.from(document.querySelectorAll("[data-action]")).forEach((button) => {
+    button.addEventListener("click", () => doAction(button.getAttribute("data-action")));
+  });
+
+  refreshBootstrap();
+})();
+</script>
+</body></html>`;
+  });
 
   // ── Dashboard ─────────────────────────────────────────────────
   app.get("/dashboard", async (_req, reply) => {
@@ -5148,18 +7267,6 @@ ${Object.entries(breakers).map(([name, b]: [string, any]) => `
   // Register cloud health routes (/healthz, /readyz, /health)
   registerHealthRoutes(app, ORCHESTRATOR_VERSION);
 
-  app.get("/healthz", async () => {
-    const health: Record<string, unknown> = {};
-    for (const w of WORKERS) {
-      health[w.name] = workerHealth.get(w.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
-    }
-    for (const rw of REMOTE_WORKERS) {
-      const h = workerHealth.get(rw.name) ?? { healthy: false, failCount: 0, lastCheck: 0 };
-      health[`remote:${rw.name}`] = { ...h, url: rw.url };
-    }
-    return { status: "ok", agent: "orchestrator", uptime: process.uptime(), workers: health };
-  });
-
   const httpPort = CONFIG.server.port;
   await app.listen({ port: httpPort, host: "0.0.0.0" });
   const authStatus = A2A_API_KEY ? `auth: Bearer required for remote` : `auth: none (set A2A_API_KEY to enable)`;
@@ -5223,8 +7330,9 @@ async function main() {
   // Register graceful shutdown handlers
   installShutdownHandlers();
   const stopRenewalScheduler = startConnectorRenewalScheduler();
+  const stopFollowupWritebackScheduler = startFollowupWritebackScheduler();
   const stopSnapshotScheduler = startConnectorRenewalSnapshotScheduler();
-  onShutdown(async () => { stopRenewalScheduler(); stopSnapshotScheduler(); flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
+  onShutdown(async () => { stopRenewalScheduler(); stopFollowupWritebackScheduler(); stopSnapshotScheduler(); flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
 
   // Start periodic health checks (every 30s)
   pollWorkerHealth().catch(() => {});

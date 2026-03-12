@@ -2,7 +2,7 @@
 // Role-based access control (RBAC) and API key management.
 // Keys and roles are stored in ~/.a2a-mcp/auth.json (mode 0o600).
 
-import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { randomBytes, createHash } from "crypto";
@@ -67,34 +67,62 @@ const ROLE_PERMISSIONS: Record<Role, Set<string>> = {
 
 /** In-memory cache of the auth store — populated on first read, updated on every write. */
 let authCache: AuthStore | null = null;
+/** Last observed file signature for AUTH_FILE so we can detect out-of-process edits. */
+let authCacheSignature: string | null = null;
+
+function getAuthFileSignature(): string | null {
+  if (!existsSync(AUTH_FILE)) return null;
+  try {
+    const stat = statSync(AUTH_FILE);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
 
 function readStore(): AuthStore {
+  const diskSignature = getAuthFileSignature();
   if (authCache !== null) {
     // Detect external deletion (e.g., in tests or manual cleanup):
     // if the backing file was removed since last cache load, reset the cache.
-    if (!existsSync(AUTH_FILE)) {
+    if (diskSignature === null) {
       authCache = { keys: [] };
+      authCacheSignature = null;
+      return authCache;
+    }
+    // Detect external modifications (e.g. CLI edits while server is running).
+    if (authCacheSignature !== diskSignature) {
+      try {
+        authCache = JSON.parse(readFileSync(AUTH_FILE, "utf-8")) as AuthStore;
+      } catch {
+        authCache = { keys: [] };
+      }
+      authCacheSignature = diskSignature;
     }
     return authCache;
   }
-  if (!existsSync(AUTH_FILE)) {
+  if (diskSignature === null) {
     authCache = { keys: [] };
+    authCacheSignature = null;
     return authCache;
   }
   try {
     authCache = JSON.parse(readFileSync(AUTH_FILE, "utf-8")) as AuthStore;
+    authCacheSignature = diskSignature;
     return authCache;
   } catch {
     authCache = { keys: [] };
+    authCacheSignature = diskSignature;
     return authCache;
   }
 }
 
 function writeStore(store: AuthStore): void {
-  authCache = store; // keep cache in sync before the disk write
   if (!existsSync(AUTH_DIR)) mkdirSync(AUTH_DIR, { recursive: true });
   writeFileSync(AUTH_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
   chmodSync(AUTH_FILE, 0o600);
+  authCache = store; // keep cache in sync after successful disk write
+  authCacheSignature = getAuthFileSignature();
 }
 
 /**
@@ -103,6 +131,7 @@ function writeStore(store: AuthStore): void {
  */
 export function invalidateAuthCache(): void {
   authCache = null;
+  authCacheSignature = null;
 }
 
 // ── Deferred lastUsedAt updates ─────────────────────────────────
