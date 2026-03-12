@@ -6744,6 +6744,168 @@ function buildQuoteNextAction(
   };
 }
 
+type PersonalityReplyTone = "balanced" | "direct" | "empathetic" | "urgent";
+
+type PersonalityReplyVariant = {
+  index: number;
+  label: string;
+  tone: PersonalityReplyTone;
+  subject: string;
+  message: string;
+  reasonCodes: string[];
+  expectedReplyLikelihoodPct: number;
+  expectedDealProbabilityPct: number;
+  stylePlaybook: string;
+  evidence: string;
+};
+
+const PERSONALITY_REPLY_LABELS: Record<PersonalityReplyTone, string[]> = {
+  balanced: ["Balanced Value", "Decision Bridge", "Risk Clarifier", "Outcome Summary", "Polite Close"],
+  direct: ["Direct CTA", "Binary Choice", "Fast Decision", "Owner Escalation", "Commitment Ask"],
+  empathetic: ["Empathy First", "Supportive Plan", "Trust Builder", "Concern Address", "Collaborative Next Step"],
+  urgent: ["Time Window", "Priority Escalation", "Deadline Guard", "Critical Path", "Immediate Action"],
+};
+
+const PERSONALITY_REPLY_OPENERS: Record<PersonalityReplyTone, string[]> = {
+  balanced: [
+    "Thank you for the ongoing review. I wanted to keep the next step clear and low effort.",
+    "I am sharing a concise update so your team can decide quickly without extra back-and-forth.",
+    "Here is a short status summary focused on value, risk, and execution readiness.",
+  ],
+  direct: [
+    "Quick update and clear next step below.",
+    "To keep momentum, we need one concrete decision now.",
+    "I will keep this short so we can move immediately.",
+  ],
+  empathetic: [
+    "Thanks for the candid feedback so far. We want to make this easy for your team.",
+    "I understand there are internal constraints. We can adapt the path without losing momentum.",
+    "Appreciate the collaboration. Here is a plan that reduces pressure while keeping progress.",
+  ],
+  urgent: [
+    "This quote is entering a critical timing window and needs a decision path today.",
+    "To avoid revenue delay and rework, we should lock the next step now.",
+    "We are close to execution, but timing risk is rising and needs immediate coordination.",
+  ],
+};
+
+const PERSONALITY_REPLY_CTA: Record<PersonalityReplyTone, string[]> = {
+  balanced: [
+    "Would a 15-minute alignment slot tomorrow work for final confirmation?",
+    "Please confirm the preferred path (approve now or list remaining blockers) and we will execute accordingly.",
+    "If helpful, I can send a one-page summary for internal sign-off today.",
+  ],
+  direct: [
+    "Please choose one: approve now, or send the exact blocker list by end of day.",
+    "Reply with YES to proceed or BLOCKED with the owner of the blocker.",
+    "Can we lock the decision by 16:00 so implementation can start on schedule?",
+  ],
+  empathetic: [
+    "If there is concern around scope or budget, we can adjust in a way that still protects outcomes.",
+    "Share the biggest concern and I will return with a concrete option set within one business day.",
+    "Happy to coordinate with legal/procurement directly to reduce load on your team.",
+  ],
+  urgent: [
+    "Please confirm today whether we proceed now or pause with a named restart date.",
+    "To protect delivery timing, can we schedule a decision call within the next 24 hours?",
+    "If no response by tomorrow, we will mark this as timing-risk and trigger escalation support.",
+  ],
+};
+
+function toContactDisplayName(contactKey: string | null): string {
+  if (!contactKey) return "there";
+  const email = parseEmailAddress(contactKey) ?? contactKey.trim().toLowerCase();
+  const local = email.split("@")[0] ?? "";
+  if (!local) return "there";
+  const cleaned = local.replace(/[._-]+/g, " ").trim();
+  const firstToken = cleaned.split(" ").filter((token) => token.length > 0)[0] ?? "";
+  if (!firstToken) return "there";
+  return firstToken.charAt(0).toUpperCase() + firstToken.slice(1);
+}
+
+function toneAdjustment(tone: PersonalityReplyTone): number {
+  if (tone === "urgent") return 6;
+  if (tone === "empathetic") return 4;
+  if (tone === "direct") return 3;
+  return 2;
+}
+
+function buildPersonalityReplyVariants(args: {
+  quote: QuoteToOrderRecordRow;
+  tone: PersonalityReplyTone;
+  variantCount: number;
+  contactName: string;
+  playbook: string;
+  latestSentiment: "positive" | "neutral" | "negative";
+  reasonCodes: string[];
+  baseDealProbabilityPct: number;
+  personalityConfidence: number;
+  latestEvent: QuoteCommunicationEventRow | null;
+}): PersonalityReplyVariant[] {
+  const labels = PERSONALITY_REPLY_LABELS[args.tone];
+  const openers = PERSONALITY_REPLY_OPENERS[args.tone];
+  const ctas = PERSONALITY_REPLY_CTA[args.tone];
+  const reasonText = args.reasonCodes.join(", ");
+  const latestSnippet = args.latestEvent?.body_text
+    ? args.latestEvent.body_text.slice(0, 140)
+    : "No recent communication snippet available.";
+  const sentimentLine = args.latestSentiment === "negative"
+    ? "We want to resolve concerns quickly and keep risk controlled."
+    : args.latestSentiment === "positive"
+      ? "Signals are positive, and this is a good moment to convert intent into execution."
+      : "Current signals are neutral, so clear next steps are important to avoid stalling.";
+
+  const variants: PersonalityReplyVariant[] = [];
+  for (let i = 0; i < args.variantCount; i += 1) {
+    const label = labels[i % labels.length] ?? `Variant ${i + 1}`;
+    const opener = openers[i % openers.length] ?? openers[0] ?? "Quick update.";
+    const cta = ctas[i % ctas.length] ?? ctas[0] ?? "Please confirm next step.";
+    const dealProbability = bounded(
+      Math.round(args.baseDealProbabilityPct + toneAdjustment(args.tone) + (args.personalityConfidence * 8) + (i * 2)),
+      1,
+      99,
+    );
+    const replyLikelihood = bounded(
+      Math.round(42 + (args.personalityConfidence * 22) + toneAdjustment(args.tone) + (i * 3)),
+      5,
+      95,
+    );
+    const subjectPrefix = args.tone === "urgent"
+      ? "Action required"
+      : args.tone === "direct"
+        ? "Decision needed"
+        : args.tone === "empathetic"
+          ? "Supportive next step"
+          : "Next step update";
+    const subject = `${subjectPrefix}: quote ${args.quote.quote_external_id} (${label})`;
+    const message = [
+      `Hi ${args.contactName},`,
+      "",
+      opener,
+      sentimentLine,
+      `Context: ${reasonText}.`,
+      `Deal signal now: ${dealProbability}% likelihood.`,
+      `Communication guidance: ${args.playbook}`,
+      cta,
+      "",
+      "Best regards",
+    ].join("\n");
+    variants.push({
+      index: i,
+      label,
+      tone: args.tone,
+      subject,
+      message,
+      reasonCodes: [...args.reasonCodes],
+      expectedReplyLikelihoodPct: replyLikelihood,
+      expectedDealProbabilityPct: dealProbability,
+      stylePlaybook: args.playbook,
+      evidence: latestSnippet,
+    });
+  }
+  return variants;
+}
+
 function createAutopilotProposal(args: {
   workspaceId: string;
   quoteExternalId: string;
@@ -6782,6 +6944,65 @@ function createAutopilotProposal(args: {
   const row = getAutopilotProposalRow(args.workspaceId, id);
   if (!row) throw new Error("Failed to create autopilot proposal");
   return toAutopilotProposal(row);
+}
+
+export function listQuoteAutopilotProposals(
+  workspaceIdInput: unknown,
+  filtersInput: unknown = {},
+): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const filters = AutopilotProposalListSchema.parse(filtersInput);
+  const where: string[] = ["workspace_id = ?", "status = ?"];
+  const params: unknown[] = [workspaceId, filters.status];
+  if (filters.actionType) {
+    where.push("action_type = ?");
+    params.push(filters.actionType);
+  }
+  if (filters.quoteExternalId) {
+    where.push("quote_external_id = ?");
+    params.push(filters.quoteExternalId);
+  }
+  params.push(filters.limit);
+  const rows = db.query<AutopilotProposalRow, unknown[]>(
+    `SELECT id, workspace_id, quote_external_id, action_type, channel, suggested_subject, suggested_message, reason_codes_json,
+            expected_impact_json, status, requires_approval, approved_by, approved_at, rejected_by, rejected_at,
+            executed_at, execution_mode, execution_result_json, last_error, metadata_json, created_at, updated_at
+     FROM quote_autopilot_proposals
+     WHERE ${where.join(" AND ")}
+     ORDER BY created_at DESC
+     LIMIT ?`
+  ).all(...params);
+
+  const summaryRows = db.query<{ status: AutopilotProposalStatus; cnt: number }, [string]>(
+    `SELECT status, COUNT(*) as cnt
+     FROM quote_autopilot_proposals
+     WHERE workspace_id = ?
+     GROUP BY status`
+  ).all(workspaceId);
+  const summary: Record<AutopilotProposalStatus, number> = {
+    draft: 0,
+    approved: 0,
+    rejected: 0,
+    executed: 0,
+    failed: 0,
+  };
+  for (const row of summaryRows) {
+    summary[row.status] = row.cnt;
+  }
+
+  const items = rows.map(toAutopilotProposal);
+  return {
+    workspaceId,
+    filters,
+    summary,
+    queue: {
+      nextDraftProposalId: summary.draft > 0 && filters.status === "draft" && items.length > 0 && typeof items[0].id === "string"
+        ? items[0].id
+        : null,
+      draftCount: summary.draft,
+    },
+    items,
+  };
 }
 
 export function createQuoteNextActionRecommendation(
@@ -6828,6 +7049,119 @@ export function createQuoteNextActionRecommendation(
     stagnationHours,
     latestSignal: latestEvent ? toQuoteCommunicationEvent(latestEvent) : null,
     proposal,
+  };
+}
+
+export function createQuotePersonalityReplyRecommendation(
+  workspaceIdInput: unknown,
+  bodyInput: unknown = {},
+): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const body = PersonalityReplyRecommendationSchema.parse(bodyInput);
+  const quote = getQ2oRow(workspaceId, body.quoteExternalId);
+  if (!quote) throw new Error(`Quote '${body.quoteExternalId}' not found for workspace '${workspaceId}'.`);
+
+  const latestEvent = latestQuoteCommunication(workspaceId, body.quoteExternalId);
+  const latestTags = latestEvent ? parseIntentTags(latestEvent.intent_tags_json) : [];
+  const reasonCodes = Array.from(new Set([
+    "personality_adapted_reply",
+    latestEvent?.followup_reason ?? "relationship_followup",
+    ...latestTags,
+  ].filter((item): item is string => typeof item === "string" && item.trim().length > 0)));
+  const contactKeyResolved = body.contactKey
+    ? normalizeContactKey(body.contactKey)
+    : quotePrimaryContactKey(workspaceId, body.quoteExternalId);
+
+  let profileEnvelope: Record<string, unknown> | null = null;
+  let profile = {} as Record<string, unknown>;
+  let personalityType: string | null = null;
+  let personalityConfidence = 0;
+  if (contactKeyResolved) {
+    profileEnvelope = getQuotePersonalityProfile(workspaceId, contactKeyResolved, {
+      includeRecentEvents: true,
+      eventLimit: 10,
+      autoRecompute: true,
+    });
+    profile = asObject(profileEnvelope.profile);
+    personalityType = typeof profile.personalityType === "string" ? profile.personalityType : null;
+    personalityConfidence = bounded(num(profile.confidence), 0, 1);
+  }
+  const communicationPlaybook = personalityType
+    ? (PERSONALITY_STYLE_PLAYBOOK[personalityType] ?? "Use concise, respectful, and value-focused follow-up communication.")
+    : "No stable personality profile yet. Use concise, respectful, value-focused communication and capture more signals.";
+  const baseDealProbability = latestEvent?.estimated_deal_probability_pct ?? estimateDealProbabilityPct(
+    quote.state,
+    quote.amount,
+    latestEvent?.sentiment ?? "neutral",
+    latestTags,
+    workspaceId,
+  );
+  const variants = buildPersonalityReplyVariants({
+    quote,
+    tone: body.tone,
+    variantCount: body.variantCount,
+    contactName: toContactDisplayName(contactKeyResolved),
+    playbook: communicationPlaybook,
+    latestSentiment: latestEvent?.sentiment ?? "neutral",
+    reasonCodes,
+    baseDealProbabilityPct: baseDealProbability,
+    personalityConfidence,
+    latestEvent,
+  });
+  const selectedVariantIndex = Math.max(0, Math.min(body.selectedVariantIndex, Math.max(0, variants.length - 1)));
+  const selectedVariant = variants[selectedVariantIndex] ?? variants[0];
+  if (!selectedVariant) throw new Error("Unable to build personality reply recommendation variants.");
+
+  const expectedImpact = {
+    conversionLiftPct: Number((4.5 + (personalityConfidence * 7.5) + toneAdjustment(body.tone)).toFixed(1)),
+    recoveredValueEur: Math.round(quote.amount * (0.14 + (personalityConfidence * 0.1))),
+    timeSavedHours: Number((0.8 + (personalityConfidence * 0.9)).toFixed(1)),
+    forecastConfidenceLiftPct: Number((2.5 + (personalityConfidence * 9)).toFixed(1)),
+  };
+
+  const proposal = body.createProposal
+    ? createAutopilotProposal({
+      workspaceId,
+      quoteExternalId: body.quoteExternalId,
+      actionType: "followup_email",
+      channel: body.channel,
+      reasonCodes: selectedVariant.reasonCodes,
+      expectedImpact,
+      suggestedSubject: selectedVariant.subject,
+      suggestedMessage: selectedVariant.message,
+      requireApproval: body.requireApproval,
+      metadata: {
+        createdBy: "personality-reply-engine",
+        tone: body.tone,
+        selectedVariantIndex,
+        contactKey: contactKeyResolved ?? null,
+        personalityType,
+        personalityConfidence,
+        assignedTo: body.assignedTo ?? null,
+        ...body.metadata,
+      },
+    })
+    : null;
+
+  return {
+    workspaceId,
+    quoteExternalId: body.quoteExternalId,
+    contactKey: contactKeyResolved,
+    tone: body.tone,
+    personality: {
+      type: personalityType,
+      confidence: Number(personalityConfidence.toFixed(3)),
+      playbook: communicationPlaybook,
+      profile,
+    },
+    reasonCodes,
+    latestSignal: latestEvent ? toQuoteCommunicationEvent(latestEvent) : null,
+    selectedVariantIndex,
+    selectedVariant,
+    variants,
+    expectedImpact,
+    proposal,
+    profile: profileEnvelope,
   };
 }
 
