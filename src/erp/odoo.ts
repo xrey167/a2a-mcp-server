@@ -380,6 +380,9 @@ export class OdooConnector implements ERPConnector {
 
       if (depth > 1 && component.replenishmentMethod !== "purchase") {
         component.children = await this.getBOMComponents(String(pid[0]), depth - 1);
+      } else if (depth <= 1 && component.replenishmentMethod !== "purchase") {
+        component.truncated = true;
+        log(`BOM truncated at depth limit for item ${pid[0]}`);
       }
 
       components.push(component);
@@ -396,15 +399,42 @@ export class OdooConnector implements ERPConnector {
       "property_supplier_payment_term_id",
     ], 1000);
 
-    return raw.map((r) => ({
-      no: String(r.id),
-      name: String(r.name ?? ""),
-      country: String((r.country_id as [number, string])?.[1] ?? ""),
-      city: r.city ? String(r.city) : undefined,
-      leadTimeDays: 0, // Not directly on partner
-      currencyCode: "",
-      blocked: false,
-    }));
+    // Fetch supplier info records for lead time data (delay field)
+    const vendorLeadTimes = new Map<number, number[]>();
+    try {
+      const supplierInfo = await this.searchRead("product.supplierinfo", [], [
+        "partner_id", "delay",
+      ], 2000);
+      for (const si of supplierInfo) {
+        const partnerId = ((si.partner_id as [number, string]) ?? [0])[0];
+        const delay = Number(si.delay ?? 0);
+        if (partnerId && delay > 0) {
+          if (!vendorLeadTimes.has(partnerId)) vendorLeadTimes.set(partnerId, []);
+          vendorLeadTimes.get(partnerId)!.push(delay);
+        }
+      }
+      log(`enriched vendor lead times from ${vendorLeadTimes.size} vendors in product.supplierinfo`);
+    } catch {
+      log("product.supplierinfo not available — vendor lead times will be 0");
+    }
+
+    return raw.map((r) => {
+      const partnerId = Number(r.id);
+      const leadTimes = vendorLeadTimes.get(partnerId);
+      const avgLeadTime = leadTimes && leadTimes.length > 0
+        ? Math.round(leadTimes.reduce((a, b) => a + b, 0) / leadTimes.length)
+        : 0;
+
+      return {
+        no: String(r.id),
+        name: String(r.name ?? ""),
+        country: String((r.country_id as [number, string])?.[1] ?? ""),
+        city: r.city ? String(r.city) : undefined,
+        leadTimeDays: avgLeadTime,
+        currencyCode: "",
+        blocked: false,
+      };
+    });
   }
 
   async getPurchaseOrders(filters?: {

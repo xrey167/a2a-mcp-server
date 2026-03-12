@@ -132,21 +132,33 @@ async function fetchLiveDataFeeds(): Promise<Map<string, string>> {
 
   if (DATA_SOURCES.freightIndex) {
     fetches.push({ name: "freight_index", promise: fetchWebData(DATA_SOURCES.freightIndex) });
+  } else {
+    log("no freight index URL configured — set SC_FREIGHT_INDEX_URL env var");
   }
   if (DATA_SOURCES.exchangeRates) {
     fetches.push({ name: "exchange_rates", promise: callApi(DATA_SOURCES.exchangeRates) });
+  } else {
+    log("no exchange rates URL configured — set SC_EXCHANGE_RATES_URL env var");
   }
   if (DATA_SOURCES.metalPrices) {
     fetches.push({ name: "metal_prices", promise: callApi(DATA_SOURCES.metalPrices) });
+  } else {
+    log("no metal prices URL configured — set SC_METAL_PRICES_URL env var for commodity risk data");
   }
   if (DATA_SOURCES.oilPrice) {
     fetches.push({ name: "oil_price", promise: callApi(DATA_SOURCES.oilPrice) });
+  } else {
+    log("no oil price URL configured — set SC_OIL_PRICE_URL env var for commodity risk data");
   }
   if (DATA_SOURCES.weatherAlerts) {
     fetches.push({ name: "weather_alerts", promise: fetchWebData(DATA_SOURCES.weatherAlerts) });
+  } else {
+    log("no weather alerts URL configured — set SC_WEATHER_ALERTS_URL env var");
   }
   if (DATA_SOURCES.portCongestion) {
     fetches.push({ name: "port_congestion", promise: fetchWebData(DATA_SOURCES.portCongestion) });
+  } else {
+    log("no port congestion URL configured — set SC_PORT_CONGESTION_URL env var");
   }
 
   for (const url of DATA_SOURCES.customFeeds) {

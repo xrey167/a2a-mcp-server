@@ -6,6 +6,7 @@
  */
 
 import type { BOMComponent, SupplyChainGraph, GraphNode, GraphEdge } from "../erp/types.js";
+import { shouldStopRecursion } from "../mrp/bom-guard.js";
 
 /**
  * Build a supply chain graph from BOM components and compute the critical path.
@@ -85,6 +86,8 @@ function addComponentNodes(
   nodes: GraphNode[],
   edges: GraphEdge[],
   nodeMap: Map<string, GraphNode>,
+  visited: Set<string> = new Set(),
+  depth: number = 0,
 ): void {
   for (const comp of components) {
     // Avoid duplicates (same component used in multiple assemblies)
@@ -105,9 +108,13 @@ function addComponentNodes(
       label: `${comp.quantityPer} ${comp.unitOfMeasure}`,
     });
 
-    // Recurse into sub-assemblies
+    // Recurse into sub-assemblies (with cycle detection)
     if (comp.children && comp.children.length > 0) {
-      addComponentNodes(comp.itemNo, comp.children, nodes, edges, nodeMap);
+      if (!shouldStopRecursion(comp.itemNo, visited, depth)) {
+        const childVisited = new Set(visited);
+        childVisited.add(comp.itemNo);
+        addComponentNodes(comp.itemNo, comp.children, nodes, edges, nodeMap, childVisited, depth + 1);
+      }
     }
   }
 }
@@ -159,12 +166,16 @@ export function findLongLeadItems(
 ): BOMComponent[] {
   const results: BOMComponent[] = [];
 
-  function walk(comps: BOMComponent[]) {
+  function walk(comps: BOMComponent[], visited: Set<string> = new Set(), depth: number = 0) {
     for (const c of comps) {
       if (c.leadTimeDays >= thresholdDays) {
         results.push(c);
       }
-      if (c.children) walk(c.children);
+      if (c.children && !shouldStopRecursion(c.itemNo, visited, depth)) {
+        const childVisited = new Set(visited);
+        childVisited.add(c.itemNo);
+        walk(c.children, childVisited, depth + 1);
+      }
     }
   }
 
@@ -178,12 +189,16 @@ export function findLongLeadItems(
 export function findSingleSourceComponents(components: BOMComponent[]): BOMComponent[] {
   const results: BOMComponent[] = [];
 
-  function walk(comps: BOMComponent[]) {
+  function walk(comps: BOMComponent[], visited: Set<string> = new Set(), depth: number = 0) {
     for (const c of comps) {
       if (c.replenishmentMethod === "purchase" && c.vendorNo) {
         results.push(c);
       }
-      if (c.children) walk(c.children);
+      if (c.children && !shouldStopRecursion(c.itemNo, visited, depth)) {
+        const childVisited = new Set(visited);
+        childVisited.add(c.itemNo);
+        walk(c.children, childVisited, depth + 1);
+      }
     }
   }
 

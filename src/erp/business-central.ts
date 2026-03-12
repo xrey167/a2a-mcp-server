@@ -237,6 +237,9 @@ export class BusinessCentralConnector implements ERPConnector {
       // Recurse into sub-assemblies
       if (depth > 1 && component.replenishmentMethod !== "purchase") {
         component.children = await this.getBOMComponents(childItemNo, depth - 1);
+      } else if (depth <= 1 && component.replenishmentMethod !== "purchase") {
+        component.truncated = true;
+        log(`BOM truncated at depth limit for item ${childItemNo}`);
       }
 
       components.push(component);
@@ -247,15 +250,44 @@ export class BusinessCentralConnector implements ERPConnector {
 
   async getVendors(): Promise<Vendor[]> {
     const raw = await this.odata<Record<string, unknown>>("vendors", { $top: "1000" });
-    return raw.map((r) => ({
-      no: String(r.number ?? ""),
-      name: String(r.displayName ?? ""),
-      country: String(r.addressCountryRegion ?? ""),
-      city: r.addressCity ? String(r.addressCity) : undefined,
-      leadTimeDays: 0, // Not directly available on vendor entity
-      currencyCode: String(r.currencyCode ?? ""),
-      blocked: String(r.blocked ?? "") !== " ",
-    }));
+
+    // Fetch item vendor catalog for lead time data
+    const vendorLeadTimes = new Map<string, number[]>();
+    try {
+      const itemVendors = await this.odata<Record<string, unknown>>("itemVendors", {
+        $top: "2000",
+        $select: "vendorNo,leadTimeCalculation",
+      });
+      for (const iv of itemVendors) {
+        const vendorNo = String(iv.vendorNo ?? "");
+        const lt = parseBCDateFormula(String(iv.leadTimeCalculation ?? ""));
+        if (vendorNo && lt > 0) {
+          if (!vendorLeadTimes.has(vendorNo)) vendorLeadTimes.set(vendorNo, []);
+          vendorLeadTimes.get(vendorNo)!.push(lt);
+        }
+      }
+      log(`enriched vendor lead times from ${vendorLeadTimes.size} vendors in item vendor catalog`);
+    } catch {
+      log("itemVendors entity not available — vendor lead times will be 0");
+    }
+
+    return raw.map((r) => {
+      const vendorNo = String(r.number ?? "");
+      const leadTimes = vendorLeadTimes.get(vendorNo);
+      const avgLeadTime = leadTimes && leadTimes.length > 0
+        ? Math.round(leadTimes.reduce((a, b) => a + b, 0) / leadTimes.length)
+        : 0;
+
+      return {
+        no: vendorNo,
+        name: String(r.displayName ?? ""),
+        country: String(r.addressCountryRegion ?? ""),
+        city: r.addressCity ? String(r.addressCity) : undefined,
+        leadTimeDays: avgLeadTime,
+        currencyCode: String(r.currencyCode ?? ""),
+        blocked: String(r.blocked ?? "") !== " ",
+      };
+    });
   }
 
   async getPurchaseOrders(filters?: {
@@ -563,4 +595,29 @@ function mapBCTransferStatus(s: string): TransferOrder["status"] {
   if (lower.includes("shipped")) return "shipped";
   if (lower.includes("received") || lower.includes("closed")) return "received";
   return "open";
+}
+
+/**
+ * Parse BC DateFormula strings (e.g. "14D", "2W", "1M") into days.
+ * Falls back to parsing as a plain number.
+ */
+function parseBCDateFormula(formula: string): number {
+  if (!formula || formula.trim() === "") return 0;
+  const cleaned = formula.trim().toUpperCase();
+
+  // Try "14D", "2W", "1M", "1Y" patterns
+  const match = cleaned.match(/^(\d+)\s*([DWMY]?)$/);
+  if (match) {
+    const value = parseInt(match[1], 10);
+    switch (match[2]) {
+      case "D": case "": return value;
+      case "W": return value * 7;
+      case "M": return value * 30;
+      case "Y": return value * 365;
+    }
+  }
+
+  // Fallback: try plain number
+  const num = Number(cleaned);
+  return isNaN(num) ? 0 : Math.round(num);
 }

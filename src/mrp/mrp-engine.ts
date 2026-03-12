@@ -21,6 +21,7 @@ import type {
   BOMComponent,
   ItemAvailability,
   WorkCenterData,
+  RoutingStep,
 } from "../erp/types.js";
 import type {
   BucketSize,
@@ -35,7 +36,7 @@ import type {
   MRPSummary,
   WorkCenter,
 } from "./types.js";
-import { buildPlanningHorizon, buildDemandPlan, type DemandForecast } from "./demand-plan.js";
+import { buildPlanningHorizon, buildDemandPlanWithExceptions, type DemandForecast } from "./demand-plan.js";
 import { buildSupplyPlan, calculateGrossToNet } from "./gross-to-net.js";
 import { policyName } from "./lot-sizing.js";
 import { buildPeggingTrees, type PeggingInput } from "./pegging.js";
@@ -78,6 +79,8 @@ export interface MRPInput {
   availability: ItemAvailability[];
   /** ERP work center master data (optional, used for CRP) */
   erpWorkCenters?: WorkCenterData[];
+  /** ERP routing master data (optional, used for planned order CRP) */
+  erpRoutings?: Map<string, RoutingStep[]>;
   config: MRPConfig;
 }
 
@@ -87,7 +90,7 @@ export interface MRPInput {
  * Execute a full MRP run.
  */
 export function runMRP(input: MRPInput): MRPRunResult {
-  const { productionOrders, salesOrders, purchaseOrders, components, availability, erpWorkCenters, config } = input;
+  const { productionOrders, salesOrders, purchaseOrders, components, availability, erpWorkCenters, erpRoutings, config } = input;
   const startTime = Date.now();
 
   log("starting MRP run");
@@ -101,13 +104,15 @@ export function runMRP(input: MRPInput): MRPRunResult {
   log(`horizon: ${horizon.startDate} to ${horizon.endDate}, ${horizon.buckets.length} ${bucketSize} buckets`);
 
   // 2. Build demand plan (explode BOM, aggregate by bucket)
-  const demandPlan = buildDemandPlan({
+  const demandResult = buildDemandPlanWithExceptions({
     salesOrders,
     productionOrders,
     forecasts: config.forecasts,
     components,
     horizon,
   });
+  const demandPlan = demandResult.demandPlan;
+  const demandExceptions = demandResult.exceptions;
 
   log(`demand plan: ${demandPlan.size} items with demand`);
 
@@ -171,11 +176,20 @@ export function runMRP(input: MRPInput): MRPRunResult {
     const mergedOverrides = [...(erpWCs ?? []), ...(config.workCenters ?? [])];
     const workCenters = discoverWorkCenters(productionOrders, mergedOverrides.length > 0 ? mergedOverrides : undefined);
     if (workCenters.length > 0) {
+      // Build routing map for planned order CRP: combine ERP routings + production order routings
+      const routingMap = new Map<string, RoutingStep[]>(erpRoutings ?? []);
+      for (const po of productionOrders) {
+        if (po.routings.length > 0 && !routingMap.has(po.itemNo)) {
+          routingMap.set(po.itemNo, po.routings);
+        }
+      }
+
       capacityLoads = calculateCapacityLoads({
         productionOrders,
         plannedOrders,
         workCenters,
         horizon,
+        routingMap: routingMap.size > 0 ? routingMap : undefined,
       });
       capacityExceptions = detectCapacityExceptions(capacityLoads);
       log(`capacity: ${workCenters.length} work centers, ${capacityExceptions.length} exceptions`);
@@ -184,6 +198,7 @@ export function runMRP(input: MRPInput): MRPRunResult {
 
   // 9. Detect exceptions
   const exceptions = [
+    ...demandExceptions,
     ...detectShortageExceptions(g2nResult.netRequirements, horizon),
     ...detectLateOrderExceptions(plannedOrders),
     ...detectNoVendorExceptions(plannedOrders, components),

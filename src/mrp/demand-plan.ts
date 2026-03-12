@@ -22,7 +22,9 @@ import type {
   DemandRecord,
   DemandSource,
   TimePhasedDemand,
+  MRPException,
 } from "./types.js";
+import { shouldStopRecursion } from "./bom-guard.js";
 
 function log(msg: string) {
   process.stderr.write(`[mrp-demand] ${msg}\n`);
@@ -155,15 +157,41 @@ export interface DemandPlanInput {
  * Step 3: Add safety stock replenishment demand
  * Step 4: Aggregate into time buckets
  */
+export interface DemandPlanResult {
+  demandPlan: Map<string, TimePhasedDemand>;
+  exceptions: MRPException[];
+}
+
 export function buildDemandPlan(input: DemandPlanInput): Map<string, TimePhasedDemand> {
+  return buildDemandPlanWithExceptions(input).demandPlan;
+}
+
+export function buildDemandPlanWithExceptions(input: DemandPlanInput): DemandPlanResult {
   const { salesOrders, productionOrders, forecasts, components, horizon } = input;
   const allDemands: DemandRecord[] = [];
+  const exceptions: MRPException[] = [];
 
   // Step 1: Independent demand from sales orders
   for (const so of salesOrders) {
     if (so.status !== "open" && so.status !== "released") continue;
     for (const line of so.lines) {
       const dueDate = line.requestedDeliveryDate || so.requestedDeliveryDate;
+
+      // Detect past-due demand
+      if (dueDate < horizon.startDate) {
+        const daysLate = Math.ceil(
+          (new Date(horizon.startDate).getTime() - new Date(dueDate).getTime()) / 86400000,
+        );
+        exceptions.push({
+          severity: "critical",
+          type: "past_due",
+          itemNo: line.itemNo,
+          itemName: line.itemName,
+          message: `Sales order ${so.number} line ${line.lineNo ?? ""} for ${line.itemName} is ${daysLate} days past due (due: ${dueDate})`,
+          suggestedAction: "Expedite fulfillment or negotiate new delivery date with customer",
+        });
+      }
+
       allDemands.push({
         itemNo: line.itemNo,
         itemName: line.itemName,
@@ -179,7 +207,23 @@ export function buildDemandPlan(input: DemandPlanInput): Map<string, TimePhasedD
   // Each production order's components create dependent demand
   for (const po of productionOrders) {
     if (po.status === "finished") continue;
-    explodeDemand(po.itemNo, po.itemName, po.quantity, po.dueDate, po.components, allDemands, po.number, 1);
+
+    // Detect past-due production orders
+    if (po.dueDate < horizon.startDate) {
+      const daysLate = Math.ceil(
+        (new Date(horizon.startDate).getTime() - new Date(po.dueDate).getTime()) / 86400000,
+      );
+      exceptions.push({
+        severity: "critical",
+        type: "past_due",
+        itemNo: po.itemNo,
+        itemName: po.itemName,
+        message: `Production order ${po.number} for ${po.itemName} is ${daysLate} days past due (due: ${po.dueDate})`,
+        suggestedAction: "Review production schedule and expedite or reschedule",
+      });
+    }
+
+    explodeDemand(po.itemNo, po.itemName, po.quantity, po.dueDate, po.components, allDemands, po.number, 1, new Set([po.itemNo]));
   }
 
   // Step 3: Forecasts
@@ -212,9 +256,15 @@ export function buildDemandPlan(input: DemandPlanInput): Map<string, TimePhasedD
   }
 
   log(`collected ${allDemands.length} demand records from all sources`);
+  if (exceptions.length > 0) {
+    log(`detected ${exceptions.length} past-due demand exceptions`);
+  }
 
   // Aggregate into time-phased demand per item
-  return aggregateDemand(allDemands, horizon);
+  return {
+    demandPlan: aggregateDemand(allDemands, horizon),
+    exceptions,
+  };
 }
 
 /**
@@ -229,6 +279,7 @@ function explodeDemand(
   out: DemandRecord[],
   sourceId: string,
   level: number,
+  visited: Set<string> = new Set(),
 ): void {
   for (const comp of components) {
     // Apply scrap percentage — inflate quantity to account for yield loss
@@ -252,9 +303,13 @@ function explodeDemand(
       bomLevel: level,
     });
 
-    // Recursive explosion for sub-assemblies
+    // Recursive explosion for sub-assemblies (with cycle detection)
     if (comp.children && comp.children.length > 0) {
-      explodeDemand(comp.itemNo, comp.itemName, requiredQty, dueDate, comp.children, out, sourceId, level + 1);
+      if (!shouldStopRecursion(comp.itemNo, visited, level)) {
+        const childVisited = new Set(visited);
+        childVisited.add(comp.itemNo);
+        explodeDemand(comp.itemNo, comp.itemName, requiredQty, dueDate, comp.children, out, sourceId, level + 1, childVisited);
+      }
     }
   }
 }

@@ -13,6 +13,7 @@
 
 import type { BOMComponent, RiskScore, PurchaseOrder, ItemAvailability } from "../erp/types.js";
 import type { LeadTimeAnalysis } from "./lead-time.js";
+import { shouldStopRecursion } from "../mrp/bom-guard.js";
 
 export interface ExternalRiskFactors {
   weatherRisk: number;       // 0-100
@@ -41,10 +42,14 @@ export function scoreComponents(
 ): RiskScore[] {
   const scores: RiskScore[] = [];
 
-  function walk(comps: BOMComponent[]) {
+  function walk(comps: BOMComponent[], visited: Set<string> = new Set(), depth: number = 0) {
     for (const comp of comps) {
       scores.push(scoreComponent(comp, context));
-      if (comp.children) walk(comp.children);
+      if (comp.children && !shouldStopRecursion(comp.itemNo, visited, depth)) {
+        const childVisited = new Set(visited);
+        childVisited.add(comp.itemNo);
+        walk(comp.children, childVisited, depth + 1);
+      }
     }
   }
 

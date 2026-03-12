@@ -14,6 +14,7 @@
  */
 
 import { sendTask } from "../a2a.js";
+import { memory } from "../memory.js";
 import type {
   ProductionOrder,
   SalesOrder,
@@ -34,6 +35,19 @@ const WORKER_URLS = {
   ai: process.env.A2A_WORKER_AI_URL ?? "http://localhost:8083",
   web: process.env.A2A_WORKER_WEB_URL ?? "http://localhost:8082",
 };
+
+const AGENT_ID = "supply-chain";
+
+/** Persist AI analysis result to memory for traceability */
+function persistResult(key: string, data: unknown): void {
+  try {
+    const dateKey = new Date().toISOString().slice(0, 10);
+    memory.set(AGENT_ID, `${key}:${dateKey}`, JSON.stringify(data));
+    log(`persisted ${key} result to memory`);
+  } catch (err) {
+    log(`failed to persist ${key}: ${err}`);
+  }
+}
 
 async function askAI(prompt: string, timeoutMs = 120_000): Promise<string> {
   return sendTask(WORKER_URLS.ai, {
@@ -176,13 +190,15 @@ Respond with ONLY valid JSON:
   try {
     const raw = await askAI(prompt);
     const parsed = JSON.parse(stripJsonFences(raw));
-    return {
+    const result: DeepBOMAnalysis = {
       criticalFindings: Array.isArray(parsed.criticalFindings) ? parsed.criticalFindings : [],
       supplyChainHealth: Math.max(0, Math.min(100, Number(parsed.supplyChainHealth ?? 50))),
       concentrationRisks: Array.isArray(parsed.concentrationRisks) ? parsed.concentrationRisks : [],
       bottleneckPredictions: Array.isArray(parsed.bottleneckPredictions) ? parsed.bottleneckPredictions : [],
       strategicRecommendations: Array.isArray(parsed.strategicRecommendations) ? parsed.strategicRecommendations : [],
     };
+    persistResult("deep-bom-analysis", result);
+    return result;
   } catch (err) {
     log(`deep BOM analysis failed: ${err}`);
     return {
@@ -277,11 +293,13 @@ Sort rankedInterventions by aiScore descending (best first).`;
   try {
     const raw = await askAI(prompt);
     const parsed = JSON.parse(stripJsonFences(raw));
-    return {
+    const result: AIInterventionEvaluation = {
       rankedInterventions: Array.isArray(parsed.rankedInterventions) ? parsed.rankedInterventions : [],
       combinedStrategy: parsed.combinedStrategy ?? "",
       estimatedOverallRiskReduction: Number(parsed.estimatedOverallRiskReduction ?? 0),
     };
+    persistResult("intervention-evaluation", result);
+    return result;
   } catch (err) {
     log(`AI intervention evaluation failed: ${err}`);
     return {
@@ -396,7 +414,7 @@ Respond with ONLY valid JSON:
   try {
     const raw = await askAI(prompt, 180_000);
     const parsed = JSON.parse(stripJsonFences(raw));
-    return {
+    const result: IntelligenceReport = {
       executiveSummary: parsed.executiveSummary ?? "",
       riskOverview: parsed.riskOverview ?? "",
       criticalAlerts: Array.isArray(parsed.criticalAlerts) ? parsed.criticalAlerts : [],
@@ -404,6 +422,8 @@ Respond with ONLY valid JSON:
       outlook: parsed.outlook ?? "",
       dataSourcesSummary: Array.isArray(parsed.dataSourcesSummary) ? parsed.dataSourcesSummary : [],
     };
+    persistResult("intelligence-report", result);
+    return result;
   } catch (err) {
     log(`intelligence report generation failed: ${err}`);
     return {
@@ -586,7 +606,11 @@ Only include genuinely likely bottlenecks. Don't pad with low-confidence predict
   try {
     const raw = await askAI(prompt);
     const parsed = JSON.parse(stripJsonFences(raw));
-    return Array.isArray(parsed.predictions) ? parsed.predictions : [];
+    const result: PredictiveInsight[] = Array.isArray(parsed.predictions) ? parsed.predictions : [];
+    if (result.length > 0) {
+      persistResult("bottleneck-predictions", result);
+    }
+    return result;
   } catch (err) {
     log(`predictive analysis failed: ${err}`);
     return [];

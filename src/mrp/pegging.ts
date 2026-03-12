@@ -22,6 +22,7 @@ import type {
   PlannedOrder,
   NetRequirement,
 } from "./types.js";
+import { shouldStopRecursion } from "./bom-guard.js";
 
 function log(msg: string) {
   process.stderr.write(`[mrp-pegging] ${msg}\n`);
@@ -75,8 +76,8 @@ export function buildPeggingTrees(input: PeggingInput): PeggingTree[] {
         tree,
       );
 
-      // Now trace dependent demand through production orders
-      pegDependentDemand(line.itemNo, line.quantity, input.productionOrders, supplyIndex, tree);
+      // Now trace dependent demand through production orders (with cycle detection)
+      pegDependentDemand(line.itemNo, line.quantity, input.productionOrders, supplyIndex, tree, new Set([line.itemNo]), 0);
 
       trees.push(tree);
     }
@@ -219,6 +220,8 @@ function pegDependentDemand(
   productionOrders: ProductionOrder[],
   supplyIndex: Map<string, SupplySlot[]>,
   tree: PeggingTree,
+  visited: Set<string> = new Set(),
+  depth: number = 0,
 ): void {
   // Find production orders for the parent item
   const relevantOrders = productionOrders.filter(
@@ -242,9 +245,13 @@ function pegDependentDemand(
         tree,
       );
 
-      // Recurse for sub-assemblies
+      // Recurse for sub-assemblies (with cycle detection)
       if (comp.replenishmentMethod === "production" || comp.replenishmentMethod === "assembly") {
-        pegDependentDemand(comp.itemNo, requiredQty, productionOrders, supplyIndex, tree);
+        if (!shouldStopRecursion(comp.itemNo, visited, depth)) {
+          const childVisited = new Set(visited);
+          childVisited.add(comp.itemNo);
+          pegDependentDemand(comp.itemNo, requiredQty, productionOrders, supplyIndex, tree, childVisited, depth + 1);
+        }
       }
     }
   }
@@ -276,28 +283,47 @@ export function analyzeSupplyImpact(
 ): SupplyImpact {
   const affected: SupplyImpact["affectedOrders"] = [];
   let totalQty = 0;
+  let maxDepth = 0;
 
-  for (const tree of peggingTrees) {
-    // Find pegs where this item is a supply source
-    const relevantPegs = tree.pegs.filter((p) => p.supplyItemNo === itemNo);
+  // Multi-level cascade: find all items affected by the delay, then trace their impact too
+  const MAX_CASCADE = 10;
+  const processedItems = new Set<string>();
+  const itemQueue: Array<{ item: string; depth: number }> = [{ item: itemNo, depth: 1 }];
 
-    for (const peg of relevantPegs) {
-      // The delayed supply date
-      const delayedDate = new Date(peg.supplyDate);
-      delayedDate.setDate(delayedDate.getDate() + delayDays);
-      const delayedStr = delayedDate.toISOString().slice(0, 10);
+  while (itemQueue.length > 0) {
+    const { item: currentItem, depth } = itemQueue.shift()!;
+    if (processedItems.has(currentItem)) continue;
+    if (depth > MAX_CASCADE) continue;
+    processedItems.add(currentItem);
 
-      // If delayed past demand date → impact
-      if (delayedStr > peg.demandDate) {
-        affected.push({
-          orderType: tree.rootDemand.sourceType,
-          orderId: tree.rootDemand.sourceId,
-          itemNo: tree.rootDemand.itemNo,
-          itemName: tree.rootDemand.itemName,
-          originalDueDate: tree.rootDemand.dueDate,
-          impactedQuantity: peg.peggedQuantity,
-        });
-        totalQty += peg.peggedQuantity;
+    for (const tree of peggingTrees) {
+      // Find pegs where this item is a supply source
+      const relevantPegs = tree.pegs.filter((p) => p.supplyItemNo === currentItem);
+
+      for (const peg of relevantPegs) {
+        // The delayed supply date
+        const delayedDate = new Date(peg.supplyDate);
+        delayedDate.setDate(delayedDate.getDate() + delayDays);
+        const delayedStr = delayedDate.toISOString().slice(0, 10);
+
+        // If delayed past demand date → impact
+        if (delayedStr > peg.demandDate) {
+          affected.push({
+            orderType: tree.rootDemand.sourceType,
+            orderId: tree.rootDemand.sourceId,
+            itemNo: tree.rootDemand.itemNo,
+            itemName: tree.rootDemand.itemName,
+            originalDueDate: tree.rootDemand.dueDate,
+            impactedQuantity: peg.peggedQuantity,
+          });
+          totalQty += peg.peggedQuantity;
+          if (depth > maxDepth) maxDepth = depth;
+
+          // Cascade: the demand item is now also delayed — trace its consumers
+          if (!processedItems.has(peg.demandItemNo)) {
+            itemQueue.push({ item: peg.demandItemNo, depth: depth + 1 });
+          }
+        }
       }
     }
   }
@@ -316,7 +342,7 @@ export function analyzeSupplyImpact(
 
   return {
     affectedOrders: Array.from(uniqueOrders.values()),
-    cascadeDepth: 1, // TODO: multi-level cascade
+    cascadeDepth: maxDepth,
     totalAffectedQuantity: totalQty,
   };
 }

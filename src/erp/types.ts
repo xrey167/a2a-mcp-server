@@ -36,6 +36,8 @@ export interface BOMComponent {
   bomVersionCode?: string;
   /** Child components if this is a sub-assembly */
   children?: BOMComponent[];
+  /** True when BOM recursion was truncated at depth limit — deeper levels exist but were not fetched */
+  truncated?: boolean;
 }
 
 export interface RoutingStep {

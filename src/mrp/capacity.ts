@@ -68,6 +68,8 @@ export interface CapacityInput {
   plannedOrders: PlannedOrder[];
   workCenters: WorkCenter[];
   horizon: PlanningHorizon;
+  /** Routing master data for planned order CRP (itemNo → routing steps) */
+  routingMap?: Map<string, RoutingStep[]>;
 }
 
 /**
@@ -105,12 +107,16 @@ export function calculateCapacityLoads(input: CapacityInput): CapacityLoad[] {
     loadRoutings(order.routings, order.quantity, order.number, "production", order.itemNo, order.startDate, loadMap, horizon);
   }
 
-  // Load from planned production orders
-  for (const po of plannedOrders) {
-    if (po.type !== "production") continue;
-    // Planned orders don't have routings directly — estimate from similar existing orders
-    // For now, skip if no routing data
-    // TODO: Look up routings from BOM/routing master data
+  // Load from planned production orders — look up routings from routing map
+  if (input.routingMap) {
+    for (const po of plannedOrders) {
+      if (po.type !== "production") continue;
+      const routings = input.routingMap.get(po.itemNo);
+      if (routings && routings.length > 0) {
+        loadRoutings(routings, po.quantity, po.id, "planned", po.itemNo, po.orderDate, loadMap, horizon);
+      }
+    }
+    log(`loaded planned order routings for ${plannedOrders.filter((o) => o.type === "production" && input.routingMap!.has(o.itemNo)).length} planned production orders`);
   }
 
   // Calculate utilization
