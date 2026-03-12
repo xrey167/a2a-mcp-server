@@ -8965,18 +8965,29 @@ export function getCustomer360Health(
     customerExternalId: customerExternalIdInput,
     weights: weightsInput,
   });
-  const weights = opts.weights ?? { engagement: 0.3, revenue: 0.3, sentiment: 0.2, responsiveness: 0.2 };
+  const rawWeights = opts.weights ?? { engagement: 0.3, revenue: 0.3, sentiment: 0.2, responsiveness: 0.2 };
+
+  // Normalize weights so they always sum to 1, preventing scores outside [0, 100]
+  const weightSum = rawWeights.engagement + rawWeights.revenue + rawWeights.sentiment + rawWeights.responsiveness;
+  const weights = weightSum > 0
+    ? {
+        engagement: rawWeights.engagement / weightSum,
+        revenue: rawWeights.revenue / weightSum,
+        sentiment: rawWeights.sentiment / weightSum,
+        responsiveness: rawWeights.responsiveness / weightSum,
+      }
+    : { engagement: 0.25, revenue: 0.25, sentiment: 0.25, responsiveness: 0.25 };
 
   // Reuse profile computation, then overlay custom weights
   const profile = getCustomer360Profile(opts.workspaceId, opts.customerExternalId, true) as Record<string, unknown>;
   const healthObj = profile.health as { score: number; engagement: number; revenue: number; sentiment: number; responsiveness: number };
 
-  const reweighted = Math.round(
+  const reweighted = Math.min(100, Math.max(0, Math.round(
     healthObj.engagement * weights.engagement
     + healthObj.revenue * weights.revenue
     + healthObj.sentiment * weights.sentiment
     + healthObj.responsiveness * weights.responsiveness,
-  );
+  )));
 
   // Health history for trend
   const history = db.query<{ health_score: number; created_at: string }, [string, string]>(
