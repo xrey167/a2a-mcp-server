@@ -84,6 +84,7 @@ import {
   listQuoteFollowupActions,
   importQuoteMailboxCommunications,
   approveQuoteAutopilotProposal,
+  createQuotePersonalityReplyRecommendation,
   createQuoteNextActionRecommendation,
   disableQuoteMailboxConnection,
   pullQuoteMailboxCommunications,
@@ -105,6 +106,7 @@ import {
   runWizardQuoteToOrderDryRun,
   runQuoteFollowupEngine,
   syncRevenueGraphWorkspace,
+  listQuoteAutopilotProposals,
   syncMasterDataEntity,
   ingestQuoteCommunication,
   upsertQuoteMailboxConnection,
@@ -6132,6 +6134,39 @@ async function startHttpServer() {
     }
   });
 
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/recommendations/personality-reply", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      return createQuotePersonalityReplyRecommendation(request.params.id, request.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { status?: string; actionType?: string; quoteExternalId?: string; limit?: string } }>("/v1/quote-to-order/workspaces/:id/autopilot/proposals", async (request, reply) => {
+    if (!checkAuth(request as any)) {
+      reply.code(401);
+      return { error: "Unauthorized" };
+    }
+    try {
+      const limitRaw = request.query?.limit;
+      const limit = typeof limitRaw === "string" && limitRaw.length > 0 ? Number(limitRaw) : undefined;
+      return listQuoteAutopilotProposals(request.params.id, {
+        status: request.query?.status,
+        actionType: request.query?.actionType,
+        quoteExternalId: request.query?.quoteExternalId,
+        limit,
+      });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   app.post<{ Params: { id: string; proposalId: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/autopilot/proposals/:proposalId/approve", async (request, reply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
@@ -6512,6 +6547,9 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
               <button data-action="sync-revenue-graph">Sync Revenue Graph</button>
               <button data-action="load-thread-signals">Load Thread Signals</button>
               <button data-action="recommend-next-action">Recommend Next Action</button>
+              <button data-action="generate-personality-reply">Generate Personality Reply</button>
+              <button data-action="load-proposal-queue">Load Approval Queue</button>
+              <button data-action="approve-next-proposal">Approve Next In Queue</button>
               <button data-action="approve-proposal">Approve Proposal</button>
               <button data-action="reject-proposal">Reject Proposal</button>
               <button data-action="run-deal-rescue">Run Deal Rescue</button>
@@ -6602,6 +6640,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
   let bootstrapData = null;
   let selectedSessionId = "";
   let lastAutopilotProposalId = "";
+  let autopilotQueueProposalIds = [];
 
   const $ = (id) => document.getElementById(id);
   const authCard = $("authCard");
@@ -6648,6 +6687,11 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
     });
   }
 
+  function removeProposalFromQueue(proposalId) {
+    if (!proposalId) return;
+    autopilotQueueProposalIds = autopilotQueueProposalIds.filter((id) => id !== proposalId);
+  }
+
   function summarizeOutcome(action, payload) {
     const root = asObject(payload);
     const lines = [];
@@ -6662,6 +6706,9 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
     if (typeof root.workspaceId === "string") lines.push("Workspace: " + root.workspaceId);
     if (typeof root.threadId === "string") lines.push("Thread: " + root.threadId);
     if (typeof root.threadCount === "number") lines.push("Threads synced: " + root.threadCount);
+    if (Array.isArray(root.items)) lines.push("Queue items: " + root.items.length);
+    if (typeof root.remainingQueue === "number") lines.push("Queue remaining: " + root.remainingQueue);
+    if (typeof root.approvedProposalId === "string") lines.push("Approved from queue: " + root.approvedProposalId);
 
     const signals = asObject(root.signals);
     if (typeof signals.messageCount === "number") lines.push("Messages in thread: " + signals.messageCount);
@@ -6674,6 +6721,12 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
     }
     if (Array.isArray(root.proposals)) lines.push("Proposals generated: " + root.proposals.length);
     if (typeof root.proposalCount === "number") lines.push("Proposal count: " + root.proposalCount);
+    if (Array.isArray(root.variants)) lines.push("Reply variants: " + root.variants.length);
+    const selectedVariant = asObject(root.selectedVariant);
+    if (typeof selectedVariant.label === "string") lines.push("Selected variant: " + selectedVariant.label);
+    if (typeof selectedVariant.expectedReplyLikelihoodPct === "number") {
+      lines.push("Expected reply likelihood: " + fmtPct(selectedVariant.expectedReplyLikelihoodPct));
+    }
 
     const metrics = asObject(root.metrics);
     if (typeof metrics.conversionLiftPct === "number") lines.push("Conversion lift: " + fmtPct(metrics.conversionLiftPct));
@@ -6958,6 +7011,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
   async function loadSession(id) {
     try {
       selectedSessionId = id;
+      autopilotQueueProposalIds = [];
       const session = await api("GET", "/v1/wizard/sessions/" + id);
       sessionJson.textContent = JSON.stringify(session, null, 2);
       renderGates(session);
@@ -6988,6 +7042,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
     await api("POST", "/v1/wizard/auth/logout");
     selectedSessionId = "";
     lastAutopilotProposalId = "";
+    autopilotQueueProposalIds = [];
     sessionJson.textContent = "{}";
     reportJson.textContent = "{}";
     gatesPane.innerHTML = "";
@@ -7329,8 +7384,86 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
         const proposal = out && out.proposal;
         if (proposal && typeof proposal === "object" && typeof proposal.id === "string") {
           lastAutopilotProposalId = proposal.id;
+          autopilotQueueProposalIds = [proposal.id].concat(autopilotQueueProposalIds.filter((id) => id !== proposal.id));
         }
         reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "generate-personality-reply") {
+        const currentSession = await getCurrentSession();
+        const quoteExternalId = window.prompt("Quote External ID", "Q-DEMO-" + String(Date.now()).slice(-6));
+        if (!quoteExternalId) return;
+        const raw = window.prompt(
+          "Personality reply payload JSON",
+          JSON.stringify({
+            quoteExternalId,
+            tone: "balanced",
+            variantCount: 3,
+            channel: "email",
+            createProposal: true,
+            selectedVariantIndex: 0,
+            requireApproval: true,
+            assignedTo: bootstrapData.user.name,
+            metadata: { source: "wizard" },
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api(
+          "POST",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/recommendations/personality-reply",
+          payload,
+        );
+        const proposal = out && out.proposal;
+        if (proposal && typeof proposal === "object" && typeof proposal.id === "string") {
+          lastAutopilotProposalId = proposal.id;
+          autopilotQueueProposalIds = [proposal.id].concat(autopilotQueueProposalIds.filter((id) => id !== proposal.id));
+        }
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-proposal-queue") {
+        const currentSession = await getCurrentSession();
+        const out = await api(
+          "GET",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/autopilot/proposals?status=draft&limit=50",
+        );
+        const items = Array.isArray(out && out.items) ? out.items : [];
+        autopilotQueueProposalIds = items
+          .map((item) => (item && typeof item.id === "string") ? item.id : "")
+          .filter((id) => id.length > 0);
+        if (autopilotQueueProposalIds.length > 0) {
+          lastAutopilotProposalId = autopilotQueueProposalIds[0];
+        }
+        reportJson.textContent = JSON.stringify({
+          ...out,
+          queueIds: autopilotQueueProposalIds,
+        }, null, 2);
+      } else if (action === "approve-next-proposal") {
+        const currentSession = await getCurrentSession();
+        if (autopilotQueueProposalIds.length === 0) {
+          const queue = await api(
+            "GET",
+            "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/autopilot/proposals?status=draft&limit=50",
+          );
+          const queueItems = Array.isArray(queue && queue.items) ? queue.items : [];
+          autopilotQueueProposalIds = queueItems
+            .map((item) => (item && typeof item.id === "string") ? item.id : "")
+            .filter((id) => id.length > 0);
+        }
+        const proposalId = autopilotQueueProposalIds.shift();
+        if (!proposalId) throw new Error("No draft proposals in queue.");
+        const out = await api(
+          "POST",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/autopilot/proposals/" + encodeURIComponent(proposalId) + "/approve",
+          {
+            approvedBy: bootstrapData.user.name,
+            execute: true,
+            note: "Approved from wizard queue",
+          },
+        );
+        lastAutopilotProposalId = proposalId;
+        reportJson.textContent = JSON.stringify({
+          approvedProposalId: proposalId,
+          remainingQueue: autopilotQueueProposalIds.length,
+          result: out,
+        }, null, 2);
       } else if (action === "approve-proposal") {
         const currentSession = await getCurrentSession();
         const proposalId = (window.prompt("Proposal ID", lastAutopilotProposalId || "") || "").trim();
@@ -7351,6 +7484,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
           payload,
         );
         lastAutopilotProposalId = proposalId;
+        removeProposalFromQueue(proposalId);
         reportJson.textContent = JSON.stringify(out, null, 2);
       } else if (action === "reject-proposal") {
         const currentSession = await getCurrentSession();
@@ -7371,6 +7505,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
           payload,
         );
         lastAutopilotProposalId = proposalId;
+        removeProposalFromQueue(proposalId);
         reportJson.textContent = JSON.stringify(out, null, 2);
       } else if (action === "run-deal-rescue") {
         const currentSession = await getCurrentSession();

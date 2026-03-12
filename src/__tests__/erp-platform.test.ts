@@ -55,7 +55,9 @@ import {
   importQuoteMailboxCommunications,
   ingestQuoteCommunication,
   approveQuoteAutopilotProposal,
+  createQuotePersonalityReplyRecommendation,
   createQuoteNextActionRecommendation,
+  listQuoteAutopilotProposals,
   writebackQuoteFollowupAction,
   writebackQuoteFollowupBatch,
   pullQuoteMailboxCommunications,
@@ -913,6 +915,124 @@ describe("erp-platform", () => {
     expect(profile.feedback.summary.positive).toBeGreaterThanOrEqual(1);
     expect(profile.feedback.summary.replyRatePct).toBeGreaterThan(0);
     expect(profile.feedback.summary.conversionRatePct).toBeGreaterThan(0);
+  });
+
+  test("personality reply recommendation returns variants and can create approval proposal", () => {
+    syncQuoteToOrderQuote("ws-personality-reply", {
+      connectorType: "odoo",
+      quoteExternalId: "Q-PR-1",
+      state: "submitted",
+      amount: 11200,
+      idempotencyKey: "pr-q1",
+    });
+    ingestQuoteCommunication("ws-personality-reply", "Q-PR-1", {
+      channel: "email",
+      direction: "inbound",
+      subject: "Need final budget certainty",
+      bodyText: "This looks expensive. Please send final numbers and who owns approvals.",
+      fromAddress: "buyer@customer.example",
+      toAddress: "sales@ourco.example",
+      idempotencyKey: "pr-e1",
+    });
+
+    const recommendation = createQuotePersonalityReplyRecommendation("ws-personality-reply", {
+      quoteExternalId: "Q-PR-1",
+      tone: "empathetic",
+      variantCount: 3,
+      selectedVariantIndex: 1,
+      createProposal: true,
+      requireApproval: true,
+      assignedTo: "ops-lead",
+    }) as {
+      contactKey: string | null;
+      variants: Array<{ label: string; expectedReplyLikelihoodPct: number }>;
+      selectedVariantIndex: number;
+      selectedVariant: { label: string };
+      proposal: { id: string; actionType: string; status: string } | null;
+      personality: { confidence: number };
+    };
+
+    expect(recommendation.contactKey).toBe("buyer@customer.example");
+    expect(recommendation.variants.length).toBe(3);
+    expect(recommendation.selectedVariantIndex).toBe(1);
+    expect(typeof recommendation.selectedVariant.label).toBe("string");
+    expect(recommendation.variants[0].expectedReplyLikelihoodPct).toBeGreaterThan(0);
+    expect(recommendation.personality.confidence).toBeGreaterThanOrEqual(0);
+    expect(recommendation.proposal?.actionType).toBe("followup_email");
+    expect(recommendation.proposal?.status).toBe("draft");
+
+    const queue = listQuoteAutopilotProposals("ws-personality-reply", {
+      status: "draft",
+      limit: 10,
+    }) as {
+      items: Array<{ id: string; actionType: string; status: string }>;
+      summary: { draft: number };
+      queue: { nextDraftProposalId: string | null };
+    };
+    expect(queue.items.length).toBeGreaterThanOrEqual(1);
+    expect(queue.items[0].actionType).toBe("followup_email");
+    expect(queue.items[0].status).toBe("draft");
+    expect(queue.summary.draft).toBeGreaterThanOrEqual(1);
+    expect(typeof queue.queue.nextDraftProposalId === "string" || queue.queue.nextDraftProposalId === null).toBe(true);
+  });
+
+  test("autopilot proposal queue listing filters draft and approved states", async () => {
+    syncQuoteToOrderQuote("ws-proposal-queue", {
+      connectorType: "business-central",
+      quoteExternalId: "Q-PQ-1",
+      state: "submitted",
+      amount: 8400,
+      idempotencyKey: "pq-q1",
+    });
+    ingestQuoteCommunication("ws-proposal-queue", "Q-PQ-1", {
+      channel: "email",
+      direction: "inbound",
+      subject: "Need decision by Friday",
+      bodyText: "Please share next step and owner for legal review.",
+      fromAddress: "buyer@customer.example",
+      toAddress: "sales@ourco.example",
+      idempotencyKey: "pq-e1",
+    });
+
+    const nextAction = createQuoteNextActionRecommendation("ws-proposal-queue", {
+      quoteExternalId: "Q-PQ-1",
+      mode: "create_proposal",
+      requireApproval: true,
+    }) as { proposal: { id: string } };
+    const personality = createQuotePersonalityReplyRecommendation("ws-proposal-queue", {
+      quoteExternalId: "Q-PQ-1",
+      tone: "direct",
+      variantCount: 2,
+      createProposal: true,
+      selectedVariantIndex: 0,
+      requireApproval: true,
+    }) as { proposal: { id: string } | null };
+
+    const draftBefore = listQuoteAutopilotProposals("ws-proposal-queue", {
+      status: "draft",
+      limit: 10,
+    }) as { items: Array<{ id: string }> };
+    expect(draftBefore.items.length).toBeGreaterThanOrEqual(2);
+
+    const approved = await approveQuoteAutopilotProposal("ws-proposal-queue", nextAction.proposal.id, {
+      approvedBy: "ops-lead",
+      execute: false,
+    }) as { proposal: { id: string; status: string } };
+    expect(approved.proposal.status).toBe("approved");
+
+    const draftAfter = listQuoteAutopilotProposals("ws-proposal-queue", {
+      status: "draft",
+      limit: 10,
+    }) as { items: Array<{ id: string }> };
+    expect(draftAfter.items.some((item) => item.id === nextAction.proposal.id)).toBe(false);
+    expect(personality.proposal).not.toBeNull();
+    expect(draftAfter.items.some((item) => item.id === personality.proposal?.id)).toBe(true);
+
+    const approvedQueue = listQuoteAutopilotProposals("ws-proposal-queue", {
+      status: "approved",
+      limit: 10,
+    }) as { items: Array<{ id: string; status: string }> };
+    expect(approvedQueue.items.some((item) => item.id === nextAction.proposal.id && item.status === "approved")).toBe(true);
   });
 
   test("mailbox import ingests gmail messages with quote-id inference and dedupe", () => {
