@@ -20,6 +20,7 @@ import type {
   PurchaseOrder,
   BOMComponent,
   ItemAvailability,
+  WorkCenterData,
 } from "../erp/types.js";
 import type {
   BucketSize,
@@ -75,6 +76,8 @@ export interface MRPInput {
   purchaseOrders: PurchaseOrder[];
   components: BOMComponent[];
   availability: ItemAvailability[];
+  /** ERP work center master data (optional, used for CRP) */
+  erpWorkCenters?: WorkCenterData[];
   config: MRPConfig;
 }
 
@@ -84,7 +87,7 @@ export interface MRPInput {
  * Execute a full MRP run.
  */
 export function runMRP(input: MRPInput): MRPRunResult {
-  const { productionOrders, salesOrders, purchaseOrders, components, availability, config } = input;
+  const { productionOrders, salesOrders, purchaseOrders, components, availability, erpWorkCenters, config } = input;
   const startTime = Date.now();
 
   log("starting MRP run");
@@ -112,10 +115,20 @@ export function runMRP(input: MRPInput): MRPRunResult {
   const itemNos = Array.from(demandPlan.keys());
   const supplyPlan = buildSupplyPlan(itemNos, purchaseOrders, productionOrders, availability, horizon);
 
-  // 4. Lot sizing config
+  // 4. Lot sizing config — merge ERP policies with user overrides
+  const itemPolicies = new Map<string, LotSizingPolicy>();
+  // Auto-map from ERP BOM component lot sizing policies
+  for (const comp of components) {
+    const mapped = mapERPLotSizingPolicy(comp);
+    if (mapped) itemPolicies.set(comp.itemNo, mapped);
+  }
+  // User overrides take priority
+  for (const [k, v] of Object.entries(config.itemLotSizing ?? {})) {
+    itemPolicies.set(k, v);
+  }
   const lotSizingConfig: LotSizingConfig = {
     defaultPolicy: config.lotSizingPolicy ?? { type: "lot_for_lot" },
-    itemPolicies: new Map(Object.entries(config.itemLotSizing ?? {})),
+    itemPolicies,
   };
 
   // 5. Gross-to-net calculation
@@ -150,11 +163,13 @@ export function runMRP(input: MRPInput): MRPRunResult {
     log(`pegging: ${pegging.length} trees built`);
   }
 
-  // 8. Capacity planning
+  // 8. Capacity planning — merge ERP work centers with discovered/override data
   let capacityLoads: MRPRunResult["capacityLoads"] = [];
   let capacityExceptions: MRPException[] = [];
   if (config.includeCapacity !== false) {
-    const workCenters = discoverWorkCenters(productionOrders, config.workCenters);
+    const erpWCs = erpWorkCenters ? mapERPWorkCenters(erpWorkCenters) : undefined;
+    const mergedOverrides = [...(erpWCs ?? []), ...(config.workCenters ?? [])];
+    const workCenters = discoverWorkCenters(productionOrders, mergedOverrides.length > 0 ? mergedOverrides : undefined);
     if (workCenters.length > 0) {
       capacityLoads = calculateCapacityLoads({
         productionOrders,
@@ -353,4 +368,52 @@ function buildSummary(
       ? Math.round(((components.length - totalShortages) / components.length) * 100)
       : 100,
   };
+}
+
+// ── ERP Data Mapping ──────────────────────────────────────────────
+
+/**
+ * Map ERP BOM component lot sizing policy to MRP LotSizingPolicy.
+ * Returns null if no ERP policy is set or it maps to default L4L.
+ */
+function mapERPLotSizingPolicy(comp: BOMComponent): LotSizingPolicy | null {
+  if (!comp.lotSizingPolicy) return null;
+
+  switch (comp.lotSizingPolicy) {
+    case "lot_for_lot":
+    case "order":
+      return { type: "lot_for_lot" };
+
+    case "fixed_order_qty":
+      return { type: "fixed_order_qty", quantity: comp.orderQuantity ?? 1 };
+
+    case "eoq":
+      // EOQ needs annual demand — estimate from safety stock and lead time
+      return { type: "eoq", annualDemand: (comp.safetyStock ?? 0) * 12, orderingCost: comp.unitCost * 0.1, holdingCostRate: comp.unitCost * 0.25 };
+
+    case "maximum_qty":
+      return {
+        type: "min_max",
+        min: comp.minimumOrderQty ?? comp.reorderPoint ?? 0,
+        max: comp.orderQuantity ?? (comp.safetyStock ? comp.safetyStock * 2 : 100),
+      };
+
+    default:
+      return null;
+  }
+}
+
+/**
+ * Convert ERP WorkCenterData to MRP WorkCenter format.
+ */
+function mapERPWorkCenters(erpWCs: WorkCenterData[]): WorkCenter[] {
+  return erpWCs
+    .filter((wc) => !wc.blocked)
+    .map((wc) => ({
+      id: wc.id,
+      name: wc.name,
+      capacityMinutesPerDay: wc.capacityMinutesPerDay,
+      efficiency: wc.efficiencyPercent / 100,
+      unitCount: wc.machineCount,
+    }));
 }

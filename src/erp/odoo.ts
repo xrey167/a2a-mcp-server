@@ -14,6 +14,10 @@ import type {
   Vendor,
   PurchaseOrder,
   ItemAvailability,
+  PostedReceipt,
+  RoutingStep,
+  WorkCenterData,
+  TransferOrder,
 } from "./types.js";
 
 function log(msg: string) {
@@ -133,6 +137,7 @@ export class OdooConnector implements ERPConnector {
     for (const r of raw) {
       const productId = (r.product_id as [number, string]) ?? [0, ""];
       const components = await this.getMOComponents(r.id as number);
+      const routings = await this.getProductionRoutings(String(r.id));
 
       orders.push({
         id: String(r.id),
@@ -144,7 +149,7 @@ export class OdooConnector implements ERPConnector {
         startDate: String(r.date_planned_start ?? ""),
         status: mapOdooMOStatus(String(r.state ?? "")),
         components,
-        routings: [],
+        routings,
       });
     }
 
@@ -179,15 +184,18 @@ export class OdooConnector implements ERPConnector {
     replenishmentMethod: BOMComponent["replenishmentMethod"];
     vendorNo?: string;
     vendorName?: string;
+    vendorCountry?: string;
     leadTimeDays: number;
     unitCost: number;
     safetyStock: number;
     inventoryLevel: number;
     reorderPoint: number;
+    itemCategory?: string;
+    scrapPercent?: number;
   }> {
     const raw = await this.searchRead("product.product", [["id", "=", productId]], [
       "standard_price", "qty_available", "seller_ids",
-      "produce_delay", "sale_delay",
+      "produce_delay", "sale_delay", "categ_id",
     ], 1);
 
     if (raw.length === 0) {
@@ -205,27 +213,44 @@ export class OdooConnector implements ERPConnector {
     const sellerIds = p.seller_ids as number[] ?? [];
     let vendorNo: string | undefined;
     let vendorName: string | undefined;
+    let vendorCountry: string | undefined;
     let leadTimeDays = Number(p.produce_delay ?? p.sale_delay ?? 0);
 
-    // Get primary vendor
+    // Item category
+    const categId = p.categ_id as [number, string] | undefined;
+    const itemCategory = categId ? categId[1] : undefined;
+
+    // Get primary vendor with country
     if (sellerIds.length > 0) {
       const sellers = await this.searchRead("product.supplierinfo", [
         ["id", "in", sellerIds],
-      ], ["partner_id", "delay"], 1);
+      ], ["partner_id", "delay", "min_qty"], 1);
       if (sellers.length > 0) {
         const partner = (sellers[0].partner_id as [number, string]) ?? [0, ""];
         vendorNo = String(partner[0]);
         vendorName = partner[1];
         leadTimeDays = Number(sellers[0].delay ?? leadTimeDays);
+
+        // Fetch vendor country
+        try {
+          const vendorData = await this.searchRead("res.partner", [
+            ["id", "=", partner[0]],
+          ], ["country_id"], 1);
+          if (vendorData.length > 0) {
+            const countryId = vendorData[0].country_id as [number, string] | undefined;
+            vendorCountry = countryId ? countryId[1] : undefined;
+          }
+        } catch { /* ignore */ }
       }
     }
 
     // Determine replenishment from BOM existence
     let replenishmentMethod: BOMComponent["replenishmentMethod"] = "purchase";
+    let scrapPercent: number | undefined;
     try {
       const boms = await this.searchRead("mrp.bom", [
         ["product_id", "=", productId],
-      ], ["id", "type"], 1);
+      ], ["id", "type", "product_qty"], 1);
       if (boms.length > 0) {
         const bomType = String(boms[0].type ?? "normal");
         replenishmentMethod = bomType === "subcontract" ? "purchase" : "production";
@@ -253,11 +278,14 @@ export class OdooConnector implements ERPConnector {
       replenishmentMethod,
       vendorNo,
       vendorName,
+      vendorCountry,
       leadTimeDays,
       unitCost: Number(p.standard_price ?? 0),
       safetyStock,
       inventoryLevel: Number(p.qty_available ?? 0),
       reorderPoint,
+      itemCategory,
+      scrapPercent,
     };
   }
 
@@ -453,6 +481,197 @@ export class OdooConnector implements ERPConnector {
       outgoingQty: Number(r.outgoing_qty ?? 0),
     }));
   }
+
+  async getPostedReceipts(filters?: {
+    itemNo?: string;
+    vendorNo?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    limit?: number;
+  }): Promise<PostedReceipt[]> {
+    try {
+      // Odoo: stock.move with picking_type = incoming, state = done
+      const domain: unknown[][] = [
+        ["state", "=", "done"],
+        ["picking_type_id.code", "=", "incoming"],
+      ];
+      if (filters?.itemNo) domain.push(["product_id", "=", parseInt(filters.itemNo, 10)]);
+      if (filters?.dateFrom) domain.push(["date", ">=", filters.dateFrom]);
+      if (filters?.dateTo) domain.push(["date", "<=", filters.dateTo]);
+
+      const raw = await this.searchRead("stock.move", domain, [
+        "product_id", "product_uom_qty", "date", "create_date",
+        "origin", "picking_id",
+      ], filters?.limit ?? 500);
+
+      const receipts: PostedReceipt[] = [];
+      for (const r of raw) {
+        const productId = (r.product_id as [number, string]) ?? [0, ""];
+        const actualDate = String(r.date ?? "").slice(0, 10);
+        const createDate = String(r.create_date ?? "").slice(0, 10);
+        const origin = String(r.origin ?? "");
+
+        // Try to find the original PO for dates
+        let orderDate = createDate;
+        let expectedDate = createDate;
+        let vendorNo = "";
+        let vendorName = "";
+
+        if (origin) {
+          try {
+            const pos = await this.searchRead("purchase.order", [
+              ["name", "=", origin],
+            ], ["date_order", "date_planned", "partner_id"], 1);
+            if (pos.length > 0) {
+              orderDate = String(pos[0].date_order ?? "").slice(0, 10);
+              expectedDate = String(pos[0].date_planned ?? "").slice(0, 10);
+              const partner = (pos[0].partner_id as [number, string]) ?? [0, ""];
+              vendorNo = String(partner[0]);
+              vendorName = partner[1] ?? "";
+            }
+          } catch { /* PO lookup optional */ }
+        }
+
+        const dayMs = 86400000;
+        const orderMs = new Date(orderDate).getTime();
+        const expectedMs = new Date(expectedDate).getTime();
+        const actualMs = new Date(actualDate).getTime();
+        const actualLeadDays = isNaN(orderMs) || isNaN(actualMs) ? 0 : Math.ceil((actualMs - orderMs) / dayMs);
+        const plannedLeadDays = isNaN(orderMs) || isNaN(expectedMs) ? 0 : Math.ceil((expectedMs - orderMs) / dayMs);
+
+        receipts.push({
+          purchaseOrderNo: origin,
+          vendorNo,
+          vendorName,
+          itemNo: String(productId[0]),
+          itemName: productId[1] ?? "",
+          quantity: Number(r.product_uom_qty ?? 0),
+          orderDate,
+          expectedDate,
+          actualReceiptDate: actualDate,
+          actualLeadTimeDays: actualLeadDays,
+          plannedLeadTimeDays: plannedLeadDays,
+          varianceDays: actualLeadDays - plannedLeadDays,
+        });
+      }
+
+      log(`fetched ${receipts.length} posted receipts`);
+      return receipts;
+    } catch (err) {
+      log(`posted receipts fetch failed: ${err}`);
+      return [];
+    }
+  }
+
+  async getProductionRoutings(productionOrderId: string): Promise<RoutingStep[]> {
+    try {
+      const moId = parseInt(productionOrderId, 10);
+      if (isNaN(moId)) return [];
+
+      // Odoo: mrp.workorder linked to production order
+      const raw = await this.searchRead("mrp.workorder", [
+        ["production_id", "=", moId],
+      ], [
+        "name", "workcenter_id", "duration_expected",
+        "duration", "state",
+      ], 100);
+
+      return raw.map((r, idx) => {
+        const wcId = (r.workcenter_id as [number, string]) ?? [0, ""];
+        const totalMinutes = Number(r.duration_expected ?? 0);
+        return {
+          operationNo: String(idx + 1).padStart(2, "0"),
+          description: String(r.name ?? ""),
+          workCenterNo: String(wcId[0]),
+          workCenterName: wcId[1] ?? "",
+          setupTimeMinutes: 0, // Odoo doesn't separate setup/run in workorder
+          runTimeMinutes: totalMinutes,
+          waitTimeMinutes: 0,
+          moveTimeMinutes: 0,
+        };
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  async getWorkCenters(): Promise<WorkCenterData[]> {
+    try {
+      const raw = await this.searchRead("mrp.workcenter", [], [
+        "id", "name", "capacity", "time_efficiency",
+        "oee_target", "working_state",
+      ], 200);
+
+      return raw.map((r) => ({
+        id: String(r.id),
+        name: String(r.name ?? ""),
+        capacityMinutesPerDay: Number(r.capacity ?? 1) * 480, // capacity = machines, 8h/day each
+        efficiencyPercent: Number(r.time_efficiency ?? 100),
+        machineCount: Number(r.capacity ?? 1),
+        workingDaysPerWeek: 5,
+        blocked: String(r.working_state ?? "normal") === "blocked",
+      }));
+    } catch (err) {
+      log(`work centers fetch failed: ${err}`);
+      return [];
+    }
+  }
+
+  async getTransferOrders(filters?: {
+    dateFrom?: string;
+    dateTo?: string;
+  }): Promise<TransferOrder[]> {
+    try {
+      // Odoo: stock.picking with picking_type internal
+      const domain: unknown[][] = [
+        ["picking_type_id.code", "=", "internal"],
+      ];
+      if (filters?.dateFrom) domain.push(["scheduled_date", ">=", filters.dateFrom]);
+      if (filters?.dateTo) domain.push(["scheduled_date", "<=", filters.dateTo]);
+
+      const raw = await this.searchRead("stock.picking", domain, [
+        "id", "name", "location_id", "location_dest_id",
+        "scheduled_date", "date_done", "state",
+        "move_ids_without_package",
+      ], 200);
+
+      const transfers: TransferOrder[] = [];
+      for (const r of raw) {
+        const fromLoc = (r.location_id as [number, string]) ?? [0, ""];
+        const toLoc = (r.location_dest_id as [number, string]) ?? [0, ""];
+        const moveIds = r.move_ids_without_package as number[] ?? [];
+
+        // Get first move line for item info
+        if (moveIds.length > 0) {
+          const moves = await this.searchRead("stock.move", [
+            ["id", "in", moveIds.slice(0, 1)],
+          ], ["product_id", "product_uom_qty"], 1);
+
+          if (moves.length > 0) {
+            const pid = (moves[0].product_id as [number, string]) ?? [0, ""];
+            transfers.push({
+              id: String(r.id),
+              number: String(r.name ?? ""),
+              fromLocation: fromLoc[1] ?? "",
+              toLocation: toLoc[1] ?? "",
+              itemNo: String(pid[0]),
+              itemName: pid[1] ?? "",
+              quantity: Number(moves[0].product_uom_qty ?? 0),
+              shipmentDate: String(r.scheduled_date ?? "").slice(0, 10),
+              receiptDate: String(r.date_done ?? r.scheduled_date ?? "").slice(0, 10),
+              status: mapOdooTransferStatus(String(r.state ?? "")),
+            });
+          }
+        }
+      }
+
+      log(`fetched ${transfers.length} transfer orders`);
+      return transfers;
+    } catch (err) {
+      log(`transfer orders fetch failed: ${err}`);
+      return [];
+    }
+  }
 }
 
 // ── Status Mapping ───────────────────────────────────────────────
@@ -488,6 +707,14 @@ function mapOdooPOStatus(state: string): PurchaseOrder["status"] {
   switch (state) {
     case "purchase": case "done": return "released";
     case "sent": case "to approve": return "pending_approval";
+    default: return "open";
+  }
+}
+
+function mapOdooTransferStatus(state: string): TransferOrder["status"] {
+  switch (state) {
+    case "done": return "received";
+    case "assigned": case "confirmed": return "shipped";
     default: return "open";
   }
 }

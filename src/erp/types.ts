@@ -18,6 +18,22 @@ export interface BOMComponent {
   safetyStock: number;
   inventoryLevel: number;
   reorderPoint: number;
+  /** Scrap percentage (0-100) — yield loss factor */
+  scrapPercent?: number;
+  /** Item category / group for classification */
+  itemCategory?: string;
+  /** Lot sizing policy from ERP planning parameters */
+  lotSizingPolicy?: "lot_for_lot" | "fixed_order_qty" | "eoq" | "order" | "maximum_qty";
+  /** Fixed/max order quantity (used with lot sizing) */
+  orderQuantity?: number;
+  /** Minimum order quantity */
+  minimumOrderQty?: number;
+  /** Order multiple (rounding) */
+  orderMultiple?: number;
+  /** Vendor country (for risk assessment) */
+  vendorCountry?: string;
+  /** BOM version / effectivity date */
+  bomVersionCode?: string;
   /** Child components if this is a sub-assembly */
   children?: BOMComponent[];
 }
@@ -102,6 +118,62 @@ export interface ItemAvailability {
   available: number;
   incomingQty: number;
   outgoingQty: number;
+}
+
+// ── Receipt History (for actual lead time calculation) ────────────
+
+export interface PostedReceipt {
+  /** Source PO number */
+  purchaseOrderNo: string;
+  vendorNo: string;
+  vendorName: string;
+  itemNo: string;
+  itemName: string;
+  quantity: number;
+  /** When the PO was placed */
+  orderDate: string;
+  /** When receipt was originally expected */
+  expectedDate: string;
+  /** When goods were actually received */
+  actualReceiptDate: string;
+  /** Actual lead time in days (actualReceiptDate - orderDate) */
+  actualLeadTimeDays: number;
+  /** Planned lead time in days (expectedDate - orderDate) */
+  plannedLeadTimeDays: number;
+  /** Variance in days (actual - planned, positive = late) */
+  varianceDays: number;
+}
+
+// ── Work Center / Capacity Data ──────────────────────────────────
+
+export interface WorkCenterData {
+  id: string;
+  name: string;
+  /** Capacity per day in minutes */
+  capacityMinutesPerDay: number;
+  /** Efficiency percentage (0-100) */
+  efficiencyPercent: number;
+  /** Number of machines/resources */
+  machineCount: number;
+  /** Calendar: working days per week */
+  workingDaysPerWeek: number;
+  /** Is blocked / under maintenance? */
+  blocked: boolean;
+}
+
+// ── Transfer Orders ──────────────────────────────────────────────
+
+export interface TransferOrder {
+  id: string;
+  number: string;
+  fromLocation: string;
+  toLocation: string;
+  itemNo: string;
+  itemName: string;
+  quantity: number;
+  shipmentDate: string;
+  receiptDate: string;
+  status: "open" | "shipped" | "received";
 }
 
 // ── Graph Structures (for Critical Path) ─────────────────────────
@@ -190,6 +262,37 @@ export interface ERPConnector {
   }): Promise<PurchaseOrder[]>;
 
   getItemAvailability(itemNos: string[]): Promise<ItemAvailability[]>;
+
+  /**
+   * Fetch posted purchase receipts for actual lead time tracking.
+   * Returns historical receipt data with actual vs. planned dates.
+   */
+  getPostedReceipts(filters?: {
+    itemNo?: string;
+    vendorNo?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    limit?: number;
+  }): Promise<PostedReceipt[]>;
+
+  /**
+   * Fetch production order routing lines (work center operations).
+   * Returns routing steps with setup/run times for a production order.
+   */
+  getProductionRoutings(productionOrderId: string): Promise<RoutingStep[]>;
+
+  /**
+   * Fetch work center master data for capacity planning.
+   */
+  getWorkCenters(): Promise<WorkCenterData[]>;
+
+  /**
+   * Fetch transfer orders between locations.
+   */
+  getTransferOrders(filters?: {
+    dateFrom?: string;
+    dateTo?: string;
+  }): Promise<TransferOrder[]>;
 }
 
 // ── ERP Connection Config ────────────────────────────────────────

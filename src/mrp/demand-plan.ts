@@ -231,7 +231,9 @@ function explodeDemand(
   level: number,
 ): void {
   for (const comp of components) {
-    const requiredQty = comp.quantityPer * parentQty;
+    // Apply scrap percentage — inflate quantity to account for yield loss
+    const scrapFactor = comp.scrapPercent ? 1 / (1 - comp.scrapPercent / 100) : 1;
+    const requiredQty = comp.quantityPer * parentQty * scrapFactor;
 
     // Due date for component = parent due date - component lead time
     const compDue = new Date(parentDueDate);

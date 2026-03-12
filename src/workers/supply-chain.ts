@@ -39,6 +39,8 @@ import type {
   BOMComponent,
   PurchaseOrder,
   ItemAvailability,
+  PostedReceipt,
+  WorkCenterData,
 } from "../erp/types.js";
 import { BusinessCentralConnector } from "../erp/business-central.js";
 import { OdooConnector } from "../erp/odoo.js";
@@ -232,6 +234,8 @@ let cachedProductionOrders: ProductionOrder[] = [];
 let cachedSalesOrders: SalesOrder[] = [];
 let cachedPurchaseOrders: PurchaseOrder[] = [];
 let cachedAvailability: ItemAvailability[] = [];
+let cachedPostedReceipts: PostedReceipt[] = [];
+let cachedERPWorkCenters: WorkCenterData[] = [];
 let lastAnalysisTimestamp: string | null = null;
 let cachedMRPResult: MRPRunResult | null = null;
 
@@ -368,11 +372,20 @@ async function handleAnalyzeOrders(args: Record<string, unknown>): Promise<strin
   const itemNos = allComponents.map((c) => c.itemNo);
   const availability = itemNos.length > 0 ? await erp.getItemAvailability(itemNos) : [];
 
+  // Fetch posted receipts for actual lead time data
+  log("loading posted receipts and work centers");
+  const [postedReceipts, erpWorkCenters] = await Promise.all([
+    erp.getPostedReceipts({ dateFrom, dateTo }).catch(() => [] as PostedReceipt[]),
+    erp.getWorkCenters().catch(() => [] as WorkCenterData[]),
+  ]);
+
   // Cache for use in other skills
   cachedProductionOrders = productionOrders;
   cachedSalesOrders = salesOrders;
   cachedPurchaseOrders = purchaseOrders;
   cachedAvailability = availability;
+  cachedPostedReceipts = postedReceipts;
+  cachedERPWorkCenters = erpWorkCenters;
   lastAnalysisTimestamp = new Date().toISOString();
 
   // Build summary
@@ -504,7 +517,7 @@ async function handleAssessRisk(args: Record<string, unknown>): Promise<string> 
   }
 
   const allComponents = collectAllComponents(targetOrders);
-  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
 
   // External risk assessment (optional, uses AI)
   let externalFactors: ExternalRiskFactors | undefined;
@@ -585,7 +598,7 @@ async function handleRecommendActions(args: Record<string, unknown>): Promise<st
   }
 
   const allComponents = collectAllComponents(targetOrders);
-  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
 
   // Score first
   const riskScores = scoreComponents(allComponents, {
@@ -695,7 +708,7 @@ async function handleMonitorDashboard(args: Record<string, unknown>): Promise<st
   }
 
   const allComponents = collectAllComponents(cachedProductionOrders);
-  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
   const riskScores = scoreComponents(allComponents, {
     purchaseOrders: cachedPurchaseOrders,
     availability: cachedAvailability,
@@ -765,7 +778,7 @@ async function handleIntelligenceReport(args: Record<string, unknown>): Promise<
   }
 
   const allComponents = collectAllComponents(targetOrders);
-  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
   const riskScores = scoreComponents(allComponents, {
     purchaseOrders: cachedPurchaseOrders,
     availability: cachedAvailability,
@@ -825,7 +838,7 @@ async function handlePredictBottlenecks(args: Record<string, unknown>): Promise<
   }
 
   const allComponents = collectAllComponents(targetOrders);
-  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
 
   const predictions = await predictBottlenecks(
     allComponents,
@@ -855,7 +868,7 @@ async function handleDeepBOMAnalysis(args: Record<string, unknown>): Promise<str
   }
 
   const allComponents = collectAllComponents(targetOrders);
-  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
   const riskScores = scoreComponents(allComponents, {
     purchaseOrders: cachedPurchaseOrders,
     availability: cachedAvailability,
@@ -924,6 +937,7 @@ async function handleRunMRP(args: Record<string, unknown>): Promise<string> {
     purchaseOrders: cachedPurchaseOrders,
     components: allComponents,
     availability: cachedAvailability,
+    erpWorkCenters: cachedERPWorkCenters.length > 0 ? cachedERPWorkCenters : undefined,
     config: mrpConfig,
   });
 

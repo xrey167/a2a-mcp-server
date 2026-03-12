@@ -1,10 +1,11 @@
 /**
  * Lead time analysis for supply chain components.
  *
- * Analyzes delivery reliability, trend detection, and vendor scoring.
+ * Uses PostedReceipt data (actual receipt dates) for ground-truth lead time analysis.
+ * Falls back to PO expected dates when no receipt history is available.
  */
 
-import type { BOMComponent, PurchaseOrder } from "../erp/types.js";
+import type { BOMComponent, PurchaseOrder, PostedReceipt } from "../erp/types.js";
 
 export interface LeadTimeAnalysis {
   itemNo: string;
@@ -16,21 +17,28 @@ export interface LeadTimeAnalysis {
   reliabilityScore: number; // 0-100
   onTimePercentage: number;
   historyCount: number;
+  /** Average days late (positive) or early (negative) based on actual receipts */
+  avgDeliveryVariance: number | null;
+  /** Standard deviation of lead times — measures consistency */
+  leadTimeStdDev: number | null;
+  /** Data source used for analysis */
+  dataSource: "posted_receipts" | "purchase_orders" | "none";
 }
 
 /**
- * Analyze lead times for components based on historical purchase orders.
+ * Analyze lead times using PostedReceipt data (preferred) with PO fallback.
  */
 export function analyzeLeadTimes(
   components: BOMComponent[],
   purchaseOrders: PurchaseOrder[],
+  postedReceipts?: PostedReceipt[],
 ): LeadTimeAnalysis[] {
   const results: LeadTimeAnalysis[] = [];
 
   function walk(comps: BOMComponent[]) {
     for (const comp of comps) {
       if (comp.replenishmentMethod === "purchase") {
-        const analysis = analyzeComponentLeadTime(comp, purchaseOrders);
+        const analysis = analyzeComponentLeadTime(comp, purchaseOrders, postedReceipts ?? []);
         results.push(analysis);
       }
       if (comp.children) walk(comp.children);
@@ -44,27 +52,89 @@ export function analyzeLeadTimes(
 function analyzeComponentLeadTime(
   comp: BOMComponent,
   purchaseOrders: PurchaseOrder[],
+  postedReceipts: PostedReceipt[],
 ): LeadTimeAnalysis {
-  // Find POs containing this item
+  // Prefer posted receipts — they have actual receipt dates
+  const receipts = postedReceipts.filter((r) => r.itemNo === comp.itemNo);
+
+  if (receipts.length > 0) {
+    return analyzeFromReceipts(comp, receipts);
+  }
+
+  // Fall back to PO expected dates (less accurate, no actual receipt date)
+  return analyzeFromPurchaseOrders(comp, purchaseOrders);
+}
+
+/**
+ * Analyze using PostedReceipt data — ground truth with actual receipt dates.
+ */
+function analyzeFromReceipts(
+  comp: BOMComponent,
+  receipts: PostedReceipt[],
+): LeadTimeAnalysis {
+  const actualLeadTimes = receipts
+    .filter((r) => r.actualLeadTimeDays > 0)
+    .map((r) => r.actualLeadTimeDays);
+
+  if (actualLeadTimes.length === 0) {
+    return emptyResult(comp, "posted_receipts", receipts.length);
+  }
+
+  const avgActual = actualLeadTimes.reduce((a, b) => a + b, 0) / actualLeadTimes.length;
+  const variance = avgActual - comp.leadTimeDays;
+
+  // On-time: actual receipt within planned lead time
+  const onTimeCount = receipts.filter((r) => r.varianceDays <= 0).length;
+  const onTimePercentage = (onTimeCount / receipts.length) * 100;
+
+  // Average delivery variance from receipt data (positive = late)
+  const avgDeliveryVariance = receipts.reduce((sum, r) => sum + r.varianceDays, 0) / receipts.length;
+
+  // Standard deviation for consistency scoring
+  const stdDev = calculateStdDev(actualLeadTimes);
+
+  const trend = detectTrend(actualLeadTimes);
+
+  // Reliability score — uses actual data
+  let reliabilityScore = 100;
+  if (variance > 0) reliabilityScore -= Math.min(variance * 5, 40);
+  reliabilityScore -= Math.max(0, (100 - onTimePercentage) * 0.4);
+  if (trend === "increasing") reliabilityScore -= 10;
+  // Penalize high variability (inconsistent supplier)
+  if (stdDev !== null && stdDev > comp.leadTimeDays * 0.3) reliabilityScore -= 10;
+  reliabilityScore = Math.max(0, Math.min(100, Math.round(reliabilityScore)));
+
+  return {
+    itemNo: comp.itemNo,
+    itemName: comp.itemName,
+    plannedLeadTimeDays: comp.leadTimeDays,
+    actualLeadTimeDays: Math.round(avgActual),
+    variance: Math.round(variance * 10) / 10,
+    trend,
+    reliabilityScore,
+    onTimePercentage: Math.round(onTimePercentage),
+    historyCount: receipts.length,
+    avgDeliveryVariance: Math.round(avgDeliveryVariance * 10) / 10,
+    leadTimeStdDev: stdDev !== null ? Math.round(stdDev * 10) / 10 : null,
+    dataSource: "posted_receipts",
+  };
+}
+
+/**
+ * Fallback: analyze using PO expected dates (no actual receipt date available).
+ */
+function analyzeFromPurchaseOrders(
+  comp: BOMComponent,
+  purchaseOrders: PurchaseOrder[],
+): LeadTimeAnalysis {
   const relevantPOs = purchaseOrders.filter((po) =>
     po.lines.some((l) => l.itemNo === comp.itemNo),
   );
 
   if (relevantPOs.length === 0) {
-    return {
-      itemNo: comp.itemNo,
-      itemName: comp.itemName,
-      plannedLeadTimeDays: comp.leadTimeDays,
-      actualLeadTimeDays: null,
-      variance: null,
-      trend: "unknown",
-      reliabilityScore: 50, // Unknown = neutral
-      onTimePercentage: 0,
-      historyCount: 0,
-    };
+    return emptyResult(comp, "none", 0);
   }
 
-  // Calculate actual lead times from PO data
   const leadTimes: number[] = [];
   let onTimeCount = 0;
 
@@ -86,30 +156,22 @@ function analyzeComponentLeadTime(
   }
 
   if (leadTimes.length === 0) {
-    return {
-      itemNo: comp.itemNo,
-      itemName: comp.itemName,
-      plannedLeadTimeDays: comp.leadTimeDays,
-      actualLeadTimeDays: null,
-      variance: null,
-      trend: "unknown",
-      reliabilityScore: 50,
-      onTimePercentage: 0,
-      historyCount: relevantPOs.length,
-    };
+    return emptyResult(comp, "purchase_orders", relevantPOs.length);
   }
 
   const avgActual = leadTimes.reduce((a, b) => a + b, 0) / leadTimes.length;
   const variance = avgActual - comp.leadTimeDays;
   const onTimePercentage = (onTimeCount / leadTimes.length) * 100;
   const trend = detectTrend(leadTimes);
+  const stdDev = calculateStdDev(leadTimes);
 
-  // Reliability score: penalize variance and late deliveries
   let reliabilityScore = 100;
   if (variance > 0) reliabilityScore -= Math.min(variance * 5, 40);
   reliabilityScore -= Math.max(0, (100 - onTimePercentage) * 0.4);
   if (trend === "increasing") reliabilityScore -= 10;
-  reliabilityScore = Math.max(0, Math.min(100, Math.round(reliabilityScore)));
+  // Discount score slightly since we only have expected dates, not actual
+  reliabilityScore = Math.round(reliabilityScore * 0.9);
+  reliabilityScore = Math.max(0, Math.min(100, reliabilityScore));
 
   return {
     itemNo: comp.itemNo,
@@ -121,6 +183,30 @@ function analyzeComponentLeadTime(
     reliabilityScore,
     onTimePercentage: Math.round(onTimePercentage),
     historyCount: leadTimes.length,
+    avgDeliveryVariance: Math.round(variance * 10) / 10,
+    leadTimeStdDev: stdDev !== null ? Math.round(stdDev * 10) / 10 : null,
+    dataSource: "purchase_orders",
+  };
+}
+
+function emptyResult(
+  comp: BOMComponent,
+  dataSource: LeadTimeAnalysis["dataSource"],
+  historyCount: number,
+): LeadTimeAnalysis {
+  return {
+    itemNo: comp.itemNo,
+    itemName: comp.itemName,
+    plannedLeadTimeDays: comp.leadTimeDays,
+    actualLeadTimeDays: null,
+    variance: null,
+    trend: "unknown",
+    reliabilityScore: 50,
+    onTimePercentage: 0,
+    historyCount,
+    avgDeliveryVariance: null,
+    leadTimeStdDev: null,
+    dataSource,
   };
 }
 
@@ -130,7 +216,6 @@ function analyzeComponentLeadTime(
 function detectTrend(values: number[]): LeadTimeAnalysis["trend"] {
   if (values.length < 3) return "unknown";
 
-  // Use last 10 values for trend
   const recent = values.slice(-10);
   const n = recent.length;
   const indices = recent.map((_, i) => i);
@@ -145,6 +230,13 @@ function detectTrend(values: number[]): LeadTimeAnalysis["trend"] {
   if (slope > 0.5) return "increasing";
   if (slope < -0.5) return "decreasing";
   return "stable";
+}
+
+function calculateStdDev(values: number[]): number | null {
+  if (values.length < 2) return null;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const squaredDiffs = values.map((v) => (v - mean) ** 2);
+  return Math.sqrt(squaredDiffs.reduce((a, b) => a + b, 0) / (values.length - 1));
 }
 
 /**

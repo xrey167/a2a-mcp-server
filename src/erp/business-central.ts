@@ -14,6 +14,10 @@ import type {
   Vendor,
   PurchaseOrder,
   ItemAvailability,
+  PostedReceipt,
+  RoutingStep,
+  WorkCenterData,
+  TransferOrder,
 } from "./types.js";
 
 function log(msg: string) {
@@ -138,9 +142,11 @@ export class BusinessCentralConnector implements ERPConnector {
 
     const orders: ProductionOrder[] = [];
     for (const r of raw) {
+      const orderId = String(r.id ?? r.systemId ?? "");
       const components = await this.getBOMComponents(r.sourceNo as string);
+      const routings = await this.getProductionRoutings(orderId);
       orders.push({
-        id: String(r.id ?? r.systemId ?? ""),
+        id: orderId,
         number: String(r.no ?? ""),
         itemNo: String(r.sourceNo ?? ""),
         itemName: String(r.description ?? ""),
@@ -149,7 +155,7 @@ export class BusinessCentralConnector implements ERPConnector {
         startDate: String(r.startingDate ?? r.dueDate ?? ""),
         status: mapBCProdStatus(String(r.status ?? "")),
         components,
-        routings: [], // Routing lines would need a separate endpoint
+        routings,
       });
     }
 
@@ -216,6 +222,15 @@ export class BusinessCentralConnector implements ERPConnector {
         safetyStock: Number(r.safetyStockQuantity ?? 0),
         inventoryLevel: Number(r.inventory ?? 0),
         reorderPoint: Number(r.reorderPoint ?? 0),
+        // Planning parameters from BC Item Card
+        scrapPercent: r.scrapPercent != null ? Number(r.scrapPercent) : undefined,
+        itemCategory: r.itemCategoryCode ? String(r.itemCategoryCode) : undefined,
+        lotSizingPolicy: r.reorderingPolicy ? mapBCLotSizing(String(r.reorderingPolicy)) : undefined,
+        orderQuantity: r.reorderQuantity != null ? Number(r.reorderQuantity) : undefined,
+        minimumOrderQty: r.minimumOrderQuantity != null ? Number(r.minimumOrderQuantity) : undefined,
+        orderMultiple: r.orderMultiple != null ? Number(r.orderMultiple) : undefined,
+        vendorCountry: r.vendorCountry ? String(r.vendorCountry) : undefined,
+        bomVersionCode: r.productionBOMVersionCode ? String(r.productionBOMVersionCode) : undefined,
       };
 
       // Recurse into sub-assemblies
@@ -304,6 +319,140 @@ export class BusinessCentralConnector implements ERPConnector {
     }
     return results;
   }
+
+  async getPostedReceipts(filters?: {
+    itemNo?: string;
+    vendorNo?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    limit?: number;
+  }): Promise<PostedReceipt[]> {
+    const filterParts: string[] = [];
+    if (filters?.itemNo) filterParts.push(`itemNo eq '${filters.itemNo}'`);
+    if (filters?.vendorNo) filterParts.push(`buyFromVendorNo eq '${filters.vendorNo}'`);
+    if (filters?.dateFrom) filterParts.push(`postingDate ge ${filters.dateFrom}`);
+    if (filters?.dateTo) filterParts.push(`postingDate le ${filters.dateTo}`);
+
+    const params: Record<string, string> = {
+      $top: String(filters?.limit ?? 500),
+      $orderby: "postingDate desc",
+    };
+    if (filterParts.length > 0) params.$filter = filterParts.join(" and ");
+
+    try {
+      // BC: Posted Purchase Receipts (purchaseReceipts entity)
+      const raw = await this.odata<Record<string, unknown>>("purchaseReceipts", params);
+
+      const receipts: PostedReceipt[] = [];
+      for (const r of raw) {
+        const orderDate = String(r.orderDate ?? "");
+        const expectedDate = String(r.expectedReceiptDate ?? "");
+        const actualDate = String(r.postingDate ?? "");
+
+        const orderMs = new Date(orderDate).getTime();
+        const expectedMs = new Date(expectedDate).getTime();
+        const actualMs = new Date(actualDate).getTime();
+        const dayMs = 86400000;
+
+        const actualLeadDays = isNaN(orderMs) || isNaN(actualMs) ? 0 : Math.ceil((actualMs - orderMs) / dayMs);
+        const plannedLeadDays = isNaN(orderMs) || isNaN(expectedMs) ? 0 : Math.ceil((expectedMs - orderMs) / dayMs);
+
+        receipts.push({
+          purchaseOrderNo: String(r.orderNo ?? ""),
+          vendorNo: String(r.buyFromVendorNo ?? ""),
+          vendorName: String(r.buyFromVendorName ?? ""),
+          itemNo: String(r.itemNo ?? ""),
+          itemName: String(r.description ?? ""),
+          quantity: Number(r.quantity ?? 0),
+          orderDate,
+          expectedDate,
+          actualReceiptDate: actualDate,
+          actualLeadTimeDays: actualLeadDays,
+          plannedLeadTimeDays: plannedLeadDays,
+          varianceDays: actualLeadDays - plannedLeadDays,
+        });
+      }
+
+      log(`fetched ${receipts.length} posted receipts`);
+      return receipts;
+    } catch (err) {
+      log(`posted receipts fetch failed: ${err}`);
+      return [];
+    }
+  }
+
+  async getProductionRoutings(productionOrderId: string): Promise<RoutingStep[]> {
+    try {
+      // BC: Production Order Routing Lines
+      const raw = await this.odata<Record<string, unknown>>(
+        `productionOrders(${productionOrderId})/prodOrderRoutingLines`,
+        { $top: "100" },
+      );
+
+      return raw.map((r) => ({
+        operationNo: String(r.operationNo ?? ""),
+        description: String(r.description ?? ""),
+        workCenterNo: String(r.no ?? r.workCenterNo ?? ""),
+        workCenterName: String(r.workCenterName ?? r.description ?? ""),
+        setupTimeMinutes: Number(r.setupTime ?? 0),
+        runTimeMinutes: Number(r.runTime ?? 0),
+        waitTimeMinutes: Number(r.waitTime ?? 0),
+        moveTimeMinutes: Number(r.moveTime ?? 0),
+      }));
+    } catch {
+      // Routing lines endpoint may not be available
+      return [];
+    }
+  }
+
+  async getWorkCenters(): Promise<WorkCenterData[]> {
+    try {
+      const raw = await this.odata<Record<string, unknown>>("workCenters", { $top: "200" });
+      return raw.map((r) => ({
+        id: String(r.no ?? r.id ?? ""),
+        name: String(r.name ?? ""),
+        capacityMinutesPerDay: Number(r.capacity ?? 480),
+        efficiencyPercent: Number(r.efficiency ?? 100),
+        machineCount: 1,
+        workingDaysPerWeek: 5,
+        blocked: String(r.blocked ?? "") !== " " && String(r.blocked ?? "") !== "",
+      }));
+    } catch (err) {
+      log(`work centers fetch failed: ${err}`);
+      return [];
+    }
+  }
+
+  async getTransferOrders(filters?: {
+    dateFrom?: string;
+    dateTo?: string;
+  }): Promise<TransferOrder[]> {
+    const filterParts: string[] = [];
+    if (filters?.dateFrom) filterParts.push(`shipmentDate ge ${filters.dateFrom}`);
+    if (filters?.dateTo) filterParts.push(`shipmentDate le ${filters.dateTo}`);
+
+    const params: Record<string, string> = { $top: "200" };
+    if (filterParts.length > 0) params.$filter = filterParts.join(" and ");
+
+    try {
+      const raw = await this.odata<Record<string, unknown>>("transferOrders", params);
+      return raw.map((r) => ({
+        id: String(r.id ?? r.systemId ?? ""),
+        number: String(r.no ?? ""),
+        fromLocation: String(r.transferFromCode ?? ""),
+        toLocation: String(r.transferToCode ?? ""),
+        itemNo: String(r.itemNo ?? ""),
+        itemName: String(r.description ?? ""),
+        quantity: Number(r.quantity ?? 0),
+        shipmentDate: String(r.shipmentDate ?? ""),
+        receiptDate: String(r.receiptDate ?? ""),
+        status: mapBCTransferStatus(String(r.status ?? "")),
+      }));
+    } catch (err) {
+      log(`transfer orders fetch failed: ${err}`);
+      return [];
+    }
+  }
 }
 
 // ── Mapping Helpers ──────────────────────────────────────────────
@@ -349,4 +498,20 @@ function mapBCSalesLines(lines: Record<string, unknown>[]): SalesOrder["lines"] 
     requestedDeliveryDate: String(l.shipmentDate ?? ""),
     promisedDeliveryDate: l.promisedDeliveryDate ? String(l.promisedDeliveryDate) : undefined,
   }));
+}
+
+function mapBCLotSizing(s: string): BOMComponent["lotSizingPolicy"] {
+  const lower = s.toLowerCase();
+  if (lower.includes("fixed")) return "fixed_order_qty";
+  if (lower.includes("lot-for-lot") || lower.includes("lot for lot")) return "lot_for_lot";
+  if (lower.includes("order")) return "order";
+  if (lower.includes("maximum") || lower.includes("max")) return "maximum_qty";
+  return "lot_for_lot";
+}
+
+function mapBCTransferStatus(s: string): TransferOrder["status"] {
+  const lower = s.toLowerCase();
+  if (lower.includes("shipped")) return "shipped";
+  if (lower.includes("received") || lower.includes("closed")) return "received";
+  return "open";
 }
