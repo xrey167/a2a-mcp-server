@@ -599,18 +599,136 @@ export class OdooConnector implements ERPConnector {
     try {
       const raw = await this.searchRead("mrp.workcenter", [], [
         "id", "name", "capacity", "time_efficiency",
-        "oee_target", "working_state",
+        "oee_target", "working_state", "costs_hour",
+        "time_start", "time_stop", "resource_calendar_id",
       ], 200);
 
-      return raw.map((r) => ({
-        id: String(r.id),
-        name: String(r.name ?? ""),
-        capacityMinutesPerDay: Number(r.capacity ?? 1) * 480, // capacity = machines, 8h/day each
-        efficiencyPercent: Number(r.time_efficiency ?? 100),
-        machineCount: Number(r.capacity ?? 1),
-        workingDaysPerWeek: 5,
-        blocked: String(r.working_state ?? "normal") === "blocked",
-      }));
+      // Fetch resource calendars for shift/hours data
+      const calendarIds = raw
+        .map((r) => {
+          const cal = r.resource_calendar_id as [number, string] | false;
+          return cal ? cal[0] : null;
+        })
+        .filter((id): id is number => id !== null);
+
+      const calendarMap = new Map<number, { name: string; hoursPerDay: number; daysPerWeek: number; shifts: Array<{ name: string; startTime: string; endTime: string; daysOfWeek: number[] }> }>();
+
+      if (calendarIds.length > 0) {
+        try {
+          const uniqueIds = [...new Set(calendarIds)];
+          const calendars = await this.searchRead("resource.calendar", [
+            ["id", "in", uniqueIds],
+          ], ["id", "name", "hours_per_week", "attendance_ids"], 50);
+
+          for (const cal of calendars) {
+            const hoursPerWeek = Number(cal.hours_per_week ?? 40);
+            const daysPerWeek = hoursPerWeek > 0 ? Math.min(7, Math.round(hoursPerWeek / 8)) : 5;
+
+            // Fetch attendance lines (shift definitions)
+            const shifts: Array<{ name: string; startTime: string; endTime: string; daysOfWeek: number[] }> = [];
+            const attendanceIds = cal.attendance_ids as number[] ?? [];
+            if (attendanceIds.length > 0) {
+              try {
+                const attendances = await this.searchRead("resource.calendar.attendance", [
+                  ["id", "in", attendanceIds],
+                ], ["id", "name", "hour_from", "hour_to", "dayofweek"], 100);
+
+                // Group by name to combine days
+                const shiftMap = new Map<string, { name: string; startTime: string; endTime: string; days: Set<number> }>();
+                for (const att of attendances) {
+                  const name = String(att.name ?? "Shift");
+                  const from = Number(att.hour_from ?? 0);
+                  const to = Number(att.hour_to ?? 0);
+                  const key = `${name}-${from}-${to}`;
+                  if (!shiftMap.has(key)) {
+                    shiftMap.set(key, {
+                      name,
+                      startTime: formatHour(from),
+                      endTime: formatHour(to),
+                      days: new Set(),
+                    });
+                  }
+                  shiftMap.get(key)!.days.add(Number(att.dayofweek ?? 0));
+                }
+                for (const s of shiftMap.values()) {
+                  shifts.push({ name: s.name, startTime: s.startTime, endTime: s.endTime, daysOfWeek: [...s.days].sort() });
+                }
+              } catch {
+                log("could not fetch calendar attendance lines");
+              }
+            }
+
+            calendarMap.set(Number(cal.id), {
+              name: String(cal.name ?? ""),
+              hoursPerDay: hoursPerWeek / daysPerWeek,
+              daysPerWeek,
+              shifts,
+            });
+          }
+          log(`fetched ${calendarMap.size} resource calendars`);
+        } catch {
+          log("resource.calendar not available — using defaults");
+        }
+      }
+
+      // Fetch OEE productivity data (actual performance)
+      const wcIds = raw.map((r) => Number(r.id));
+      const oeeMap = new Map<number, number>();
+      if (wcIds.length > 0) {
+        try {
+          const productivity = await this.searchRead("mrp.workcenter.productivity", [
+            ["workcenter_id", "in", wcIds],
+            ["date_end", "!=", false],
+          ], ["workcenter_id", "duration", "loss_id"], 500);
+
+          // Compute actual OEE per work center: productive time / total time
+          const wcTotals = new Map<number, { productive: number; total: number }>();
+          for (const p of productivity) {
+            const wcId = ((p.workcenter_id as [number, string]) ?? [0])[0];
+            const duration = Number(p.duration ?? 0);
+            if (!wcTotals.has(wcId)) wcTotals.set(wcId, { productive: 0, total: 0 });
+            const t = wcTotals.get(wcId)!;
+            t.total += duration;
+            // loss_id = false means productive time (no loss)
+            if (!p.loss_id || p.loss_id === false) t.productive += duration;
+          }
+          for (const [wcId, totals] of wcTotals) {
+            if (totals.total > 0) {
+              oeeMap.set(wcId, Math.round((totals.productive / totals.total) * 100));
+            }
+          }
+          log(`computed OEE for ${oeeMap.size} work centers`);
+        } catch {
+          log("mrp.workcenter.productivity not available — skipping OEE");
+        }
+      }
+
+      return raw.map((r) => {
+        const id = Number(r.id);
+        const calRef = r.resource_calendar_id as [number, string] | false;
+        const calData = calRef ? calendarMap.get(calRef[0]) : undefined;
+        const hoursPerDay = calData?.hoursPerDay ?? 8;
+
+        return {
+          id: String(id),
+          name: String(r.name ?? ""),
+          capacityMinutesPerDay: Number(r.capacity ?? 1) * hoursPerDay * 60,
+          efficiencyPercent: Number(r.time_efficiency ?? 100),
+          machineCount: Number(r.capacity ?? 1),
+          workingDaysPerWeek: calData?.daysPerWeek ?? 5,
+          blocked: String(r.working_state ?? "normal") === "blocked",
+          oeeTarget: Number(r.oee_target ?? 0) || undefined,
+          oeeActual: oeeMap.get(id) ?? undefined,
+          avgSetupTimeMinutes: Number(r.time_start ?? 0) + Number(r.time_stop ?? 0) || undefined,
+          costPerHour: Number(r.costs_hour ?? 0) || undefined,
+          calendar: calData ? {
+            name: calData.name,
+            hoursPerDay: calData.hoursPerDay,
+            daysPerWeek: calData.daysPerWeek,
+            shifts: calData.shifts.length > 0 ? calData.shifts : undefined,
+          } : undefined,
+        };
+      });
     } catch (err) {
       log(`work centers fetch failed: ${err}`);
       return [];
@@ -672,6 +790,15 @@ export class OdooConnector implements ERPConnector {
       return [];
     }
   }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+/** Convert Odoo float hours (e.g. 8.5) to HH:mm string */
+function formatHour(h: number): string {
+  const hours = Math.floor(h);
+  const minutes = Math.round((h - hours) * 60);
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
 // ── Status Mapping ───────────────────────────────────────────────

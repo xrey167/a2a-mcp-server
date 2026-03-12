@@ -159,6 +159,57 @@ export interface WorkCenterData {
   workingDaysPerWeek: number;
   /** Is blocked / under maintenance? */
   blocked: boolean;
+  /** OEE target percentage (0-100) — Overall Equipment Effectiveness */
+  oeeTarget?: number;
+  /** Current OEE percentage (0-100) — actual measured OEE */
+  oeeActual?: number;
+  /** Setup time (minutes) — average changeover time */
+  avgSetupTimeMinutes?: number;
+  /** Cost per hour for this work center */
+  costPerHour?: number;
+  /** Subcontracting: is this an external/outsourced work center? */
+  isSubcontracted?: boolean;
+  /** Machine centers belonging to this work center (BC hierarchy) */
+  machineCenters?: MachineCenterData[];
+  /** Calendar / shift information */
+  calendar?: WorkCalendar;
+}
+
+export interface MachineCenterData {
+  id: string;
+  name: string;
+  workCenterId: string;
+  /** Capacity per day in minutes */
+  capacityMinutesPerDay: number;
+  /** Efficiency percentage (0-100) */
+  efficiencyPercent: number;
+  /** Is blocked / under maintenance? */
+  blocked: boolean;
+  /** Setup time (minutes) */
+  setupTimeMinutes?: number;
+  /** Cost per hour */
+  costPerHour?: number;
+}
+
+export interface WorkCalendar {
+  /** Calendar name (e.g. "Standard 40h", "3-Shift") */
+  name: string;
+  /** Working hours per day (derived from shifts) */
+  hoursPerDay: number;
+  /** Working days per week */
+  daysPerWeek: number;
+  /** Shift definitions */
+  shifts?: WorkShift[];
+}
+
+export interface WorkShift {
+  name: string;
+  /** Start time (HH:mm) */
+  startTime: string;
+  /** End time (HH:mm) */
+  endTime: string;
+  /** Days of week (0=Monday, 6=Sunday) */
+  daysOfWeek: number[];
 }
 
 // ── Transfer Orders ──────────────────────────────────────────────

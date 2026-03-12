@@ -405,15 +405,38 @@ function mapERPLotSizingPolicy(comp: BOMComponent): LotSizingPolicy | null {
 
 /**
  * Convert ERP WorkCenterData to MRP WorkCenter format.
+ * Uses calendar data for accurate hours/day and OEE for real efficiency.
  */
 function mapERPWorkCenters(erpWCs: WorkCenterData[]): WorkCenter[] {
-  return erpWCs
-    .filter((wc) => !wc.blocked)
-    .map((wc) => ({
+  const workCenters: WorkCenter[] = [];
+
+  for (const wc of erpWCs) {
+    if (wc.blocked) continue;
+
+    // Use calendar hours if available, otherwise fall back to raw capacity
+    const hoursPerDay = wc.calendar?.hoursPerDay ?? (wc.capacityMinutesPerDay / 60);
+    const capacityMinutesPerDay = hoursPerDay * 60;
+
+    // Use actual OEE if measured, otherwise ERP efficiency setting
+    const efficiency = wc.oeeActual
+      ? wc.oeeActual / 100
+      : wc.efficiencyPercent / 100;
+
+    // Count active machine centers if available
+    let unitCount = wc.machineCount;
+    if (wc.machineCenters && wc.machineCenters.length > 0) {
+      unitCount = wc.machineCenters.filter((mc) => !mc.blocked).length || 1;
+    }
+
+    workCenters.push({
       id: wc.id,
       name: wc.name,
-      capacityMinutesPerDay: wc.capacityMinutesPerDay,
-      efficiency: wc.efficiencyPercent / 100,
-      unitCount: wc.machineCount,
-    }));
+      capacityMinutesPerDay: capacityMinutesPerDay,
+      efficiency,
+      unitCount,
+      workingDaysPerWeek: wc.calendar?.daysPerWeek ?? wc.workingDaysPerWeek,
+    });
+  }
+
+  return workCenters;
 }

@@ -17,6 +17,7 @@ import type {
   PostedReceipt,
   RoutingStep,
   WorkCenterData,
+  MachineCenterData,
   TransferOrder,
 } from "./types.js";
 
@@ -407,16 +408,64 @@ export class BusinessCentralConnector implements ERPConnector {
 
   async getWorkCenters(): Promise<WorkCenterData[]> {
     try {
-      const raw = await this.odata<Record<string, unknown>>("workCenters", { $top: "200" });
-      return raw.map((r) => ({
-        id: String(r.no ?? r.id ?? ""),
-        name: String(r.name ?? ""),
-        capacityMinutesPerDay: Number(r.capacity ?? 480),
-        efficiencyPercent: Number(r.efficiency ?? 100),
-        machineCount: 1,
-        workingDaysPerWeek: 5,
-        blocked: String(r.blocked ?? "") !== " " && String(r.blocked ?? "") !== "",
-      }));
+      // Fetch work centers with full planning data
+      const raw = await this.odata<Record<string, unknown>>("workCenters", {
+        $top: "200",
+        $select: "no,name,capacity,efficiency,blocked,directUnitCost,unitCostCalculation,shopCalendarCode,subcontracted",
+      });
+
+      // Fetch machine centers (child resources of work centers)
+      let machineCentersRaw: Record<string, unknown>[] = [];
+      try {
+        machineCentersRaw = await this.odata<Record<string, unknown>>("machineCenters", {
+          $top: "500",
+          $select: "no,name,workCenterNo,capacity,efficiency,blocked,directUnitCost,setupTime",
+        });
+        log(`fetched ${machineCentersRaw.length} machine centers`);
+      } catch {
+        log("machine centers entity not available — skipping");
+      }
+
+      // Group machine centers by work center
+      const mcByWC = new Map<string, MachineCenterData[]>();
+      for (const mc of machineCentersRaw) {
+        const wcNo = String(mc.workCenterNo ?? "");
+        if (!wcNo) continue;
+        const mapped: MachineCenterData = {
+          id: String(mc.no ?? mc.id ?? ""),
+          name: String(mc.name ?? ""),
+          workCenterId: wcNo,
+          capacityMinutesPerDay: Number(mc.capacity ?? 480),
+          efficiencyPercent: Number(mc.efficiency ?? 100),
+          blocked: String(mc.blocked ?? "") !== " " && String(mc.blocked ?? "") !== "",
+          setupTimeMinutes: Number(mc.setupTime ?? 0),
+          costPerHour: Number(mc.directUnitCost ?? 0),
+        };
+        if (!mcByWC.has(wcNo)) mcByWC.set(wcNo, []);
+        mcByWC.get(wcNo)!.push(mapped);
+      }
+
+      return raw.map((r) => {
+        const wcNo = String(r.no ?? r.id ?? "");
+        const machines = mcByWC.get(wcNo) ?? [];
+        const activeMachines = machines.filter((m) => !m.blocked);
+
+        return {
+          id: wcNo,
+          name: String(r.name ?? ""),
+          capacityMinutesPerDay: Number(r.capacity ?? 480),
+          efficiencyPercent: Number(r.efficiency ?? 100),
+          machineCount: activeMachines.length || 1,
+          workingDaysPerWeek: 5,
+          blocked: String(r.blocked ?? "") !== " " && String(r.blocked ?? "") !== "",
+          costPerHour: Number(r.directUnitCost ?? 0) || undefined,
+          isSubcontracted: String(r.subcontracted ?? "false").toLowerCase() === "true",
+          machineCenters: machines.length > 0 ? machines : undefined,
+          // BC shop calendar would require additional entity calls
+          // For now, derive from machine count
+          calendar: undefined,
+        };
+      });
     } catch (err) {
       log(`work centers fetch failed: ${err}`);
       return [];

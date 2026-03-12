@@ -192,6 +192,8 @@ export interface WorkCenter {
   efficiency: number;
   /** Number of machines/resources */
   unitCount: number;
+  /** Working days per week (default: 5) — from ERP calendar */
+  workingDaysPerWeek?: number;
 }
 
 export interface CapacityLoad {

@@ -143,8 +143,9 @@ function calculateAvailableMinutes(wc: WorkCenter, startDate: string, endDate: s
   const end = new Date(endDate);
   const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000));
 
-  // Assume 5 working days per 7 calendar days
-  const workingDays = Math.round(days * (5 / 7));
+  // Use ERP calendar working days if available, otherwise assume 5/7
+  const daysPerWeek = wc.workingDaysPerWeek ?? 5;
+  const workingDays = Math.round(days * (daysPerWeek / 7));
   return workingDays * wc.capacityMinutesPerDay * wc.efficiency * wc.unitCount;
 }
 
