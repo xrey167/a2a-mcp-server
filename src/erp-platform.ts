@@ -53,7 +53,19 @@ const Customer360HealthInputSchema = z.object({
     revenue: z.number().min(0).max(1).optional().default(0.3),
     sentiment: z.number().min(0).max(1).optional().default(0.2),
     responsiveness: z.number().min(0).max(1).optional().default(0.2),
-  }).optional(),
+  })
+    .optional()
+    .refine((w) => {
+      if (!w) return true;
+      const sum =
+        (w.engagement ?? 0) +
+        (w.revenue ?? 0) +
+        (w.sentiment ?? 0) +
+        (w.responsiveness ?? 0);
+      return sum > 0 && Math.abs(sum - 1) <= 0.01;
+    }, {
+      message: "weights must sum to 1 (within a small tolerance)",
+    }),
 }).strict();
 
 const Customer360TimelineInputSchema = z.object({
@@ -9220,6 +9232,17 @@ export function validateConnectorType(input: unknown): ConnectorType {
 export function validateMasterDataEntity(input: unknown): MasterDataEntity {
   return MasterDataEntitySchema.parse(input);
 }
+
+// Export Customer360 input schemas for use in the orchestrator
+export {
+  Customer360ProfileInputSchema,
+  Customer360HealthInputSchema,
+  Customer360TimelineInputSchema,
+  Customer360SegmentsInputSchema,
+  Customer360ChurnRiskInputSchema,
+  Customer360InteractionTypeSchema,
+  Customer360SegmentSchema,
+};
 
 export function resetErpPlatformForTests(): void {
   db.run(`DELETE FROM customer360_health_history`);
