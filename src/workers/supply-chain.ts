@@ -19,6 +19,8 @@
  *   intelligence_report      — AI-powered comprehensive supply chain intelligence briefing
  *   predict_bottlenecks      — Predictive analysis of future bottlenecks from current trends
  *   deep_bom_analysis        — AI deep analysis of BOM structure for hidden risks
+ *   run_mrp                  — Full MRP cycle: demand explosion, gross-to-net, lot sizing, planned orders, pegging, CRP
+ *   mrp_impact               — Supply delay impact analysis using pegging data
  *   remember / recall        — Shared persistent memory
  */
 
@@ -53,6 +55,9 @@ import {
   gatherWebIntelligence,
   predictBottlenecks,
 } from "../risk/ai-analyzer.js";
+import { runMRP, type MRPConfig } from "../mrp/mrp-engine.js";
+import { analyzeSupplyImpact } from "../mrp/pegging.js";
+import type { MRPRunResult, LotSizingPolicy, BucketSize } from "../mrp/types.js";
 
 const PORT = 8089;
 const NAME = "supply-chain-agent";
@@ -131,6 +136,22 @@ const SupplyChainSchemas = {
   deep_bom_analysis: z.object({
     productionOrderId: z.string().optional(),
   }).passthrough(),
+
+  // ── MRP Skills ──
+  run_mrp: z.object({
+    horizonWeeks: z.number().int().positive().optional().default(12),
+    bucketSize: z.enum(["day", "week", "month"]).optional().default("week"),
+    safetyLeadTimeDays: z.number().optional().default(2),
+    lotSizingPolicy: z.enum(["lot_for_lot", "fixed_order_qty", "eoq", "period_order_qty"]).optional().default("lot_for_lot"),
+    fixedOrderQty: z.number().optional(),
+    includeCapacity: z.boolean().optional().default(true),
+    includePegging: z.boolean().optional().default(true),
+  }).passthrough(),
+
+  mrp_impact: z.object({
+    itemNo: z.string(),
+    delayDays: z.number().int().positive(),
+  }).passthrough(),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -139,7 +160,7 @@ const AGENT_CARD = {
   name: NAME,
   description: "Supply chain risk agent — analyzes production/sales orders from Business Central or Odoo, identifies critical paths, assesses global risks, and recommends interventions",
   url: `http://localhost:${PORT}`,
-  version: "2.0.0",
+  version: "3.0.0",
   capabilities: { streaming: false },
   skills: [
     {
@@ -187,6 +208,16 @@ const AGENT_CARD = {
       name: "Deep BOM Analysis",
       description: "AI deep analysis of Bill of Materials structure. Identifies concentration risks, cascade effects, demand-supply mismatches, and strategic vulnerabilities that rule-based scoring misses.",
     },
+    {
+      id: "run_mrp",
+      name: "Run MRP",
+      description: "Execute full Material Requirements Planning cycle: demand explosion, gross-to-net calculation, lot sizing, planned order generation, pegging (demand↔supply traceability), and capacity planning (CRP). Returns planned orders, net requirements, exceptions, and capacity loads.",
+    },
+    {
+      id: "mrp_impact",
+      name: "MRP Impact Analysis",
+      description: "Analyze the downstream impact of a supply delay: 'If component X is delayed by N days, which sales orders and production orders are affected?' Uses pegging data for full traceability.",
+    },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory" },
   ],
@@ -202,6 +233,7 @@ let cachedSalesOrders: SalesOrder[] = [];
 let cachedPurchaseOrders: PurchaseOrder[] = [];
 let cachedAvailability: ItemAvailability[] = [];
 let lastAnalysisTimestamp: string | null = null;
+let cachedMRPResult: MRPRunResult | null = null;
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -844,6 +876,135 @@ async function handleDeepBOMAnalysis(args: Record<string, unknown>): Promise<str
   }, 2);
 }
 
+// ── MRP Skill Handlers ───────────────────────────────────────────
+
+async function handleRunMRP(args: Record<string, unknown>): Promise<string> {
+  requireConnector();
+  const {
+    horizonWeeks,
+    bucketSize,
+    safetyLeadTimeDays,
+    lotSizingPolicy,
+    fixedOrderQty,
+    includeCapacity,
+    includePegging,
+  } = SupplyChainSchemas.run_mrp.parse(args);
+
+  // Ensure we have data
+  if (cachedProductionOrders.length === 0) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  const allComponents = collectAllComponents(cachedProductionOrders);
+
+  // Build lot sizing policy
+  let policy: LotSizingPolicy = { type: "lot_for_lot" };
+  if (lotSizingPolicy === "fixed_order_qty" && fixedOrderQty) {
+    policy = { type: "fixed_order_qty", quantity: fixedOrderQty };
+  } else if (lotSizingPolicy === "eoq") {
+    policy = { type: "eoq", annualDemand: 0, orderingCost: 50, holdingCostRate: 0.25 };
+  } else if (lotSizingPolicy === "period_order_qty") {
+    policy = { type: "period_order_qty", periods: 4 };
+  }
+
+  const mrpConfig: MRPConfig = {
+    horizonWeeks,
+    bucketSize: bucketSize as BucketSize,
+    safetyLeadTimeDays,
+    lotSizingPolicy: policy,
+    includeCapacity,
+    includePegging,
+  };
+
+  log(`running MRP: ${horizonWeeks} weeks, ${bucketSize} buckets, ${lotSizingPolicy} lot sizing`);
+
+  const result = runMRP({
+    productionOrders: cachedProductionOrders,
+    salesOrders: cachedSalesOrders,
+    purchaseOrders: cachedPurchaseOrders,
+    components: allComponents,
+    availability: cachedAvailability,
+    config: mrpConfig,
+  });
+
+  cachedMRPResult = result;
+
+  // Build a focused response (full result can be very large)
+  const response = {
+    timestamp: result.timestamp,
+    horizon: {
+      start: result.horizon.startDate,
+      end: result.horizon.endDate,
+      buckets: result.horizon.buckets.length,
+      bucketSize: result.horizon.bucketSize,
+    },
+    summary: result.summary,
+    plannedOrders: result.plannedOrders.map((o) => ({
+      id: o.id,
+      item: `${o.itemName} (${o.itemNo})`,
+      quantity: o.quantity,
+      type: o.type,
+      orderDate: o.orderDate,
+      dueDate: o.dueDate,
+      action: o.action,
+      vendor: o.vendorName ?? o.vendorNo ?? "—",
+      lotSizing: o.lotSizingPolicy,
+      status: o.status,
+    })),
+    exceptions: result.exceptions.slice(0, 25),
+    capacitySummary: result.capacityLoads.map((cl) => ({
+      workCenter: cl.workCenterName,
+      avgUtilization: cl.averageUtilization,
+      peakUtilization: cl.peakUtilization,
+      overloadedBuckets: cl.overloadedBuckets,
+    })),
+    peggingSummary: {
+      trees: result.pegging.length,
+      totalShortages: result.pegging.reduce((s, t) => s + t.shortages.length, 0),
+      shortages: result.pegging
+        .flatMap((t) => t.shortages)
+        .slice(0, 15)
+        .map((s) => ({
+          item: `${s.itemName} (${s.itemNo})`,
+          shortage: s.shortageQuantity,
+          neededBy: s.neededBy,
+        })),
+    },
+  };
+
+  return safeStringify(response, 2);
+}
+
+async function handleMRPImpact(args: Record<string, unknown>): Promise<string> {
+  const { itemNo, delayDays } = SupplyChainSchemas.mrp_impact.parse(args);
+
+  // Need a recent MRP run with pegging data
+  if (!cachedMRPResult || cachedMRPResult.pegging.length === 0) {
+    log("no MRP result cached — running MRP first");
+    await handleRunMRP({ includePegging: true });
+  }
+
+  if (!cachedMRPResult) {
+    return safeStringify({ error: "MRP run failed — cannot perform impact analysis" });
+  }
+
+  const impact = analyzeSupplyImpact(itemNo, delayDays, cachedMRPResult.pegging);
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    scenario: {
+      item: itemNo,
+      delayDays,
+      description: `What happens if ${itemNo} is delayed by ${delayDays} days?`,
+    },
+    impact: {
+      affectedOrdersCount: impact.affectedOrders.length,
+      totalAffectedQuantity: impact.totalAffectedQuantity,
+      affectedOrders: impact.affectedOrders,
+    },
+  }, 2);
+}
+
 // ── Utilities ────────────────────────────────────────────────────
 
 function groupBy<T>(items: T[], keyFn: (item: T) => string): Record<string, number> {
@@ -884,6 +1045,10 @@ async function handleSkill(
       return handlePredictBottlenecks(args);
     case "deep_bom_analysis":
       return handleDeepBOMAnalysis(args);
+    case "run_mrp":
+      return handleRunMRP(args);
+    case "mrp_impact":
+      return handleMRPImpact(args);
     default:
       return `Unknown skill: ${skillId}`;
   }
