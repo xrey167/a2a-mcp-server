@@ -23,6 +23,8 @@ import {
   decideQuoteToOrderApproval,
   getExecutiveAnalytics,
   getForecastQualityAnalytics,
+  getQuotePersonalityProfile,
+  recordQuotePersonalityFeedback,
   getQuotePersonalityInsights,
   getQuoteCommunicationAnalytics,
   getQuoteCommunicationThreadSignals,
@@ -73,6 +75,11 @@ import {
   updateWorkflowRun,
   listQuoteFollowupActions,
   workflowDefinitionFor,
+  getCustomer360Profile,
+  getCustomer360Health,
+  getCustomer360Timeline,
+  getCustomer360Segments,
+  getCustomer360ChurnRisk,
 } from "../erp-platform.js";
 
 describe("erp-platform", () => {
@@ -795,6 +802,122 @@ describe("erp-platform", () => {
     expect(insights.averageConfidence).toBeGreaterThan(0.3);
     expect(insights.distribution.length).toBeGreaterThanOrEqual(1);
     expect(typeof insights.communicationPlaybook === "string" || insights.communicationPlaybook === null).toBe(true);
+  });
+
+  test("personality profile endpoint returns explainable profile per contact", () => {
+    syncQuoteToOrderQuote("ws-profile", {
+      connectorType: "odoo",
+      quoteExternalId: "Q-PROF-1",
+      state: "submitted",
+      amount: 5100,
+      idempotencyKey: "prof-q1",
+    });
+    ingestQuoteCommunication("ws-profile", "Q-PROF-1", {
+      channel: "email",
+      direction: "inbound",
+      subject: "Need exact compliance timeline",
+      bodyText: "Please send concrete cost numbers and final decision deadline.",
+      fromAddress: "buyer@customer.example",
+      toAddress: "ops@ourco.example",
+      idempotencyKey: "prof-e1",
+    });
+    ingestQuoteCommunication("ws-profile", "Q-PROF-1", {
+      channel: "email",
+      direction: "inbound",
+      subject: "Reminder for final contract details",
+      bodyText: "We need exact legal/compliance checklist before approval.",
+      fromAddress: "buyer@customer.example",
+      toAddress: "ops@ourco.example",
+      idempotencyKey: "prof-e2",
+    });
+
+    const profile = getQuotePersonalityProfile("ws-profile", "buyer@customer.example", {
+      includeRecentEvents: true,
+      eventLimit: 10,
+      autoRecompute: true,
+    }) as {
+      profile: {
+        personalityType: string | null;
+        confidence: number;
+        sampleCount: number;
+        explanation: { model: string };
+      };
+      recentEvents: unknown[];
+      communicationPlaybook: string;
+      feedback: { summary: { total: number } };
+    };
+
+    expect(profile.profile.personalityType).toMatch(/^[EI][SN][TF][JP]$/);
+    expect(profile.profile.confidence).toBeGreaterThan(0.3);
+    expect(profile.profile.sampleCount).toBeGreaterThanOrEqual(2);
+    expect(profile.profile.explanation.model).toBe("heuristic_mbti_v1");
+    expect(profile.recentEvents.length).toBeGreaterThanOrEqual(1);
+    expect(typeof profile.communicationPlaybook).toBe("string");
+    expect(profile.feedback.summary.total).toBe(0);
+  });
+
+  test("personality feedback updates feedback summary and keeps learning loop data", () => {
+    syncQuoteToOrderQuote("ws-profile-fb", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-PROF-FB-1",
+      state: "submitted",
+      amount: 7800,
+      idempotencyKey: "prof-fb-q1",
+    });
+    ingestQuoteCommunication("ws-profile-fb", "Q-PROF-FB-1", {
+      channel: "email",
+      direction: "inbound",
+      subject: "Can we align on next step?",
+      bodyText: "Please propose final next action and owner today.",
+      fromAddress: "buyer2@customer.example",
+      toAddress: "ops@ourco.example",
+      idempotencyKey: "prof-fb-e1",
+    });
+
+    const feedback = recordQuotePersonalityFeedback("ws-profile-fb", {
+      contactKey: "buyer2@customer.example",
+      quoteExternalId: "Q-PROF-FB-1",
+      actionType: "followup_email",
+      outcome: "positive",
+      replyReceived: true,
+      convertedToOrder: true,
+      note: "Customer responded quickly and approved next step.",
+      recordedBy: "ops-lead",
+      applyLearning: true,
+    }) as {
+      status: string;
+      feedback: {
+        outcome: string;
+        convertedToOrder: boolean;
+      };
+      profile: {
+        personalityType: string | null;
+      } | null;
+    };
+
+    expect(feedback.status).toBe("recorded");
+    expect(feedback.feedback.outcome).toBe("positive");
+    expect(feedback.feedback.convertedToOrder).toBe(true);
+    expect(feedback.profile === null || typeof feedback.profile.personalityType === "string" || feedback.profile.personalityType === null).toBe(true);
+
+    const profile = getQuotePersonalityProfile("ws-profile-fb", "buyer2@customer.example", {
+      includeRecentEvents: false,
+      autoRecompute: false,
+    }) as {
+      feedback: {
+        summary: {
+          total: number;
+          positive: number;
+          replyRatePct: number;
+          conversionRatePct: number;
+        };
+      };
+    };
+
+    expect(profile.feedback.summary.total).toBeGreaterThanOrEqual(1);
+    expect(profile.feedback.summary.positive).toBeGreaterThanOrEqual(1);
+    expect(profile.feedback.summary.replyRatePct).toBeGreaterThan(0);
+    expect(profile.feedback.summary.conversionRatePct).toBeGreaterThan(0);
   });
 
   test("mailbox import ingests gmail messages with quote-id inference and dedupe", () => {
@@ -1549,5 +1672,593 @@ describe("erp-platform", () => {
     expect(revenue.metrics.recoveredRevenueEur).toBeGreaterThanOrEqual(0);
     expect(revenue.metrics.followupSlaAdherencePct).toBeGreaterThanOrEqual(0);
     expect(revenue.forecast.sampleSize).toBeGreaterThanOrEqual(2);
+  });
+
+  // ─── Customer 360 ──────────────────────────────────────────────────────────
+
+  test("Customer 360 profile: 'new' segment for brand-new customer with ≤ 2 quotes", () => {
+    syncQuoteToOrderQuote("ws-c360-new", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-N1",
+      state: "submitted",
+      amount: 5000,
+      customerExternalId: "CUST-NEW",
+      idempotencyKey: "c360-n1",
+    });
+
+    const profile = getCustomer360Profile("ws-c360-new", "CUST-NEW") as Record<string, unknown>;
+    expect(profile.segment).toBe("new");
+    expect(profile.fromCache).toBe(false);
+    expect((profile.quotes as Record<string, number>).total).toBe(1);
+  });
+
+  test("Customer 360 profile: 'at_risk' segment when health score is below 40 (all-rejected quotes, no comms)", () => {
+    // 3 rejected quotes → no revenue, no active quotes, no comms → healthScore ≈ 34 → at_risk
+    for (let i = 1; i <= 3; i++) {
+      syncQuoteToOrderQuote("ws-c360-risk", {
+        connectorType: "dynamics",
+        quoteExternalId: `Q-C360-RISK-${i}`,
+        state: "rejected",
+        amount: 1000,
+        customerExternalId: "CUST-RISK",
+        idempotencyKey: `c360-risk-${i}`,
+      });
+    }
+
+    const profile = getCustomer360Profile("ws-c360-risk", "CUST-RISK") as Record<string, unknown>;
+    expect(profile.segment).toBe("at_risk");
+    const healthScore = (profile.health as Record<string, number>).score;
+    expect(healthScore).toBeGreaterThanOrEqual(20); // not churning
+    expect(healthScore).toBeLessThan(40);           // at_risk threshold
+  });
+
+  test("Customer 360 profile: 'loyal' segment when health ≥ 60 and convertedQuotes ≥ 2", () => {
+    // 2 converted + 1 draft → conversionRate > 0.5, no comms, healthScore ≈ 63 → loyal
+    syncQuoteToOrderQuote("ws-c360-loyal", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-L1",
+      state: "fulfilled",
+      amount: 1000,
+      customerExternalId: "CUST-LOYAL",
+      idempotencyKey: "c360-l1",
+    });
+    syncQuoteToOrderQuote("ws-c360-loyal", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-L2",
+      state: "converted_to_order",
+      amount: 1000,
+      customerExternalId: "CUST-LOYAL",
+      idempotencyKey: "c360-l2",
+    });
+    syncQuoteToOrderQuote("ws-c360-loyal", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-L3",
+      state: "draft",
+      amount: 1000,
+      customerExternalId: "CUST-LOYAL",
+      idempotencyKey: "c360-l3",
+    });
+
+    const profile = getCustomer360Profile("ws-c360-loyal", "CUST-LOYAL") as Record<string, unknown>;
+    expect(profile.segment).toBe("loyal");
+    expect((profile.quotes as Record<string, number>).converted).toBe(2);
+    expect((profile.health as Record<string, number>).score).toBeGreaterThanOrEqual(60);
+  });
+
+  test("Customer 360 profile: 'champion' segment for high-health, high-conversion customer with many positive comms", () => {
+    // 4 quotes: 2 fulfilled, 2 draft → conversionRate = 0.5 ✓
+    for (let i = 1; i <= 2; i++) {
+      syncQuoteToOrderQuote("ws-c360-champ", {
+        connectorType: "dynamics",
+        quoteExternalId: `Q-C360-C${i}`,
+        state: "fulfilled",
+        amount: 1000,
+        customerExternalId: "CUST-CHAMP",
+        idempotencyKey: `c360-champ-q${i}`,
+      });
+    }
+    for (let i = 3; i <= 4; i++) {
+      syncQuoteToOrderQuote("ws-c360-champ", {
+        connectorType: "dynamics",
+        quoteExternalId: `Q-C360-C${i}`,
+        state: "draft",
+        amount: 1000,
+        customerExternalId: "CUST-CHAMP",
+        idempotencyKey: `c360-champ-q${i}`,
+      });
+    }
+
+    // 10 positive-sentiment comms ("go ahead" → ready_to_buy → positive)
+    for (let i = 1; i <= 10; i++) {
+      ingestQuoteCommunication("ws-c360-champ", "Q-C360-C1", {
+        channel: "email",
+        direction: "inbound",
+        bodyText: "go ahead with the purchase order",
+        idempotencyKey: `c360-champ-e${i}`,
+      });
+    }
+
+    const profile = getCustomer360Profile("ws-c360-champ", "CUST-CHAMP") as Record<string, unknown>;
+    expect(profile.segment).toBe("champion");
+    expect((profile.health as Record<string, number>).score).toBeGreaterThanOrEqual(80);
+    expect((profile.revenue as Record<string, number>).conversionRate).toBe(0.5);
+  });
+
+  test("Customer 360 profile: 'promising' segment as default for mid-health customer", () => {
+    // 3 draft quotes → totalQuotes > 2 (not new), healthScore ≈ 41 (not at_risk, champion, or loyal)
+    for (let i = 1; i <= 3; i++) {
+      syncQuoteToOrderQuote("ws-c360-prm", {
+        connectorType: "dynamics",
+        quoteExternalId: `Q-C360-PRM-${i}`,
+        state: "draft",
+        amount: 500,
+        customerExternalId: "CUST-PRM",
+        idempotencyKey: `c360-prm-${i}`,
+      });
+    }
+
+    const profile = getCustomer360Profile("ws-c360-prm", "CUST-PRM") as Record<string, unknown>;
+    expect(profile.segment).toBe("promising");
+  });
+
+  test("Customer 360 profile: second call within 1 hour returns fromCache=true", () => {
+    syncQuoteToOrderQuote("ws-c360-cache", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-CACHE",
+      state: "submitted",
+      amount: 3000,
+      customerExternalId: "CUST-CACHE",
+      idempotencyKey: "c360-cache-q1",
+    });
+
+    const first = getCustomer360Profile("ws-c360-cache", "CUST-CACHE") as Record<string, unknown>;
+    expect(first.fromCache).toBe(false);
+
+    const second = getCustomer360Profile("ws-c360-cache", "CUST-CACHE") as Record<string, unknown>;
+    expect(second.fromCache).toBe(true);
+  });
+
+  test("Customer 360 profile: forceRefresh=true bypasses cache and recomputes", () => {
+    syncQuoteToOrderQuote("ws-c360-force", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-FORCE",
+      state: "draft",
+      amount: 2000,
+      customerExternalId: "CUST-FORCE",
+      idempotencyKey: "c360-force-q1",
+    });
+
+    const first = getCustomer360Profile("ws-c360-force", "CUST-FORCE") as Record<string, unknown>;
+    expect(first.fromCache).toBe(false);
+
+    const cached = getCustomer360Profile("ws-c360-force", "CUST-FORCE") as Record<string, unknown>;
+    expect(cached.fromCache).toBe(true);
+
+    const refreshed = getCustomer360Profile("ws-c360-force", "CUST-FORCE", true) as Record<string, unknown>;
+    expect(refreshed.fromCache).toBe(false);
+  });
+
+  test("Customer 360 profile: 1 snapshot per day — multiple same-day calls produce exactly one health history entry", () => {
+    syncQuoteToOrderQuote("ws-c360-snap", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-SNAP",
+      state: "submitted",
+      amount: 2500,
+      customerExternalId: "CUST-SNAP",
+      idempotencyKey: "c360-snap-q1",
+    });
+
+    getCustomer360Profile("ws-c360-snap", "CUST-SNAP");       // computes fresh, creates snapshot
+    getCustomer360Profile("ws-c360-snap", "CUST-SNAP");       // cache hit, no new snapshot
+    getCustomer360Profile("ws-c360-snap", "CUST-SNAP", true); // forceRefresh same day → still only 1 snapshot
+
+    const health = getCustomer360Health("ws-c360-snap", "CUST-SNAP") as {
+      history: Array<{ score: number; date: string }>;
+    };
+    expect(health.history.length).toBe(1);
+  });
+
+  test("Customer 360 profile: health dimensions are all within [0, 100]", () => {
+    syncQuoteToOrderQuote("ws-c360-hdim", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-HDIM",
+      state: "submitted",
+      amount: 7500,
+      customerExternalId: "CUST-HDIM",
+      idempotencyKey: "c360-hdim-q1",
+    });
+
+    const profile = getCustomer360Profile("ws-c360-hdim", "CUST-HDIM") as Record<string, unknown>;
+    const h = profile.health as Record<string, number>;
+    for (const dim of ["score", "engagement", "revenue", "sentiment", "responsiveness"]) {
+      expect(h[dim]).toBeGreaterThanOrEqual(0);
+      expect(h[dim]).toBeLessThanOrEqual(100);
+    }
+  });
+
+  test("Customer 360 health: custom engagement-only weights change aggregated score to equal engagement dimension", () => {
+    syncQuoteToOrderQuote("ws-c360-hw", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-HW",
+      state: "submitted",
+      amount: 3000,
+      customerExternalId: "CUST-HW",
+      idempotencyKey: "c360-hw-q1",
+    });
+    getCustomer360Profile("ws-c360-hw", "CUST-HW"); // ensure profile exists first
+
+    const defaultHealth = getCustomer360Health("ws-c360-hw", "CUST-HW") as {
+      score: number;
+      dimensions: { engagement: number; revenue: number; sentiment: number; responsiveness: number };
+      weights: Record<string, number>;
+      history: Array<{ score: number; date: string }>;
+    };
+
+    // With engagement weight = 1.0 and all others = 0, score equals the engagement dimension
+    const engagementOnly = getCustomer360Health("ws-c360-hw", "CUST-HW", {
+      engagement: 1,
+      revenue: 0,
+      sentiment: 0,
+      responsiveness: 0,
+    }) as { score: number };
+
+    expect(engagementOnly.score).toBe(defaultHealth.dimensions.engagement);
+    expect(defaultHealth.history.length).toBeGreaterThanOrEqual(1);
+    expect(defaultHealth.history[0]).toHaveProperty("score");
+    expect(defaultHealth.history[0]).toHaveProperty("date");
+  });
+
+  test("Customer 360 timeline: returns quote and communication events sorted DESC by timestamp", () => {
+    syncQuoteToOrderQuote("ws-c360-tl", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-TL1",
+      state: "submitted",
+      amount: 5000,
+      customerExternalId: "CUST-TL",
+      idempotencyKey: "c360-tl-q1",
+    });
+    ingestQuoteCommunication("ws-c360-tl", "Q-C360-TL1", {
+      channel: "email",
+      direction: "inbound",
+      bodyText: "Looking forward to the demo",
+      idempotencyKey: "c360-tl-e1",
+    });
+
+    const timeline = getCustomer360Timeline("ws-c360-tl", "CUST-TL") as {
+      count: number;
+      items: Array<{ type: string; timestamp: string }>;
+    };
+
+    expect(timeline.count).toBeGreaterThanOrEqual(2); // at least quote_created + communication
+    const timestamps = timeline.items.map((i) => i.timestamp);
+    for (let i = 1; i < timestamps.length; i++) {
+      expect(timestamps[i - 1] >= timestamps[i]).toBe(true); // DESC order
+    }
+    expect(timeline.items.some((i) => i.type === "quote_created")).toBe(true);
+    expect(timeline.items.some((i) => i.type === "communication")).toBe(true);
+  });
+
+  test("Customer 360 timeline: 'since' filter excludes events before the cutoff date", () => {
+    syncQuoteToOrderQuote("ws-c360-since", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-SINCE",
+      state: "submitted",
+      amount: 5000,
+      customerExternalId: "CUST-SINCE",
+      idempotencyKey: "c360-since-q1",
+    });
+
+    // Old communication (2 days ago)
+    const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    ingestQuoteCommunication("ws-c360-since", "Q-C360-SINCE", {
+      channel: "email",
+      direction: "inbound",
+      bodyText: "Checking in on the quote",
+      occurredAt: twoDaysAgo,
+      idempotencyKey: "c360-since-old",
+    });
+
+    // Recent communication (now)
+    ingestQuoteCommunication("ws-c360-since", "Q-C360-SINCE", {
+      channel: "email",
+      direction: "outbound",
+      bodyText: "Following up with updated pricing",
+      idempotencyKey: "c360-since-new",
+    });
+
+    // Filter to yesterday onwards — should exclude the 2-days-ago comm
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString();
+    const filtered = getCustomer360Timeline("ws-c360-since", "CUST-SINCE", { since: yesterday }) as {
+      items: Array<{ type: string; timestamp: string }>;
+      totalAvailable: number;
+    };
+
+    // All returned items must be at or after the cutoff
+    for (const item of filtered.items) {
+      expect(item.timestamp >= yesterday).toBe(true);
+    }
+    // The 2-days-ago communication must not appear in results
+    expect(filtered.items.some((i) => i.timestamp < yesterday)).toBe(false);
+    // Only 2 items survive the filter: quote_created (now) + outbound comm (now)
+    expect(filtered.items.length).toBe(2);
+  });
+
+  test("Customer 360 timeline: interactionTypes filter returns only the requested event types", () => {
+    syncQuoteToOrderQuote("ws-c360-types", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-C360-TYPES",
+      state: "submitted",
+      amount: 4000,
+      customerExternalId: "CUST-TYPES",
+      idempotencyKey: "c360-types-q1",
+    });
+    ingestQuoteCommunication("ws-c360-types", "Q-C360-TYPES", {
+      channel: "email",
+      direction: "inbound",
+      bodyText: "Need more details please",
+      idempotencyKey: "c360-types-e1",
+    });
+
+    // Request only quote_created events — communications must be absent
+    const quoteOnly = getCustomer360Timeline("ws-c360-types", "CUST-TYPES", {
+      interactionTypes: ["quote_created"],
+    }) as { items: Array<{ type: string }> };
+
+    expect(quoteOnly.items.length).toBeGreaterThanOrEqual(1);
+    expect(quoteOnly.items.every((i) => i.type === "quote_created")).toBe(true);
+  });
+
+  test("Customer 360 timeline: limit caps the returned result count", () => {
+    for (let i = 1; i <= 5; i++) {
+      syncQuoteToOrderQuote("ws-c360-lim", {
+        connectorType: "dynamics",
+        quoteExternalId: `Q-C360-LIM-${i}`,
+        state: "submitted",
+        amount: 1000,
+        customerExternalId: "CUST-LIM",
+        idempotencyKey: `c360-lim-q${i}`,
+      });
+    }
+
+    const limited = getCustomer360Timeline("ws-c360-lim", "CUST-LIM", { limit: 2 }) as {
+      count: number;
+      totalAvailable: number;
+      items: Array<unknown>;
+    };
+
+    expect(limited.count).toBe(2);
+    expect(limited.items).toHaveLength(2);
+    expect(limited.totalAvailable).toBeGreaterThan(2);
+  });
+
+  test("Customer 360 segments: auto-computes profiles and returns segment summary for all workspace customers", () => {
+    const wsId = "ws-c360-segs";
+    syncQuoteToOrderQuote(wsId, {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-SEG-1",
+      state: "submitted",
+      amount: 2000,
+      customerExternalId: "CUST-SEG-A",
+      idempotencyKey: "seg-q1",
+    });
+    syncQuoteToOrderQuote(wsId, {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-SEG-2",
+      state: "submitted",
+      amount: 3000,
+      customerExternalId: "CUST-SEG-B",
+      idempotencyKey: "seg-q2",
+    });
+
+    const result = getCustomer360Segments({ workspaceId: wsId }) as {
+      count: number;
+      summary: Record<string, number>;
+      items: Array<{ customerExternalId: string; segment: string; healthScore: number }>;
+    };
+
+    expect(result.count).toBe(2);
+    const totalInSummary = Object.values(result.summary).reduce((a, b) => a + b, 0);
+    expect(totalInSummary).toBe(2);
+    expect(result.items.every((i) => typeof i.segment === "string")).toBe(true);
+    // Items are ordered by health_score DESC
+    const scores = result.items.map((i) => i.healthScore);
+    for (let i = 1; i < scores.length; i++) {
+      expect(scores[i - 1]).toBeGreaterThanOrEqual(scores[i]);
+    }
+  });
+
+  test("Customer 360 segments: segment filter returns only matching customers", () => {
+    const wsId = "ws-c360-segfil";
+
+    // 'new' customer — 1 quote
+    syncQuoteToOrderQuote(wsId, {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-SF-NEW",
+      state: "submitted",
+      amount: 2000,
+      customerExternalId: "CUST-SF-NEW",
+      idempotencyKey: "sf-new-q1",
+    });
+
+    // 'at_risk' customer — 3 rejected quotes, no comms → healthScore ≈ 34
+    for (let i = 1; i <= 3; i++) {
+      syncQuoteToOrderQuote(wsId, {
+        connectorType: "dynamics",
+        quoteExternalId: `Q-SF-RISK-${i}`,
+        state: "rejected",
+        amount: 1000,
+        customerExternalId: "CUST-SF-RISK",
+        idempotencyKey: `sf-risk-q${i}`,
+      });
+    }
+
+    // Pre-compute so both are stored before filtering
+    getCustomer360Profile(wsId, "CUST-SF-NEW");
+    getCustomer360Profile(wsId, "CUST-SF-RISK");
+
+    const newOnly = getCustomer360Segments({ workspaceId: wsId, segment: "new" }) as {
+      items: Array<{ customerExternalId: string }>;
+      segmentFilter: string;
+    };
+    expect(newOnly.segmentFilter).toBe("new");
+    expect(newOnly.items.every((i) => i.customerExternalId === "CUST-SF-NEW")).toBe(true);
+
+    const atRiskOnly = getCustomer360Segments({ workspaceId: wsId, segment: "at_risk" }) as {
+      items: Array<{ customerExternalId: string }>;
+    };
+    expect(atRiskOnly.items.some((i) => i.customerExternalId === "CUST-SF-RISK")).toBe(true);
+  });
+
+  test("Customer 360 churn risk: single-customer view returns structured risk data", () => {
+    syncQuoteToOrderQuote("ws-c360-churn1", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-CHURN1",
+      state: "submitted",
+      amount: 5000,
+      customerExternalId: "CUST-CHURN1",
+      idempotencyKey: "churn1-q1",
+    });
+
+    const result = getCustomer360ChurnRisk({
+      workspaceId: "ws-c360-churn1",
+      customerExternalId: "CUST-CHURN1",
+    }) as {
+      churnRisk: { riskPct: number; factors: string[] };
+      healthScore: number;
+      segment: string;
+      lastInteractionAt: string | null;
+    };
+
+    expect(typeof result.churnRisk.riskPct).toBe("number");
+    expect(result.churnRisk.riskPct).toBeGreaterThanOrEqual(0);
+    expect(result.churnRisk.riskPct).toBeLessThanOrEqual(100);
+    expect(Array.isArray(result.churnRisk.factors)).toBe(true);
+    expect(typeof result.healthScore).toBe("number");
+    expect(typeof result.segment).toBe("string");
+  });
+
+  test("Customer 360 churn risk: high rejection rate triggers 'high_rejection_rate' factor", () => {
+    // rejectionRate = 2/3 > 0.5 → high_rejection_rate (+15 pts)
+    syncQuoteToOrderQuote("ws-c360-rej", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-REJ-1",
+      state: "rejected",
+      amount: 2000,
+      customerExternalId: "CUST-REJ",
+      idempotencyKey: "rej-q1",
+    });
+    syncQuoteToOrderQuote("ws-c360-rej", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-REJ-2",
+      state: "rejected",
+      amount: 2000,
+      customerExternalId: "CUST-REJ",
+      idempotencyKey: "rej-q2",
+    });
+    syncQuoteToOrderQuote("ws-c360-rej", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-REJ-3",
+      state: "draft",
+      amount: 2000,
+      customerExternalId: "CUST-REJ",
+      idempotencyKey: "rej-q3",
+    });
+
+    const result = getCustomer360ChurnRisk({
+      workspaceId: "ws-c360-rej",
+      customerExternalId: "CUST-REJ",
+    }) as { churnRisk: { riskPct: number; factors: string[] } };
+
+    expect(result.churnRisk.factors).toContain("high_rejection_rate");
+    expect(result.churnRisk.riskPct).toBeGreaterThanOrEqual(15);
+  });
+
+  test("Customer 360 churn risk: declining sentiment triggers 'sentiment_declining_fast' factor", () => {
+    syncQuoteToOrderQuote("ws-c360-snt", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-SNT-1",
+      state: "submitted",
+      amount: 3000,
+      customerExternalId: "CUST-SNT",
+      idempotencyKey: "snt-q1",
+    });
+
+    // 2 old positive comms (30 days ago) + 2 recent negative comms → sentimentTrend ≈ -2
+    const oldBase = Date.now() - 30 * 86_400_000;
+    for (let i = 1; i <= 2; i++) {
+      ingestQuoteCommunication("ws-c360-snt", "Q-SNT-1", {
+        channel: "email",
+        direction: "inbound",
+        bodyText: "go ahead with the purchase order",
+        occurredAt: new Date(oldBase + i * 60_000).toISOString(),
+        idempotencyKey: `snt-pos-${i}`,
+      });
+    }
+    const recentBase = Date.now() - 60_000;
+    for (let i = 1; i <= 2; i++) {
+      ingestQuoteCommunication("ws-c360-snt", "Q-SNT-1", {
+        channel: "email",
+        direction: "inbound",
+        bodyText: "not interested anymore, stop contacting us",
+        occurredAt: new Date(recentBase + i * 60_000).toISOString(),
+        idempotencyKey: `snt-neg-${i}`,
+      });
+    }
+
+    const result = getCustomer360ChurnRisk({
+      workspaceId: "ws-c360-snt",
+      customerExternalId: "CUST-SNT",
+    }) as { churnRisk: { riskPct: number; factors: string[] } };
+
+    expect(result.churnRisk.factors).toContain("sentiment_declining_fast");
+    expect(result.churnRisk.riskPct).toBeGreaterThanOrEqual(25);
+  });
+
+  test("Customer 360 churn risk: batch view returns only customers above threshold, ordered by risk DESC", () => {
+    const wsId = "ws-c360-batch";
+
+    // High-risk customer: 3 rejected quotes → rejectionRate = 1.0 → high_rejection_rate (15 pts)
+    for (let i = 1; i <= 3; i++) {
+      syncQuoteToOrderQuote(wsId, {
+        connectorType: "dynamics",
+        quoteExternalId: `Q-BATCH-HIGH-${i}`,
+        state: "rejected",
+        amount: 1000,
+        customerExternalId: "CUST-HIGH-RISK",
+        idempotencyKey: `batch-high-${i}`,
+      });
+    }
+
+    // Low-risk customer: 1 active quote, no rejections → churnRisk = 0
+    syncQuoteToOrderQuote(wsId, {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-BATCH-LOW",
+      state: "submitted",
+      amount: 3000,
+      customerExternalId: "CUST-LOW-RISK",
+      idempotencyKey: "batch-low-q1",
+    });
+
+    // Pre-compute profiles so churn_risk_pct is stored in DB
+    getCustomer360Profile(wsId, "CUST-HIGH-RISK");
+    getCustomer360Profile(wsId, "CUST-LOW-RISK");
+
+    // Threshold of 10 — high-risk (15 pts) should appear, low-risk (0 pts) should not
+    const result = getCustomer360ChurnRisk({ workspaceId: wsId, threshold: 10 }) as {
+      count: number;
+      items: Array<{ customerExternalId: string; churnRiskPct: number }>;
+    };
+
+    const highRiskItem = result.items.find((i) => i.customerExternalId === "CUST-HIGH-RISK");
+    expect(highRiskItem).toBeDefined();
+    expect(highRiskItem!.churnRiskPct).toBeGreaterThanOrEqual(15);
+
+    expect(result.items.some((i) => i.customerExternalId === "CUST-LOW-RISK")).toBe(false);
+
+    // Items ordered by churnRiskPct DESC
+    const riskValues = result.items.map((i) => i.churnRiskPct);
+    for (let i = 1; i < riskValues.length; i++) {
+      expect(riskValues[i - 1]).toBeGreaterThanOrEqual(riskValues[i]);
+    }
   });
 });

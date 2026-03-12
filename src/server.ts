@@ -63,6 +63,8 @@ import {
   getExecutiveAnalytics,
   getForecastQualityAnalytics,
   getOpsAnalytics,
+  getQuotePersonalityProfile,
+  recordQuotePersonalityFeedback,
   getQuotePersonalityInsights,
   getQuoteCommunicationAnalytics,
   getQuoteCommunicationThreadSignals,
@@ -133,6 +135,11 @@ import {
   getCustomer360Timeline,
   getCustomer360Segments,
   getCustomer360ChurnRisk,
+  Customer360ProfileInputSchema,
+  Customer360HealthInputSchema,
+  Customer360TimelineInputSchema,
+  Customer360SegmentsInputSchema,
+  Customer360ChurnRiskInputSchema,
 } from "./erp-platform.js";
 
 // Extend Fastify's request interface with rawBody for HMAC verification
@@ -936,54 +943,11 @@ const OrchestratorSchemas = {
   erp_analytics_ops: z.object({
     since: z.string().optional(),
   }).strict(),
-  erp_customer360_profile: z.object({
-    workspaceId: z.string().min(1),
-    customerExternalId: z.string().min(1),
-    forceRefresh: z.boolean().optional().default(false),
-  }).strict(),
-  erp_customer360_health: z.object({
-    workspaceId: z.string().min(1),
-    customerExternalId: z.string().min(1),
-    weights: z.object({
-      engagement: z.number().min(0).max(1).optional().default(0.3),
-      revenue: z.number().min(0).max(1).optional().default(0.3),
-      sentiment: z.number().min(0).max(1).optional().default(0.2),
-      responsiveness: z.number().min(0).max(1).optional().default(0.2),
-    })
-      .optional()
-      .refine((w) => {
-        if (!w) return true;
-        const sum =
-          (w.engagement ?? 0) +
-          (w.revenue ?? 0) +
-          (w.sentiment ?? 0) +
-          (w.responsiveness ?? 0);
-        return sum > 0 && Math.abs(sum - 1) <= 0.01;
-      }, {
-        message: "weights must sum to 1 (within a small tolerance)",
-      }),
-  }).strict(),
-  erp_customer360_timeline: z.object({
-    workspaceId: z.string().min(1),
-    customerExternalId: z.string().min(1),
-    since: z.string().optional(),
-    limit: z.number().int().min(1).max(500).optional().default(100),
-    interactionTypes: z.array(z.enum([
-      "quote_created", "quote_approved", "quote_rejected", "quote_converted",
-      "quote_fulfilled", "communication", "followup", "consent_change", "order_created",
-    ])).optional(),
-  }).strict(),
-  erp_customer360_segments: z.object({
-    workspaceId: z.string().min(1),
-    segment: z.enum(["champion", "loyal", "promising", "at_risk", "churning", "new", "dormant"]).optional(),
-    limit: z.number().int().min(1).max(500).optional().default(100),
-  }).strict(),
-  erp_customer360_churn_risk: z.object({
-    workspaceId: z.string().min(1),
-    customerExternalId: z.string().optional(),
-    threshold: z.number().min(0).max(100).optional().default(50),
-    limit: z.number().int().min(1).max(200).optional().default(50),
-  }).strict(),
+  erp_customer360_profile: Customer360ProfileInputSchema,
+  erp_customer360_health: Customer360HealthInputSchema,
+  erp_customer360_timeline: Customer360TimelineInputSchema,
+  erp_customer360_segments: Customer360SegmentsInputSchema,
+  erp_customer360_churn_risk: Customer360ChurnRiskInputSchema,
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -6227,6 +6191,51 @@ async function startHttpServer() {
     },
   );
 
+  app.get<{ Params: { id: string; contactKey: string }; Querystring: { includeRecentEvents?: string; eventLimit?: string; since?: string; autoRecompute?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/communications/personality/profile/:contactKey",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const eventLimitRaw = request.query?.eventLimit;
+        const eventLimit = typeof eventLimitRaw === "string" && eventLimitRaw.length > 0 ? Number(eventLimitRaw) : undefined;
+        const includeRecentEvents = request.query?.includeRecentEvents === undefined
+          ? undefined
+          : request.query.includeRecentEvents === "true";
+        const autoRecompute = request.query?.autoRecompute === undefined
+          ? undefined
+          : request.query.autoRecompute === "true";
+        return getQuotePersonalityProfile(request.params.id, decodeURIComponent(request.params.contactKey), {
+          includeRecentEvents,
+          eventLimit,
+          since: request.query?.since,
+          autoRecompute,
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    "/v1/quote-to-order/workspaces/:id/communications/personality/feedback",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        return recordQuotePersonalityFeedback(request.params.id, request.body ?? {});
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
   app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/recommendations/next-action", async (request, reply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
@@ -6535,6 +6544,11 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
 .section-title{font-size:.94rem;font-weight:700;margin:0 0 8px}
 .gate{padding:8px;border:1px solid #dbe3ef;border-radius:10px;margin-bottom:8px;background:#fff}
 .fix{font-size:.78rem;color:#334155}
+.result{padding:10px;border:1px solid #dbe3ef;border-radius:10px;background:#f8fbff}
+.result-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.result-meta{font-size:.78rem;color:#334155}
+.result-list{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.result-line{padding:7px 9px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;font-size:.8rem;color:#0f172a}
 @media (max-width:980px){.grid{grid-template-columns:1fr}}
 </style>
 </head>
@@ -6607,6 +6621,8 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
               <button data-action="run-followups">Run Auto Follow-ups</button>
               <button data-action="load-comms-kpis">Load Comms + Deal KPIs</button>
               <button data-action="load-personality-insights">Load Personality Insights</button>
+              <button data-action="load-personality-profile">Load Personality Profile</button>
+              <button data-action="submit-personality-feedback">Submit Personality Feedback</button>
               <button data-action="writeback-followups">Writeback Open Follow-ups</button>
             </div>
             <div class="row mt">
@@ -6636,6 +6652,14 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
               <button data-action="list-mailbox-connections">List Mailboxes</button>
             </div>
             <div id="actionMsg" class="mt"></div>
+            <div class="result mt">
+              <div class="result-head">
+                <div class="section-title" style="margin:0">Last Action Outcome</div>
+                <span id="actionOutcomeStatus" class="badge b-muted">idle</span>
+              </div>
+              <div id="actionOutcomeMeta" class="result-meta mt">No action executed yet.</div>
+              <div id="actionOutcomeHighlights" class="result-list"></div>
+            </div>
           </div>
           <div class="card mt">
             <div class="section-title">Gates</div>
@@ -6715,6 +6739,125 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
   const riSilentDeals = $("riSilentDeals");
   const riConsentCoverage = $("riConsentCoverage");
   const riTimeToFirstConversion = $("riTimeToFirstConversion");
+  const actionOutcomeStatus = $("actionOutcomeStatus");
+  const actionOutcomeMeta = $("actionOutcomeMeta");
+  const actionOutcomeHighlights = $("actionOutcomeHighlights");
+
+  function asObject(value) {
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  }
+
+  function isNonEmptyObject(value) {
+    return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0;
+  }
+
+  function parseJsonMaybe(raw) {
+    try {
+      return JSON.parse(raw || "{}");
+    } catch {
+      return {};
+    }
+  }
+
+  function setActionsDisabled(disabled) {
+    Array.from(document.querySelectorAll("[data-action]")).forEach((button) => {
+      button.disabled = disabled;
+    });
+  }
+
+  function summarizeOutcome(action, payload) {
+    const root = asObject(payload);
+    const lines = [];
+    const session = asObject(root.session);
+    if (typeof session.id === "string") lines.push("Session: " + session.id);
+    if (typeof session.status === "string") lines.push("Session status: " + session.status);
+    if (Array.isArray(session.gates)) {
+      const red = session.gates.filter((gate) => gate && gate.status === "red").length;
+      const overridden = session.gates.filter((gate) => gate && gate.status === "overridden").length;
+      lines.push("Gates: red=" + red + ", overridden=" + overridden);
+    }
+    if (typeof root.workspaceId === "string") lines.push("Workspace: " + root.workspaceId);
+    if (typeof root.threadId === "string") lines.push("Thread: " + root.threadId);
+    if (typeof root.threadCount === "number") lines.push("Threads synced: " + root.threadCount);
+
+    const signals = asObject(root.signals);
+    if (typeof signals.messageCount === "number") lines.push("Messages in thread: " + signals.messageCount);
+    if (typeof signals.followupLikelihoodPct === "number") lines.push("Follow-up likelihood: " + fmtPct(signals.followupLikelihoodPct));
+
+    const proposal = asObject(root.proposal);
+    if (typeof proposal.id === "string") {
+      const statusSuffix = typeof proposal.status === "string" ? " (" + proposal.status + ")" : "";
+      lines.push("Proposal: " + proposal.id + statusSuffix);
+    }
+    if (Array.isArray(root.proposals)) lines.push("Proposals generated: " + root.proposals.length);
+    if (typeof root.proposalCount === "number") lines.push("Proposal count: " + root.proposalCount);
+
+    const metrics = asObject(root.metrics);
+    if (typeof metrics.conversionLiftPct === "number") lines.push("Conversion lift: " + fmtPct(metrics.conversionLiftPct));
+    if (typeof metrics.recoveredRevenueEur === "number") lines.push("Recovered revenue: " + fmtEur(metrics.recoveredRevenueEur));
+    if (typeof metrics.followupSlaAdherencePct === "number") lines.push("Follow-up SLA: " + fmtPct(metrics.followupSlaAdherencePct));
+    const profile = asObject(root.profile);
+    if (typeof profile.personalityType === "string") lines.push("Personality type: " + profile.personalityType);
+    if (typeof profile.confidence === "number") lines.push("Profile confidence: " + fmtNum(profile.confidence, 3));
+    const feedback = asObject(root.feedback);
+    const feedbackSummary = asObject(feedback.summary);
+    if (typeof feedbackSummary.total === "number") lines.push("Feedback samples: " + feedbackSummary.total);
+    if (typeof feedbackSummary.replyRatePct === "number") lines.push("Reply rate: " + fmtPct(feedbackSummary.replyRatePct));
+
+    if (typeof root.runId === "string") lines.push("Run ID: " + root.runId);
+    if (typeof root.authUrl === "string") lines.push("OAuth authorization URL prepared.");
+
+    const executionResult = asObject(root.executionResult);
+    if (typeof executionResult.executionMode === "string") lines.push("Execution mode: " + executionResult.executionMode);
+
+    if (lines.length === 0) {
+      const keys = Object.keys(root);
+      if (keys.length > 0) lines.push("Result fields: " + keys.slice(0, 4).join(", "));
+      else lines.push("Action executed successfully.");
+    }
+    return lines.slice(0, 6);
+  }
+
+  function renderActionOutcome(kind, action, detail, payload) {
+    const badgeMap = {
+      ok: { text: "success", cls: "b-ok" },
+      running: { text: "running", cls: "b-warn" },
+      pending: { text: "pending", cls: "b-warn" },
+      error: { text: "error", cls: "b-bad" },
+      idle: { text: "idle", cls: "b-muted" },
+    };
+    const entry = badgeMap[kind] || badgeMap.idle;
+    if (actionOutcomeStatus) {
+      actionOutcomeStatus.className = "badge " + entry.cls;
+      actionOutcomeStatus.textContent = entry.text;
+    }
+    if (actionOutcomeMeta) {
+      const timestamp = new Date().toLocaleTimeString();
+      actionOutcomeMeta.textContent = action + " • " + detail + " • " + timestamp;
+    }
+    if (actionOutcomeHighlights) {
+      actionOutcomeHighlights.innerHTML = "";
+      const lines = kind === "error"
+        ? [detail]
+        : kind === "running"
+          ? ["Waiting for API response..."]
+          : summarizeOutcome(action, payload);
+      lines.forEach((line) => {
+        const el = document.createElement("div");
+        el.className = "result-line";
+        el.textContent = line;
+        actionOutcomeHighlights.appendChild(el);
+      });
+    }
+  }
+
+  function latestActionPayload() {
+    const report = parseJsonMaybe(reportJson.textContent);
+    if (isNonEmptyObject(report)) return report;
+    const session = parseJsonMaybe(sessionJson.textContent);
+    if (isNonEmptyObject(session)) return session;
+    return {};
+  }
 
   function fmtNum(value, digits) {
     const num = Number(value);
@@ -6817,6 +6960,11 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
             oauthCallback: data,
             connections,
           }, null, 2);
+          renderActionOutcome("ok", "mailbox-oauth-callback", "Mailbox connected", {
+            provider: data.provider,
+            status: data.status,
+            connections: connections.items || [],
+          });
           await refreshBootstrap();
           await loadSession(selectedSessionId);
         }
@@ -6827,6 +6975,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
     }
     setMessage(actionMsg, "Mailbox OAuth failed: " + (data.reason || "unknown"), "error");
     reportJson.textContent = JSON.stringify(data, null, 2);
+    renderActionOutcome("error", "mailbox-oauth-callback", String(data.reason || "unknown"), data);
   });
 
   async function api(method, url, body) {
@@ -6840,7 +6989,9 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
 
   function setMessage(el, text, kind) {
     el.textContent = text || "";
-    el.style.color = kind === "error" ? "#b91c1c" : (kind === "ok" ? "#0f766e" : "#334155");
+    el.style.color = kind === "error"
+      ? "#b91c1c"
+      : (kind === "ok" ? "#0f766e" : (kind === "warn" ? "#92400e" : "#334155"));
   }
 
   function badge(status) {
@@ -6958,6 +7109,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
     reportJson.textContent = "{}";
     gatesPane.innerHTML = "";
     resetRevenuePanel();
+    renderActionOutcome("idle", "session", "Signed out", {});
     await refreshBootstrap();
   };
 
@@ -6981,24 +7133,18 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
   };
 
   async function connectorAction(kind, connector) {
-    if (!selectedSessionId) return setMessage(actionMsg, "Select a session first.", "error");
-    try {
-      if (kind === "connect") {
-        const raw = window.prompt("Connector payload JSON", JSON.stringify(defaultConnectPayload(connector), null, 2));
-        if (!raw) return;
-        const payload = JSON.parse(raw);
-        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/connectors/" + connector + "/connect", payload);
-        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
-      } else {
-        const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/connectors/" + connector + "/test", {});
-        sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
-      }
-      await refreshBootstrap();
-      await loadSession(selectedSessionId);
-      setMessage(actionMsg, kind + " " + connector + " done.", "ok");
-    } catch (err) {
-      setMessage(actionMsg, String(err.message || err), "error");
+    if (!selectedSessionId) throw new Error("Select a session first.");
+    if (kind === "connect") {
+      const raw = window.prompt("Connector payload JSON", JSON.stringify(defaultConnectPayload(connector), null, 2));
+      if (!raw) return null;
+      const payload = JSON.parse(raw);
+      const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/connectors/" + connector + "/connect", payload);
+      sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+      return out;
     }
+    const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/connectors/" + connector + "/test", {});
+    sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
+    return out;
   }
 
   async function doAction(action) {
@@ -7006,10 +7152,20 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
       setMessage(actionMsg, "Select a session first.", "error");
       return;
     }
+    let actionHandled = false;
+    let actionKind = "ok";
+    let actionDetail = "Completed";
+    setActionsDisabled(true);
+    renderActionOutcome("running", action, "Executing", {});
+    reportJson.textContent = "{}";
     try {
-      if (action.startsWith("connect-")) return connectorAction("connect", action.slice("connect-".length));
-      if (action.startsWith("test-")) return connectorAction("test", action.slice("test-".length));
-      if (action === "master-sync") {
+      if (action.startsWith("connect-")) {
+        actionDetail = "Connector updated";
+        await connectorAction("connect", action.slice("connect-".length));
+      } else if (action.startsWith("test-")) {
+        actionDetail = "Connector tested";
+        await connectorAction("test", action.slice("test-".length));
+      } else if (action === "master-sync") {
         const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/master-data/auto-sync", {});
         sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
       } else if (action === "q2o-dry-run") {
@@ -7022,7 +7178,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
         const out = await api("POST", "/v1/wizard/sessions/" + selectedSessionId + "/launch", { mode: "production" });
         sessionJson.textContent = JSON.stringify(out.session || out, null, 2);
       } else if (action === "load-report") {
-        if (!selectedSessionId) return setMessage(actionMsg, "Select a session first.", "error");
+        if (!selectedSessionId) throw new Error("Select a session first.");
         const out = await api("GET", "/v1/wizard/sessions/" + selectedSessionId + "/report");
         reportJson.textContent = JSON.stringify(out, null, 2);
       } else if (action === "import-gmail-demo" || action === "import-outlook-demo") {
@@ -7094,10 +7250,11 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
         reportJson.textContent = JSON.stringify(out, null, 2);
         const popup = window.open(out.authUrl, "wizard-mailbox-oauth", "width=560,height=760");
         if (!popup) {
-          setMessage(actionMsg, "Popup blocked. Open authUrl manually from report JSON.", "error");
+          throw new Error("Popup blocked. Open authUrl manually from report JSON.");
         } else {
           popup.focus();
-          setMessage(actionMsg, "OAuth window opened for " + provider + ".", "ok");
+          actionKind = "pending";
+          actionDetail = "OAuth window opened for " + provider;
         }
       } else if (action === "connect-gmail-mailbox" || action === "connect-outlook-mailbox") {
         const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
@@ -7188,6 +7345,39 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
       } else if (action === "load-personality-insights") {
         const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
         const out = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/personality");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-personality-profile") {
+        const currentSession = await getCurrentSession();
+        const contactKey = window.prompt("Contact key (email)", "buyer@customer.example");
+        if (!contactKey) return;
+        const out = await api(
+          "GET",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId
+            + "/communications/personality/profile/" + encodeURIComponent(contactKey)
+            + "?includeRecentEvents=true&eventLimit=20&autoRecompute=true",
+        );
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "submit-personality-feedback") {
+        const currentSession = await getCurrentSession();
+        const raw = window.prompt(
+          "Personality feedback payload JSON",
+          JSON.stringify({
+            contactKey: "buyer@customer.example",
+            outcome: "positive",
+            replyReceived: true,
+            convertedToOrder: false,
+            note: "Tone matched stakeholder style well.",
+            recordedBy: bootstrapData.user.name,
+            applyLearning: true,
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api(
+          "POST",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/personality/feedback",
+          payload,
+        );
         reportJson.textContent = JSON.stringify(out, null, 2);
       } else if (action === "sync-revenue-graph") {
         const currentSession = await getCurrentSession();
@@ -7330,9 +7520,25 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
         await refreshBootstrap();
         await loadSession(selectedSessionId);
       }
-      setMessage(actionMsg, "Action complete: " + action, "ok");
+      const payload = latestActionPayload();
+      if (actionKind === "pending") {
+        setMessage(actionMsg, "Action pending: " + action, "warn");
+      } else {
+        setMessage(actionMsg, "Action complete: " + action, "ok");
+      }
+      renderActionOutcome(actionKind, action, actionDetail, payload);
+      actionHandled = true;
     } catch (err) {
-      setMessage(actionMsg, String(err.message || err), "error");
+      const message = String(err.message || err);
+      setMessage(actionMsg, message, "error");
+      renderActionOutcome("error", action, message, {});
+      actionHandled = true;
+    } finally {
+      if (!actionHandled) {
+        renderActionOutcome("idle", action, "Canceled", {});
+        setMessage(actionMsg, "Action canceled: " + action, "warn");
+      }
+      setActionsDisabled(false);
     }
   }
 
@@ -7340,6 +7546,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
     button.addEventListener("click", () => doAction(button.getAttribute("data-action")));
   });
 
+  renderActionOutcome("idle", "wizard", "Ready", {});
   refreshBootstrap();
 })();
 </script>
