@@ -29,7 +29,8 @@ Commands:
   init            Create default config at ~/.a2a-mcp/config.json
                   --lite    Only shell + web + ai workers
                   --data    Shell + web + ai + data workers
-                  --full    All 8 workers (default)
+                  --osint   Shell + web + ai + 6 OSINT workers (news, market, signal, monitor, infra, climate)
+                  --full    All 14 workers (default)
   config          Show current configuration
   workers         List available workers and their status
   auth-create-key Create a RBAC API key (for /wizard login)
@@ -47,13 +48,15 @@ Commands:
   help            Show this help message
 
 Profiles:
-  full       All 8 workers (shell, web, ai, code, knowledge, design, factory, data)
+  full       All 14 workers (shell, web, ai, code, knowledge, design, factory, data, news, market, signal, monitor, infra, climate)
   lite       Minimal: shell + web + ai (3 workers, fastest startup)
   data       Data-focused: shell + web + ai + data (4 workers)
+  osint      OSINT-focused: shell + web + ai + news + market + signal + monitor + infra + climate (9 workers)
 
 Environment variables:
   ANTHROPIC_API_KEY    Claude API key (optional — falls back to Claude Code OAuth)
   GOOGLE_API_KEY       Gemini API key for design worker (optional)
+  NASA_FIRMS_KEY       NASA FIRMS API key for wildfire data (optional — falls back to open data)
   A2A_PORT             HTTP server port (default: 8080)
   A2A_API_KEY          Require Bearer token for remote A2A callers
   OBSIDIAN_VAULT       Knowledge base directory (default: ~/Documents/Obsidian/a2a-knowledge)
@@ -91,6 +94,7 @@ function initCommand() {
   // Check for profile flag
   const profile = args.includes("--lite") ? "lite"
     : args.includes("--data") ? "data"
+    : args.includes("--osint") ? "osint"
     : args.includes("--full") ? "full"
     : undefined;
 

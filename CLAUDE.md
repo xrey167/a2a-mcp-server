@@ -31,7 +31,7 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 
 **Single entry point:** `src/server.ts` is the MCP server AND the A2A orchestrator (port 8080). On startup it spawns local worker processes via `Bun.spawn` (filtered by config `workers.enabled` and `profile`), then discovers their agent cards via `GET /.well-known/agent.json` using exponential-backoff retry (up to 5 attempts per worker). Also discovers `remoteWorkers` configured in `~/.a2a-mcp/config.json` (no local process spawned).
 
-**Profiles:** `full` (all 8 workers), `lite` (shell+web+ai), `data` (shell+web+ai+data). Set via `{ "profile": "lite" }` in config or `bun src/cli.ts init --lite`.
+**Profiles:** `full` (all 14 workers), `lite` (shell+web+ai), `data` (shell+web+ai+data), `osint` (shell+web+ai+news+market+signal+monitor+infra+climate). Set via `{ "profile": "lite" }` in config or `bun src/cli.ts init --lite`.
 
 **Remote workers:** Any A2A agent running elsewhere can be added via `remoteWorkers` config. The orchestrator discovers it, health-polls it, and routes skills to it. The URL is whitelisted in SSRF validation automatically.
 
@@ -46,6 +46,12 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 | `src/workers/design.ts` | 8086 | enhance_ui_prompt, suggest_screens, design_critique (Gemini-powered) |
 | `src/workers/factory.ts` | 8087 | normalize_intent, create_project, quality_gate, list_pipelines (AppFactory-style project gen) |
 | `src/workers/data.ts` | 8088 | parse_csv, parse_json, transform_data, analyze_data, pivot_table |
+| `src/workers/news.ts` | 8089 | fetch_rss, aggregate_feeds, classify_news, cluster_news, detect_signals |
+| `src/workers/market.ts` | 8090 | fetch_quote, price_history, technical_analysis, screen_market, detect_anomalies, correlation |
+| `src/workers/signal.ts` | 8091 | aggregate_signals, classify_threat, detect_convergence, baseline_compare, instability_index |
+| `src/workers/monitor.ts` | 8092 | track_conflicts, detect_surge, theater_posture, track_vessels, check_freshness, watchlist_check |
+| `src/workers/infra.ts` | 8093 | cascade_analysis, supply_chain_map, chokepoint_assess, redundancy_score, dependency_graph |
+| `src/workers/climate.ts` | 8094 | fetch_earthquakes, fetch_wildfires, fetch_natural_events, assess_exposure, climate_anomalies, event_correlate |
 
 All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 
