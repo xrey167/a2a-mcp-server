@@ -9110,7 +9110,7 @@ export function getCustomer360Segments(filtersInput: unknown): Record<string, un
     ).all(filters.workspaceId).map(r => r.customer_external_id),
   );
 
-  // Compute profiles for unprofile customers (batch, up to 50 at a time)
+  // Compute profiles for unprofiled customers (batch, up to 50 at a time)
   let computed = 0;
   for (const c of knownCustomers) {
     if (!profiledSet.has(c.customer_external_id) && computed < 50) {
