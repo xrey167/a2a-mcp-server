@@ -8712,10 +8712,19 @@ export function getCustomer360Profile(
     if (cached) {
       const age = Date.now() - new Date(cached.computed_at).getTime();
       if (age < 3600_000) {
+        const {
+          contacts_json,
+          metadata_json,
+          workspace_id,
+          customer_external_id,
+          // Exclude any other internal-only columns here as needed.
+          ...publicFields
+        } = cached as unknown as Record<string, any>;
+
         return {
-          ...cached,
-          contacts: JSON.parse(cached.contacts_json),
-          metadata: JSON.parse(cached.metadata_json),
+          ...publicFields,
+          contacts: JSON.parse(contacts_json),
+          metadata: JSON.parse(metadata_json),
           fromCache: true,
         };
       }
