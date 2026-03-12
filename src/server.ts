@@ -63,6 +63,8 @@ import {
   getExecutiveAnalytics,
   getForecastQualityAnalytics,
   getOpsAnalytics,
+  getQuotePersonalityProfile,
+  recordQuotePersonalityFeedback,
   getQuotePersonalityInsights,
   getQuoteCommunicationAnalytics,
   getQuoteCommunicationThreadSignals,
@@ -6072,6 +6074,51 @@ async function startHttpServer() {
     },
   );
 
+  app.get<{ Params: { id: string; contactKey: string }; Querystring: { includeRecentEvents?: string; eventLimit?: string; since?: string; autoRecompute?: string } }>(
+    "/v1/quote-to-order/workspaces/:id/communications/personality/profile/:contactKey",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        const eventLimitRaw = request.query?.eventLimit;
+        const eventLimit = typeof eventLimitRaw === "string" && eventLimitRaw.length > 0 ? Number(eventLimitRaw) : undefined;
+        const includeRecentEvents = request.query?.includeRecentEvents === undefined
+          ? undefined
+          : request.query.includeRecentEvents === "true";
+        const autoRecompute = request.query?.autoRecompute === undefined
+          ? undefined
+          : request.query.autoRecompute === "true";
+        return getQuotePersonalityProfile(request.params.id, decodeURIComponent(request.params.contactKey), {
+          includeRecentEvents,
+          eventLimit,
+          since: request.query?.since,
+          autoRecompute,
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    "/v1/quote-to-order/workspaces/:id/communications/personality/feedback",
+    async (request, reply) => {
+      if (!checkAuth(request as any)) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+      try {
+        return recordQuotePersonalityFeedback(request.params.id, request.body ?? {});
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
   app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/v1/quote-to-order/workspaces/:id/recommendations/next-action", async (request, reply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
@@ -6457,6 +6504,8 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
               <button data-action="run-followups">Run Auto Follow-ups</button>
               <button data-action="load-comms-kpis">Load Comms + Deal KPIs</button>
               <button data-action="load-personality-insights">Load Personality Insights</button>
+              <button data-action="load-personality-profile">Load Personality Profile</button>
+              <button data-action="submit-personality-feedback">Submit Personality Feedback</button>
               <button data-action="writeback-followups">Writeback Open Follow-ups</button>
             </div>
             <div class="row mt">
@@ -6630,6 +6679,13 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
     if (typeof metrics.conversionLiftPct === "number") lines.push("Conversion lift: " + fmtPct(metrics.conversionLiftPct));
     if (typeof metrics.recoveredRevenueEur === "number") lines.push("Recovered revenue: " + fmtEur(metrics.recoveredRevenueEur));
     if (typeof metrics.followupSlaAdherencePct === "number") lines.push("Follow-up SLA: " + fmtPct(metrics.followupSlaAdherencePct));
+    const profile = asObject(root.profile);
+    if (typeof profile.personalityType === "string") lines.push("Personality type: " + profile.personalityType);
+    if (typeof profile.confidence === "number") lines.push("Profile confidence: " + fmtNum(profile.confidence, 3));
+    const feedback = asObject(root.feedback);
+    const feedbackSummary = asObject(feedback.summary);
+    if (typeof feedbackSummary.total === "number") lines.push("Feedback samples: " + feedbackSummary.total);
+    if (typeof feedbackSummary.replyRatePct === "number") lines.push("Reply rate: " + fmtPct(feedbackSummary.replyRatePct));
 
     if (typeof root.runId === "string") lines.push("Run ID: " + root.runId);
     if (typeof root.authUrl === "string") lines.push("OAuth authorization URL prepared.");
@@ -7172,6 +7228,39 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
       } else if (action === "load-personality-insights") {
         const currentSession = await api("GET", "/v1/wizard/sessions/" + selectedSessionId);
         const out = await api("GET", "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/personality");
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "load-personality-profile") {
+        const currentSession = await getCurrentSession();
+        const contactKey = window.prompt("Contact key (email)", "buyer@customer.example");
+        if (!contactKey) return;
+        const out = await api(
+          "GET",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId
+            + "/communications/personality/profile/" + encodeURIComponent(contactKey)
+            + "?includeRecentEvents=true&eventLimit=20&autoRecompute=true",
+        );
+        reportJson.textContent = JSON.stringify(out, null, 2);
+      } else if (action === "submit-personality-feedback") {
+        const currentSession = await getCurrentSession();
+        const raw = window.prompt(
+          "Personality feedback payload JSON",
+          JSON.stringify({
+            contactKey: "buyer@customer.example",
+            outcome: "positive",
+            replyReceived: true,
+            convertedToOrder: false,
+            note: "Tone matched stakeholder style well.",
+            recordedBy: bootstrapData.user.name,
+            applyLearning: true,
+          }, null, 2),
+        );
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        const out = await api(
+          "POST",
+          "/v1/quote-to-order/workspaces/" + currentSession.workspaceId + "/communications/personality/feedback",
+          payload,
+        );
         reportJson.textContent = JSON.stringify(out, null, 2);
       } else if (action === "sync-revenue-graph") {
         const currentSession = await getCurrentSession();

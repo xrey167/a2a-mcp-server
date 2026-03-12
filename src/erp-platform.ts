@@ -303,6 +303,29 @@ const QuotePersonalityInsightSchema = z.object({
   minConfidence: z.number().min(0).max(1).optional().default(0.35),
 }).strict();
 
+const QuotePersonalityProfileFilterSchema = z.object({
+  includeRecentEvents: z.boolean().optional().default(true),
+  eventLimit: z.number().int().min(1).max(200).optional().default(25),
+  since: z.string().optional(),
+  autoRecompute: z.boolean().optional().default(true),
+}).strict();
+
+const QuotePersonalityFeedbackSchema = z.object({
+  contactKey: z.string().min(1),
+  quoteExternalId: z.string().optional(),
+  proposalId: z.string().optional(),
+  actionType: z.enum(["followup_email", "approval_nudge", "internal_task", "crm_update"]).optional(),
+  outcome: z.enum(["positive", "neutral", "negative", "ignored"]),
+  feedbackScore: z.number().min(-1).max(1).optional(),
+  replyReceived: z.boolean().optional(),
+  convertedToOrder: z.boolean().optional(),
+  note: z.string().optional(),
+  recordedBy: z.string().min(1),
+  metadata: z.record(z.string(), z.unknown()).optional().default({}),
+  recordedAt: z.string().optional(),
+  applyLearning: z.boolean().optional().default(true),
+}).strict();
+
 const RevenueGraphSyncSchema = z.object({
   mode: z.enum(["incremental", "full"]).optional().default("incremental"),
   since: z.string().optional(),
@@ -349,6 +372,26 @@ const NextActionRecommendationSchema = z.object({
   assignedTo: z.string().optional(),
   channel: QuoteCommunicationChannelSchema.optional().default("email"),
   metadata: z.record(z.string(), z.unknown()).optional().default({}),
+}).strict();
+
+const PersonalityReplyRecommendationSchema = z.object({
+  quoteExternalId: z.string().min(1),
+  contactKey: z.string().optional(),
+  variantCount: z.number().int().min(1).max(5).optional().default(3),
+  tone: z.enum(["balanced", "direct", "empathetic", "urgent"]).optional().default("balanced"),
+  channel: QuoteCommunicationChannelSchema.optional().default("email"),
+  createProposal: z.boolean().optional().default(false),
+  selectedVariantIndex: z.number().int().min(0).max(4).optional().default(0),
+  requireApproval: z.boolean().optional().default(true),
+  assignedTo: z.string().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional().default({}),
+}).strict();
+
+const AutopilotProposalListSchema = z.object({
+  status: AutopilotProposalStatusSchema.optional().default("draft"),
+  actionType: z.enum(["followup_email", "approval_nudge", "internal_task", "crm_update"]).optional(),
+  quoteExternalId: z.string().optional(),
+  limit: z.number().int().min(1).max(200).optional().default(50),
 }).strict();
 
 const AutopilotProposalApproveSchema = z.object({
@@ -807,6 +850,46 @@ interface TrustAuditRow {
   entity_type: string;
   entity_id: string | null;
   details_json: string;
+  created_at: string;
+}
+
+interface PersonalityProfileRow {
+  id: string;
+  workspace_id: string;
+  contact_key: string;
+  personality_type: string | null;
+  confidence: number;
+  stability_score: number;
+  freshness_score: number;
+  contradiction_count: number;
+  sample_count: number;
+  dominant_sentiment: "positive" | "neutral" | "negative" | null;
+  dominant_urgency: "low" | "normal" | "high" | null;
+  preferred_channel: QuoteCommunicationChannel | null;
+  top_intent_tags_json: string;
+  confidence_trend_json: string;
+  explanation_json: string;
+  last_event_id: string | null;
+  last_event_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PersonalityFeedbackRow {
+  id: string;
+  workspace_id: string;
+  contact_key: string;
+  quote_external_id: string | null;
+  proposal_id: string | null;
+  action_type: "followup_email" | "approval_nudge" | "internal_task" | "crm_update" | null;
+  outcome: "positive" | "neutral" | "negative" | "ignored";
+  feedback_score: number;
+  reply_received: number;
+  converted_to_order: number;
+  note: string | null;
+  recorded_by: string;
+  metadata_json: string;
+  recorded_at: string;
   created_at: string;
 }
 
@@ -1399,6 +1482,47 @@ db.run(`CREATE TABLE IF NOT EXISTS quote_deal_rescue_runs (
   created_at TEXT NOT NULL
 )`);
 db.run("CREATE INDEX IF NOT EXISTS idx_quote_deal_rescue_runs_scope ON quote_deal_rescue_runs(workspace_id, created_at DESC)");
+db.run(`CREATE TABLE IF NOT EXISTS quote_personality_profiles (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  contact_key TEXT NOT NULL,
+  personality_type TEXT,
+  confidence REAL NOT NULL DEFAULT 0,
+  stability_score REAL NOT NULL DEFAULT 0,
+  freshness_score REAL NOT NULL DEFAULT 0,
+  contradiction_count INTEGER NOT NULL DEFAULT 0,
+  sample_count INTEGER NOT NULL DEFAULT 0,
+  dominant_sentiment TEXT,
+  dominant_urgency TEXT,
+  preferred_channel TEXT,
+  top_intent_tags_json TEXT NOT NULL DEFAULT '[]',
+  confidence_trend_json TEXT NOT NULL DEFAULT '[]',
+  explanation_json TEXT NOT NULL DEFAULT '{}',
+  last_event_id TEXT,
+  last_event_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(workspace_id, contact_key)
+)`);
+db.run("CREATE INDEX IF NOT EXISTS idx_quote_personality_profiles_scope ON quote_personality_profiles(workspace_id, updated_at DESC)");
+db.run(`CREATE TABLE IF NOT EXISTS quote_personality_feedback (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  contact_key TEXT NOT NULL,
+  quote_external_id TEXT,
+  proposal_id TEXT,
+  action_type TEXT,
+  outcome TEXT NOT NULL,
+  feedback_score REAL NOT NULL DEFAULT 0,
+  reply_received INTEGER NOT NULL DEFAULT 0,
+  converted_to_order INTEGER NOT NULL DEFAULT 0,
+  note TEXT,
+  recorded_by TEXT NOT NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  recorded_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`);
+db.run("CREATE INDEX IF NOT EXISTS idx_quote_personality_feedback_scope ON quote_personality_feedback(workspace_id, contact_key, recorded_at DESC)");
 db.run(`CREATE TABLE IF NOT EXISTS trust_contact_consents (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
@@ -3558,6 +3682,25 @@ const MBTI_DIMENSIONS: MbtiDimensionConfig[] = [
   },
 ];
 
+const PERSONALITY_STYLE_PLAYBOOK: Record<string, string> = {
+  ENTJ: "Lead with ROI, milestones, and decision windows. Keep updates concise and action-driven.",
+  ENTP: "Offer options and strategic upside. Frame experiments with clear expected outcomes.",
+  ENFJ: "Connect next steps to stakeholder alignment and customer impact. Keep tone collaborative.",
+  ENFP: "Use vision-oriented framing and flexible options. Keep momentum with short iterations.",
+  ESTJ: "Provide concrete status, ownership, and deadlines. Show operational control and risk handling.",
+  ESTP: "Keep communication practical and fast. Emphasize immediate wins and quick decisions.",
+  ESFJ: "Prioritize clarity, support, and reliable follow-up. Confirm expectations and commitments.",
+  ESFP: "Use direct, warm communication and concrete quick wins. Keep process lightweight.",
+  INTJ: "Provide strategic rationale plus structured execution plan. Avoid unnecessary noise.",
+  INTP: "Share clear logic, assumptions, and trade-offs. Offer space for technical scrutiny.",
+  INFJ: "Frame decisions around long-term fit and trust. Use structured but empathetic updates.",
+  INFP: "Respect values and relationship context. Keep messaging thoughtful and non-pushy.",
+  ISTJ: "Send precise facts, dependencies, and due dates. Focus on reliability and correctness.",
+  ISTP: "Keep it concise and solution-first. Highlight practical unblock paths.",
+  ISFJ: "Provide predictable cadence and clear responsibilities. Reduce uncertainty proactively.",
+  ISFP: "Use clear and respectful updates with optional paths. Avoid heavy process pressure.",
+};
+
 type MbtiDimensionScore = {
   leftLetter: string;
   rightLetter: string;
@@ -3962,6 +4105,22 @@ export function ingestQuoteCommunication(
      WHERE id = ?`
   ).get(id);
   if (!saved) throw new Error("Failed to persist communication event");
+  const primaryContact = saved.direction === "inbound"
+    ? parseEmailAddress(saved.from_address)
+    : parseEmailAddress(saved.to_address);
+  const fallbackContact = saved.direction === "inbound"
+    ? parseEmailAddress(saved.to_address)
+    : parseEmailAddress(saved.from_address);
+  const contacts = new Set<string>();
+  if (primaryContact) contacts.add(primaryContact);
+  if (fallbackContact) contacts.add(fallbackContact);
+  for (const contact of contacts) {
+    try {
+      upsertQuotePersonalityProfileForContact(workspaceId, contact);
+    } catch {
+      // Communication ingest must not fail because profile projection failed.
+    }
+  }
   return {
     duplicate: false,
     event: toQuoteCommunicationEvent(saved),
@@ -4726,25 +4885,6 @@ export function getQuotePersonalityInsights(
       averageConfidence: Number((stat.confidenceSum / Math.max(1, stat.total)).toFixed(3)),
     }));
 
-  const stylePlaybook: Record<string, string> = {
-    ENTJ: "Lead with ROI, milestones, and decision windows. Keep updates concise and action-driven.",
-    ENTP: "Offer options and strategic upside. Frame experiments with clear expected outcomes.",
-    ENFJ: "Connect next steps to stakeholder alignment and customer impact. Keep tone collaborative.",
-    ENFP: "Use vision-oriented framing and flexible options. Keep momentum with short iterations.",
-    ESTJ: "Provide concrete status, ownership, and deadlines. Show operational control and risk handling.",
-    ESTP: "Keep communication practical and fast. Emphasize immediate wins and quick decisions.",
-    ESFJ: "Prioritize clarity, support, and reliable follow-up. Confirm expectations and commitments.",
-    ESFP: "Use direct, warm communication and concrete quick wins. Keep process lightweight.",
-    INTJ: "Provide strategic rationale plus structured execution plan. Avoid unnecessary noise.",
-    INTP: "Share clear logic, assumptions, and trade-offs. Offer space for technical scrutiny.",
-    INFJ: "Frame decisions around long-term fit and trust. Use structured but empathetic updates.",
-    INFP: "Respect values and relationship context. Keep messaging thoughtful and non-pushy.",
-    ISTJ: "Send precise facts, dependencies, and due dates. Focus on reliability and correctness.",
-    ISTP: "Keep it concise and solution-first. Highlight practical unblock paths.",
-    ISFJ: "Provide predictable cadence and clear responsibilities. Reduce uncertainty proactively.",
-    ISFP: "Use clear and respectful updates with optional paths. Avoid heavy process pressure.",
-  };
-
   return {
     workspaceId,
     timeframe: { since: filters.since ?? "all_time" },
@@ -4756,7 +4896,482 @@ export function getQuotePersonalityInsights(
     distribution,
     trend,
     profiles: profiles.slice(0, filters.limit),
-    communicationPlaybook: dominantType ? (stylePlaybook[dominantType] ?? "Use concise, respectful, and value-focused follow-up communication.") : null,
+    communicationPlaybook: dominantType ? (PERSONALITY_STYLE_PLAYBOOK[dominantType] ?? "Use concise, respectful, and value-focused follow-up communication.") : null,
+  };
+}
+
+function getPersonalityProfileRow(workspaceId: string, contactKey: string): PersonalityProfileRow | null {
+  return db.query<PersonalityProfileRow, [string, string]>(
+    `SELECT id, workspace_id, contact_key, personality_type, confidence, stability_score, freshness_score, contradiction_count, sample_count,
+            dominant_sentiment, dominant_urgency, preferred_channel, top_intent_tags_json, confidence_trend_json, explanation_json,
+            last_event_id, last_event_at, created_at, updated_at
+     FROM quote_personality_profiles
+     WHERE workspace_id = ? AND contact_key = ?`
+  ).get(workspaceId, contactKey) ?? null;
+}
+
+function listPersonalityEventsForContact(
+  workspaceId: string,
+  contactKey: string,
+  options: { since?: string; limit?: number } = {},
+): QuoteCommunicationEventRow[] {
+  const limit = Math.max(1, Math.min(1000, options.limit ?? 400));
+  const likePattern = `%${contactKey.toLowerCase()}%`;
+  const rows = db.query<QuoteCommunicationEventRow, unknown[]>(
+    `SELECT id, workspace_id, quote_external_id, connector_type, channel, direction, subject, body_text, from_address, to_address,
+            external_thread_id, intent_tags_json, sentiment, urgency, followup_needed, followup_reason, estimated_deal_probability_pct, personality_type, personality_confidence, idempotency_key, metadata_json,
+            occurred_at, created_at
+     FROM quote_communication_events
+     WHERE workspace_id = ?
+       ${options.since ? "AND occurred_at >= ?" : ""}
+       AND (
+         LOWER(COALESCE(from_address, '')) LIKE ?
+         OR LOWER(COALESCE(to_address, '')) LIKE ?
+       )
+     ORDER BY occurred_at DESC
+     LIMIT ?`
+  ).all(...(options.since ? [workspaceId, options.since, likePattern, likePattern, limit] : [workspaceId, likePattern, likePattern, limit]));
+  return rows.filter((row) => {
+    const from = parseEmailAddress(row.from_address);
+    const to = parseEmailAddress(row.to_address);
+    return from === contactKey || to === contactKey;
+  });
+}
+
+function dominantValue<T extends string>(values: T[]): T | null {
+  if (values.length === 0) return null;
+  const counts = new Map<T, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
+
+function scorePersonalityOutcome(outcome: "positive" | "neutral" | "negative" | "ignored"): number {
+  if (outcome === "positive") return 0.8;
+  if (outcome === "negative") return -0.8;
+  if (outcome === "ignored") return -0.3;
+  return 0;
+}
+
+function buildPersonalityProfileSnapshot(
+  workspaceId: string,
+  contactKey: string,
+  options: { since?: string; limit?: number } = {},
+): {
+  personalityType: string | null;
+  confidence: number;
+  stabilityScore: number;
+  freshnessScore: number;
+  contradictionCount: number;
+  sampleCount: number;
+  dominantSentiment: "positive" | "neutral" | "negative" | null;
+  dominantUrgency: "low" | "normal" | "high" | null;
+  preferredChannel: QuoteCommunicationChannel | null;
+  topIntentTags: Array<{ tag: string; count: number }>;
+  confidenceTrend: Array<{ day: string; samples: number; averageConfidence: number }>;
+  explanation: Record<string, unknown>;
+  lastEventId: string | null;
+  lastEventAt: string | null;
+} {
+  const events = listPersonalityEventsForContact(workspaceId, contactKey, options)
+    .filter((row) => typeof row.personality_type === "string" && row.personality_type.length === 4 && row.personality_confidence !== null);
+
+  if (events.length === 0) {
+    return {
+      personalityType: null,
+      confidence: 0,
+      stabilityScore: 0,
+      freshnessScore: 0,
+      contradictionCount: 0,
+      sampleCount: 0,
+      dominantSentiment: null,
+      dominantUrgency: null,
+      preferredChannel: null,
+      topIntentTags: [],
+      confidenceTrend: [],
+      explanation: {
+        model: "heuristic_mbti_v1",
+        status: "insufficient_signals",
+        evidence: [],
+      },
+      lastEventId: null,
+      lastEventAt: null,
+    };
+  }
+
+  const latest = events[0];
+  const sortedAsc = [...events].sort((a, b) => Date.parse(a.occurred_at) - Date.parse(b.occurred_at));
+  const typeCounts = new Map<string, number>();
+  const intentCounts = new Map<string, number>();
+  const confidenceByDay = new Map<string, { total: number; confidenceSum: number }>();
+  const sentiments: Array<"positive" | "neutral" | "negative"> = [];
+  const urgencies: Array<"low" | "normal" | "high"> = [];
+  const channels: QuoteCommunicationChannel[] = [];
+
+  let confidenceSum = 0;
+  for (const event of events) {
+    const personalityType = event.personality_type as string;
+    typeCounts.set(personalityType, (typeCounts.get(personalityType) ?? 0) + 1);
+    const confidence = num(event.personality_confidence);
+    confidenceSum += confidence;
+    sentiments.push(event.sentiment);
+    urgencies.push(event.urgency);
+    channels.push(event.channel);
+    const tags = parseIntentTags(event.intent_tags_json);
+    for (const tag of tags) {
+      intentCounts.set(tag, (intentCounts.get(tag) ?? 0) + 1);
+    }
+    const day = event.occurred_at.slice(0, 10);
+    const trend = confidenceByDay.get(day) ?? { total: 0, confidenceSum: 0 };
+    trend.total += 1;
+    trend.confidenceSum += confidence;
+    confidenceByDay.set(day, trend);
+  }
+
+  const dominantTypeEntry = Array.from(typeCounts.entries()).sort((a, b) => b[1] - a[1])[0] ?? null;
+  const dominantType = dominantTypeEntry?.[0] ?? null;
+  const dominantTypeCount = dominantTypeEntry?.[1] ?? 0;
+  const sampleCount = events.length;
+  const averageConfidence = Number((confidenceSum / Math.max(1, sampleCount)).toFixed(3));
+  const stabilityScore = Number((dominantTypeCount / Math.max(1, sampleCount)).toFixed(3));
+  const contradictionCount = Math.max(0, sampleCount - dominantTypeCount);
+  const freshnessHours = Math.max(0, (Date.now() - Date.parse(latest.occurred_at)) / (1000 * 60 * 60));
+  const freshnessScore = Number(Math.max(0, 1 - freshnessHours / (24 * 30)).toFixed(3));
+  const dominantSentiment = dominantValue(sentiments);
+  const dominantUrgency = dominantValue(urgencies);
+  const preferredChannel = dominantValue(channels);
+
+  const topIntentTags = Array.from(intentCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([tag, count]) => ({ tag, count }));
+  const confidenceTrend = Array.from(confidenceByDay.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-14)
+    .map(([day, stat]) => ({
+      day,
+      samples: stat.total,
+      averageConfidence: Number((stat.confidenceSum / Math.max(1, stat.total)).toFixed(3)),
+    }));
+
+  const strongest = [...events].sort((a, b) => num(b.personality_confidence) - num(a.personality_confidence))[0] ?? latest;
+  const strongestMeta = parseMetadata(strongest.metadata_json);
+  const snippet = strongest.body_text.slice(0, 220);
+  const explanation = {
+    model: strongestMeta.personalityModel ?? "heuristic_mbti_v1",
+    dimensions: strongestMeta.personalityDimensions ?? {},
+    evidence: {
+      quoteExternalId: strongest.quote_external_id,
+      subject: strongest.subject ?? "",
+      snippet,
+      sentiment: strongest.sentiment,
+      urgency: strongest.urgency,
+      channel: strongest.channel,
+      occurredAt: strongest.occurred_at,
+    },
+    reasoning: [
+      dominantType
+        ? `Dominant type ${dominantType} observed in ${dominantTypeCount}/${sampleCount} events.`
+        : "No dominant type detected yet.",
+      `Average confidence ${averageConfidence}. Freshness score ${freshnessScore}.`,
+    ],
+  };
+
+  return {
+    personalityType: dominantType,
+    confidence: averageConfidence,
+    stabilityScore,
+    freshnessScore,
+    contradictionCount,
+    sampleCount,
+    dominantSentiment,
+    dominantUrgency,
+    preferredChannel,
+    topIntentTags,
+    confidenceTrend,
+    explanation,
+    lastEventId: latest.id,
+    lastEventAt: latest.occurred_at,
+  };
+}
+
+function upsertQuotePersonalityProfileForContact(
+  workspaceId: string,
+  contactKeyInput: string,
+  options: { since?: string; limit?: number } = {},
+): PersonalityProfileRow | null {
+  const contactKey = normalizeContactKey(contactKeyInput);
+  if (!contactKey) return null;
+  const snapshot = buildPersonalityProfileSnapshot(workspaceId, contactKey, options);
+  if (snapshot.sampleCount === 0) return getPersonalityProfileRow(workspaceId, contactKey);
+  const existing = getPersonalityProfileRow(workspaceId, contactKey);
+  const now = nowIso();
+  if (existing) {
+    db.run(
+      `UPDATE quote_personality_profiles
+       SET personality_type = ?, confidence = ?, stability_score = ?, freshness_score = ?, contradiction_count = ?, sample_count = ?,
+           dominant_sentiment = ?, dominant_urgency = ?, preferred_channel = ?, top_intent_tags_json = ?, confidence_trend_json = ?, explanation_json = ?,
+           last_event_id = ?, last_event_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        snapshot.personalityType,
+        snapshot.confidence,
+        snapshot.stabilityScore,
+        snapshot.freshnessScore,
+        snapshot.contradictionCount,
+        snapshot.sampleCount,
+        snapshot.dominantSentiment,
+        snapshot.dominantUrgency,
+        snapshot.preferredChannel,
+        JSON.stringify(snapshot.topIntentTags),
+        JSON.stringify(snapshot.confidenceTrend),
+        JSON.stringify(snapshot.explanation),
+        snapshot.lastEventId,
+        snapshot.lastEventAt,
+        now,
+        existing.id,
+      ],
+    );
+  } else {
+    db.run(
+      `INSERT INTO quote_personality_profiles (
+         id, workspace_id, contact_key, personality_type, confidence, stability_score, freshness_score, contradiction_count, sample_count,
+         dominant_sentiment, dominant_urgency, preferred_channel, top_intent_tags_json, confidence_trend_json, explanation_json,
+         last_event_id, last_event_at, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(),
+        workspaceId,
+        contactKey,
+        snapshot.personalityType,
+        snapshot.confidence,
+        snapshot.stabilityScore,
+        snapshot.freshnessScore,
+        snapshot.contradictionCount,
+        snapshot.sampleCount,
+        snapshot.dominantSentiment,
+        snapshot.dominantUrgency,
+        snapshot.preferredChannel,
+        JSON.stringify(snapshot.topIntentTags),
+        JSON.stringify(snapshot.confidenceTrend),
+        JSON.stringify(snapshot.explanation),
+        snapshot.lastEventId,
+        snapshot.lastEventAt,
+        now,
+        now,
+      ],
+    );
+  }
+  return getPersonalityProfileRow(workspaceId, contactKey);
+}
+
+function toQuotePersonalityProfile(row: PersonalityProfileRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    contactKey: row.contact_key,
+    personalityType: row.personality_type ?? null,
+    confidence: Number(num(row.confidence).toFixed(3)),
+    stabilityScore: Number(num(row.stability_score).toFixed(3)),
+    freshnessScore: Number(num(row.freshness_score).toFixed(3)),
+    contradictionCount: row.contradiction_count,
+    sampleCount: row.sample_count,
+    dominantSentiment: row.dominant_sentiment ?? null,
+    dominantUrgency: row.dominant_urgency ?? null,
+    preferredChannel: row.preferred_channel ?? null,
+    topIntentTags: parseMetadata(row.top_intent_tags_json) as unknown,
+    confidenceTrend: parseMetadata(row.confidence_trend_json) as unknown,
+    explanation: parseMetadata(row.explanation_json),
+    lastEventId: row.last_event_id ?? null,
+    lastEventAt: row.last_event_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toQuotePersonalityFeedback(row: PersonalityFeedbackRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    contactKey: row.contact_key,
+    quoteExternalId: row.quote_external_id ?? null,
+    proposalId: row.proposal_id ?? null,
+    actionType: row.action_type ?? null,
+    outcome: row.outcome,
+    feedbackScore: Number(num(row.feedback_score).toFixed(3)),
+    replyReceived: row.reply_received === 1,
+    convertedToOrder: row.converted_to_order === 1,
+    note: row.note ?? null,
+    recordedBy: row.recorded_by,
+    metadata: parseMetadata(row.metadata_json),
+    recordedAt: row.recorded_at,
+    createdAt: row.created_at,
+  };
+}
+
+function getPersonalityFeedbackSummary(workspaceId: string, contactKey: string, since?: string): Record<string, unknown> {
+  const where: string[] = ["workspace_id = ?", "contact_key = ?"];
+  const params: unknown[] = [workspaceId, contactKey];
+  if (since) {
+    where.push("recorded_at >= ?");
+    params.push(since);
+  }
+  const rows = db.query<PersonalityFeedbackRow, unknown[]>(
+    `SELECT id, workspace_id, contact_key, quote_external_id, proposal_id, action_type, outcome, feedback_score, reply_received, converted_to_order,
+            note, recorded_by, metadata_json, recorded_at, created_at
+     FROM quote_personality_feedback
+     WHERE ${where.join(" AND ")}
+     ORDER BY recorded_at DESC
+     LIMIT 200`
+  ).all(...params);
+  const summary = {
+    total: rows.length,
+    positive: 0,
+    neutral: 0,
+    negative: 0,
+    ignored: 0,
+    averageScore: 0,
+    replyRatePct: 0,
+    conversionRatePct: 0,
+  };
+  if (rows.length > 0) {
+    let scoreSum = 0;
+    let replies = 0;
+    let conversions = 0;
+    for (const row of rows) {
+      summary[row.outcome] += 1;
+      scoreSum += num(row.feedback_score);
+      if (row.reply_received === 1) replies += 1;
+      if (row.converted_to_order === 1) conversions += 1;
+    }
+    summary.averageScore = Number((scoreSum / rows.length).toFixed(3));
+    summary.replyRatePct = Number(((replies / rows.length) * 100).toFixed(1));
+    summary.conversionRatePct = Number(((conversions / rows.length) * 100).toFixed(1));
+  }
+  return {
+    summary,
+    recent: rows.slice(0, 10).map(toQuotePersonalityFeedback),
+  };
+}
+
+export function getQuotePersonalityProfile(
+  workspaceIdInput: unknown,
+  contactKeyInput: unknown,
+  filtersInput: unknown = {},
+): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const contactKey = normalizeContactKey(z.string().min(1).parse(contactKeyInput));
+  const filters = QuotePersonalityProfileFilterSchema.parse(filtersInput);
+  let profileRow = getPersonalityProfileRow(workspaceId, contactKey);
+  if (filters.autoRecompute || !profileRow) {
+    profileRow = upsertQuotePersonalityProfileForContact(workspaceId, contactKey, {
+      since: filters.since,
+      limit: Math.max(200, filters.eventLimit * 12),
+    }) ?? profileRow;
+  }
+  const profile = profileRow ? toQuotePersonalityProfile(profileRow) : {
+    workspaceId,
+    contactKey,
+    personalityType: null,
+    confidence: 0,
+    stabilityScore: 0,
+    freshnessScore: 0,
+    contradictionCount: 0,
+    sampleCount: 0,
+    dominantSentiment: null,
+    dominantUrgency: null,
+    preferredChannel: null,
+    topIntentTags: [],
+    confidenceTrend: [],
+    explanation: { model: "heuristic_mbti_v1", status: "insufficient_signals" },
+    lastEventId: null,
+    lastEventAt: null,
+  };
+
+  const recentEvents = filters.includeRecentEvents
+    ? listPersonalityEventsForContact(workspaceId, contactKey, {
+      since: filters.since,
+      limit: Math.max(filters.eventLimit * 4, 120),
+    }).slice(0, filters.eventLimit).map((row) => {
+      const event = toQuoteCommunicationEvent(row);
+      return {
+        ...event,
+        contactPerspective: row.direction === "inbound" ? "sender" : "recipient",
+      };
+    })
+    : [];
+
+  const feedback = getPersonalityFeedbackSummary(workspaceId, contactKey, filters.since);
+  const personalityType = typeof profile.personalityType === "string" ? profile.personalityType : null;
+  return {
+    workspaceId,
+    contactKey,
+    profile,
+    communicationPlaybook: personalityType
+      ? (PERSONALITY_STYLE_PLAYBOOK[personalityType] ?? "Use concise, respectful, and value-focused follow-up communication.")
+      : "Collect at least one meaningful interaction before applying personality guidance.",
+    recentEvents,
+    feedback,
+  };
+}
+
+export function recordQuotePersonalityFeedback(
+  workspaceIdInput: unknown,
+  bodyInput: unknown = {},
+): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const body = QuotePersonalityFeedbackSchema.parse(bodyInput);
+  const contactKey = normalizeContactKey(body.contactKey);
+  const recordedAt = body.recordedAt ?? nowIso();
+  const feedbackScore = body.feedbackScore ?? scorePersonalityOutcome(body.outcome);
+  const id = randomUUID();
+  db.run(
+    `INSERT INTO quote_personality_feedback (
+       id, workspace_id, contact_key, quote_external_id, proposal_id, action_type, outcome, feedback_score, reply_received, converted_to_order,
+       note, recorded_by, metadata_json, recorded_at, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      workspaceId,
+      contactKey,
+      body.quoteExternalId ?? null,
+      body.proposalId ?? null,
+      body.actionType ?? null,
+      body.outcome,
+      feedbackScore,
+      body.replyReceived ? 1 : 0,
+      body.convertedToOrder ? 1 : 0,
+      body.note ?? null,
+      body.recordedBy,
+      JSON.stringify(body.metadata),
+      recordedAt,
+      nowIso(),
+    ],
+  );
+  recordTrustAudit(workspaceId, body.recordedBy, "personality_feedback_recorded", "contact", contactKey, {
+    quoteExternalId: body.quoteExternalId ?? null,
+    proposalId: body.proposalId ?? null,
+    outcome: body.outcome,
+    feedbackScore,
+    convertedToOrder: body.convertedToOrder ?? false,
+  });
+  let refreshedProfile: Record<string, unknown> | null = null;
+  if (body.applyLearning) {
+    const updated = upsertQuotePersonalityProfileForContact(workspaceId, contactKey);
+    if (updated) refreshedProfile = toQuotePersonalityProfile(updated);
+  }
+  const saved = db.query<PersonalityFeedbackRow, [string]>(
+    `SELECT id, workspace_id, contact_key, quote_external_id, proposal_id, action_type, outcome, feedback_score, reply_received, converted_to_order,
+            note, recorded_by, metadata_json, recorded_at, created_at
+     FROM quote_personality_feedback
+     WHERE id = ?`
+  ).get(id);
+  if (!saved) throw new Error("Failed to persist personality feedback");
+  return {
+    status: "recorded",
+    feedback: toQuotePersonalityFeedback(saved),
+    profile: refreshedProfile,
   };
 }
 
@@ -8456,6 +9071,8 @@ export function validateMasterDataEntity(input: unknown): MasterDataEntity {
 export function resetErpPlatformForTests(): void {
   db.run(`DELETE FROM trust_audit_log`);
   db.run(`DELETE FROM trust_contact_consents`);
+  db.run(`DELETE FROM quote_personality_feedback`);
+  db.run(`DELETE FROM quote_personality_profiles`);
   db.run(`DELETE FROM quote_deal_rescue_runs`);
   db.run(`DELETE FROM quote_autopilot_proposals`);
   db.run(`DELETE FROM revenue_graph_edges`);

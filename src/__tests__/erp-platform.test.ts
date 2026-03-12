@@ -23,6 +23,8 @@ import {
   decideQuoteToOrderApproval,
   getExecutiveAnalytics,
   getForecastQualityAnalytics,
+  getQuotePersonalityProfile,
+  recordQuotePersonalityFeedback,
   getQuotePersonalityInsights,
   getQuoteCommunicationAnalytics,
   getQuoteCommunicationThreadSignals,
@@ -795,6 +797,122 @@ describe("erp-platform", () => {
     expect(insights.averageConfidence).toBeGreaterThan(0.3);
     expect(insights.distribution.length).toBeGreaterThanOrEqual(1);
     expect(typeof insights.communicationPlaybook === "string" || insights.communicationPlaybook === null).toBe(true);
+  });
+
+  test("personality profile endpoint returns explainable profile per contact", () => {
+    syncQuoteToOrderQuote("ws-profile", {
+      connectorType: "odoo",
+      quoteExternalId: "Q-PROF-1",
+      state: "submitted",
+      amount: 5100,
+      idempotencyKey: "prof-q1",
+    });
+    ingestQuoteCommunication("ws-profile", "Q-PROF-1", {
+      channel: "email",
+      direction: "inbound",
+      subject: "Need exact compliance timeline",
+      bodyText: "Please send concrete cost numbers and final decision deadline.",
+      fromAddress: "buyer@customer.example",
+      toAddress: "ops@ourco.example",
+      idempotencyKey: "prof-e1",
+    });
+    ingestQuoteCommunication("ws-profile", "Q-PROF-1", {
+      channel: "email",
+      direction: "inbound",
+      subject: "Reminder for final contract details",
+      bodyText: "We need exact legal/compliance checklist before approval.",
+      fromAddress: "buyer@customer.example",
+      toAddress: "ops@ourco.example",
+      idempotencyKey: "prof-e2",
+    });
+
+    const profile = getQuotePersonalityProfile("ws-profile", "buyer@customer.example", {
+      includeRecentEvents: true,
+      eventLimit: 10,
+      autoRecompute: true,
+    }) as {
+      profile: {
+        personalityType: string | null;
+        confidence: number;
+        sampleCount: number;
+        explanation: { model: string };
+      };
+      recentEvents: unknown[];
+      communicationPlaybook: string;
+      feedback: { summary: { total: number } };
+    };
+
+    expect(profile.profile.personalityType).toMatch(/^[EI][SN][TF][JP]$/);
+    expect(profile.profile.confidence).toBeGreaterThan(0.3);
+    expect(profile.profile.sampleCount).toBeGreaterThanOrEqual(2);
+    expect(profile.profile.explanation.model).toBe("heuristic_mbti_v1");
+    expect(profile.recentEvents.length).toBeGreaterThanOrEqual(1);
+    expect(typeof profile.communicationPlaybook).toBe("string");
+    expect(profile.feedback.summary.total).toBe(0);
+  });
+
+  test("personality feedback updates feedback summary and keeps learning loop data", () => {
+    syncQuoteToOrderQuote("ws-profile-fb", {
+      connectorType: "dynamics",
+      quoteExternalId: "Q-PROF-FB-1",
+      state: "submitted",
+      amount: 7800,
+      idempotencyKey: "prof-fb-q1",
+    });
+    ingestQuoteCommunication("ws-profile-fb", "Q-PROF-FB-1", {
+      channel: "email",
+      direction: "inbound",
+      subject: "Can we align on next step?",
+      bodyText: "Please propose final next action and owner today.",
+      fromAddress: "buyer2@customer.example",
+      toAddress: "ops@ourco.example",
+      idempotencyKey: "prof-fb-e1",
+    });
+
+    const feedback = recordQuotePersonalityFeedback("ws-profile-fb", {
+      contactKey: "buyer2@customer.example",
+      quoteExternalId: "Q-PROF-FB-1",
+      actionType: "followup_email",
+      outcome: "positive",
+      replyReceived: true,
+      convertedToOrder: true,
+      note: "Customer responded quickly and approved next step.",
+      recordedBy: "ops-lead",
+      applyLearning: true,
+    }) as {
+      status: string;
+      feedback: {
+        outcome: string;
+        convertedToOrder: boolean;
+      };
+      profile: {
+        personalityType: string | null;
+      } | null;
+    };
+
+    expect(feedback.status).toBe("recorded");
+    expect(feedback.feedback.outcome).toBe("positive");
+    expect(feedback.feedback.convertedToOrder).toBe(true);
+    expect(feedback.profile === null || typeof feedback.profile.personalityType === "string" || feedback.profile.personalityType === null).toBe(true);
+
+    const profile = getQuotePersonalityProfile("ws-profile-fb", "buyer2@customer.example", {
+      includeRecentEvents: false,
+      autoRecompute: false,
+    }) as {
+      feedback: {
+        summary: {
+          total: number;
+          positive: number;
+          replyRatePct: number;
+          conversionRatePct: number;
+        };
+      };
+    };
+
+    expect(profile.feedback.summary.total).toBeGreaterThanOrEqual(1);
+    expect(profile.feedback.summary.positive).toBeGreaterThanOrEqual(1);
+    expect(profile.feedback.summary.replyRatePct).toBeGreaterThan(0);
+    expect(profile.feedback.summary.conversionRatePct).toBeGreaterThan(0);
   });
 
   test("mailbox import ingests gmail messages with quote-id inference and dedupe", () => {
