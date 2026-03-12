@@ -8942,7 +8942,7 @@ function fetchCustomer360Contacts(
   workspaceId: string,
   customerExternalId: string,
 ): Record<string, unknown>[] {
-  const accountKey = `account:${customerExternalId.trim().toLowerCase()}`;
+  const accountKey = revenueGraphKey("account", customerExternalId);
   const contactEdges = db.query<RevenueGraphEdgeRow, [string, string]>(
     `SELECT * FROM revenue_graph_edges
      WHERE workspace_id = ? AND from_entity_key = ? AND relation IN ('has_contact', 'employs')`,
