@@ -132,6 +132,16 @@ import {
   validateMasterDataEntity,
   validateProductType,
   workflowDefinitionFor,
+  getCustomer360Profile,
+  getCustomer360Health,
+  getCustomer360Timeline,
+  getCustomer360Segments,
+  getCustomer360ChurnRisk,
+  Customer360ProfileInputSchema,
+  Customer360HealthInputSchema,
+  Customer360TimelineInputSchema,
+  Customer360SegmentsInputSchema,
+  Customer360ChurnRiskInputSchema,
 } from "./erp-platform.js";
 
 // Extend Fastify's request interface with rawBody for HMAC verification
@@ -935,6 +945,11 @@ const OrchestratorSchemas = {
   erp_analytics_ops: z.object({
     since: z.string().optional(),
   }).strict(),
+  erp_customer360_profile: Customer360ProfileInputSchema,
+  erp_customer360_health: Customer360HealthInputSchema,
+  erp_customer360_timeline: Customer360TimelineInputSchema,
+  erp_customer360_segments: Customer360SegmentsInputSchema,
+  erp_customer360_churn_risk: Customer360ChurnRiskInputSchema,
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -1464,6 +1479,31 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
     case "erp_analytics_ops": {
       const { since } = validateOrchestrator("erp_analytics_ops", args);
       return JSON.stringify(getOpsAnalytics({ since }), null, 2);
+    }
+
+    case "erp_customer360_profile": {
+      const { workspaceId, customerExternalId, forceRefresh } = validateOrchestrator("erp_customer360_profile", args);
+      return JSON.stringify(getCustomer360Profile(workspaceId, customerExternalId, forceRefresh), null, 2);
+    }
+
+    case "erp_customer360_health": {
+      const { workspaceId, customerExternalId, weights } = validateOrchestrator("erp_customer360_health", args);
+      return JSON.stringify(getCustomer360Health(workspaceId, customerExternalId, weights), null, 2);
+    }
+
+    case "erp_customer360_timeline": {
+      const { workspaceId, customerExternalId, ...rest } = validateOrchestrator("erp_customer360_timeline", args);
+      return JSON.stringify(getCustomer360Timeline(workspaceId, customerExternalId, rest), null, 2);
+    }
+
+    case "erp_customer360_segments": {
+      const opts = validateOrchestrator("erp_customer360_segments", args);
+      return JSON.stringify(getCustomer360Segments(opts), null, 2);
+    }
+
+    case "erp_customer360_churn_risk": {
+      const opts = validateOrchestrator("erp_customer360_churn_risk", args);
+      return JSON.stringify(getCustomer360ChurnRisk(opts), null, 2);
     }
 
     // ── Metrics ─────────────────────────────────────────────────
@@ -2760,6 +2800,83 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         properties: {
           since: { type: "string" },
         },
+      },
+    },
+    // Customer 360
+    {
+      name: "erp_customer360_profile",
+      description: "Get unified Customer 360 profile with health score, segment, and relationship map.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          customerExternalId: { type: "string" },
+          forceRefresh: { type: "boolean" },
+        },
+        required: ["workspaceId", "customerExternalId"],
+      },
+    },
+    {
+      name: "erp_customer360_health",
+      description: "Compute or retrieve customer health score with dimension breakdown and history.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          customerExternalId: { type: "string" },
+          weights: {
+            type: "object",
+            properties: {
+              engagement: { type: "number" },
+              revenue: { type: "number" },
+              sentiment: { type: "number" },
+              responsiveness: { type: "number" },
+            },
+          },
+        },
+        required: ["workspaceId", "customerExternalId"],
+      },
+    },
+    {
+      name: "erp_customer360_timeline",
+      description: "Get chronological interaction timeline for a customer across all touchpoints.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          customerExternalId: { type: "string" },
+          since: { type: "string" },
+          limit: { type: "number" },
+          interactionTypes: { type: "array", items: { type: "string", enum: ["quote_created", "quote_approved", "quote_rejected", "quote_converted", "quote_fulfilled", "communication", "followup", "consent_change", "order_created"] } },
+        },
+        required: ["workspaceId", "customerExternalId"],
+      },
+    },
+    {
+      name: "erp_customer360_segments",
+      description: "List customers grouped by segment (champion, loyal, promising, at_risk, churning, new, dormant).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          segment: { type: "string", enum: ["champion", "loyal", "promising", "at_risk", "churning", "new", "dormant"] },
+          limit: { type: "number" },
+        },
+        required: ["workspaceId"],
+      },
+    },
+    {
+      name: "erp_customer360_churn_risk",
+      description: "Assess churn risk for a customer or find all customers above a risk threshold.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspaceId: { type: "string" },
+          customerExternalId: { type: "string" },
+          threshold: { type: "number" },
+          limit: { type: "number" },
+        },
+        required: ["workspaceId"],
       },
     },
     // Metrics and observability
