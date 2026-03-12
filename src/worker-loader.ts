@@ -12,8 +12,8 @@ export interface UserWorker {
   port: number;
 }
 
-// User workers start at port 8090 to avoid clashing with built-in workers (8081-8088)
-const USER_PORT_BASE = 8090;
+// User workers start at port 8095 to avoid clashing with built-in workers (8081-8094)
+const USER_PORT_BASE = 8095;
 
 function getWorkersDirectory(): string {
   return join(process.env.HOME ?? homedir(), ".a2a-mcp", "workers");

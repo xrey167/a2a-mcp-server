@@ -68,6 +68,13 @@ const WORKERS = [
   { name: "knowledge", path: join(__dirname, "workers/knowledge.ts"), port: 8085 },
   { name: "design",    path: join(__dirname, "workers/design.ts"),    port: 8086 },
   { name: "factory",   path: join(__dirname, "workers/factory.ts"),   port: 8087 },
+  { name: "data",      path: join(__dirname, "workers/data.ts"),      port: 8088 },
+  { name: "news",      path: join(__dirname, "workers/news.ts"),      port: 8089 },
+  { name: "market",    path: join(__dirname, "workers/market.ts"),    port: 8090 },
+  { name: "signal",    path: join(__dirname, "workers/signal.ts"),    port: 8091 },
+  { name: "monitor",   path: join(__dirname, "workers/monitor.ts"),   port: 8092 },
+  { name: "infra",     path: join(__dirname, "workers/infra.ts"),     port: 8093 },
+  { name: "climate",   path: join(__dirname, "workers/climate.ts"),   port: 8094 },
 ];
 
 const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();

@@ -3302,7 +3302,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 // ── MCP Prompts ─────────────────────────────────────────────────
 
-const ALLOWED_PERSONAS = new Set(["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent", "factory-agent"]);
+const ALLOWED_PERSONAS = new Set(["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent", "design-agent", "factory-agent", "data-agent", "news-agent", "market-agent", "signal-agent", "monitor-agent", "infra-agent", "climate-agent"]);
 
 server.setRequestHandler(ListPromptsRequestSchema, async () => {
   const prompts: Array<{ name: string; description: string; arguments?: Array<{ name: string; description: string; required?: boolean }> }> = [];

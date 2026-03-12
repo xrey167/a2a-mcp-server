@@ -133,6 +133,12 @@ function workersCommand() {
     { name: "design",    port: 8086, description: "UI prompt, screen design (Gemini)" },
     { name: "factory",   port: 8087, description: "Project scaffolding, quality gates" },
     { name: "data",      port: 8088, description: "CSV/JSON parsing, data analysis" },
+    { name: "news",      port: 8089, description: "RSS feeds, news clustering, signal detection" },
+    { name: "market",    port: 8090, description: "Quotes, technicals, anomalies, correlation" },
+    { name: "signal",    port: 8091, description: "Signal aggregation, threat classification, CII" },
+    { name: "monitor",   port: 8092, description: "Conflict tracking, surge detection, vessels" },
+    { name: "infra",     port: 8093, description: "Cascade analysis, supply chain, chokepoints" },
+    { name: "climate",   port: 8094, description: "Earthquakes, wildfires, EONET, exposure" },
   ];
 
   const config = loadConfig();
