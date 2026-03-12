@@ -59,7 +59,7 @@ const Customer360HealthInputSchema = z.object({
 const Customer360TimelineInputSchema = z.object({
   workspaceId: z.string().min(1),
   customerExternalId: z.string().min(1),
-  since: z.string().optional(),
+  since: z.string().datetime().optional(),
   limit: z.number().int().min(1).max(500).optional().default(100),
   interactionTypes: z.array(Customer360InteractionTypeSchema).optional(),
 }).strict();
