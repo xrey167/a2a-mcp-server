@@ -8740,6 +8740,8 @@ export function getCustomer360Profile(
   const convertedQuotes = quotes.filter(q => q.state === "converted_to_order" || q.state === "fulfilled").length;
   const fulfilledQuotes = quotes.filter(q => q.state === "fulfilled").length;
   const rejectedQuotes = quotes.filter(q => q.state === "rejected").length;
+  // Count actual orders (distinct order_external_id values, excluding null)
+  const totalOrders = new Set(quotes.map(q => q.order_external_id).filter(id => id !== null)).size;
   const totalRevenue = quotes
     .filter(q => q.state === "converted_to_order" || q.state === "fulfilled")
     .reduce((sum, q) => sum + q.amount, 0);
@@ -8897,7 +8899,7 @@ export function getCustomer360Profile(
       metadata_json = excluded.metadata_json, computed_at = excluded.computed_at, updated_at = excluded.updated_at`,
     profileId, workspaceId, customerExternalId, displayName, segment,
     health.score, health.engagement, health.revenue, health.sentiment, health.responsiveness,
-    churn.riskPct, totalQuotes, fulfilledQuotes, totalRevenue, avgDealSize, conversionRate,
+    churn.riskPct, totalQuotes, totalOrders, totalRevenue, avgDealSize, conversionRate,
     lastInteractionAt, firstInteractionAt, JSON.stringify(contacts), JSON.stringify(masterPayload),
     now, now, now,
   );
