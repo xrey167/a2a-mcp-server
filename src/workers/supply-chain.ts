@@ -45,7 +45,7 @@ import type {
 import { BusinessCentralConnector } from "../erp/business-central.js";
 import { OdooConnector } from "../erp/odoo.js";
 import { computeCriticalPath, findLongLeadItems, findSingleSourceComponents } from "../risk/critical-path.js";
-import { analyzeLeadTimes, findCriticalLeadTimeIssues } from "../risk/lead-time.js";
+import { analyzeLeadTimes, findCriticalLeadTimeIssues, analyzeVendorHealth } from "../risk/lead-time.js";
 import { scoreComponents, topRisks, riskLevel } from "../risk/scoring.js";
 import type { ExternalRiskFactors } from "../risk/scoring.js";
 import { generateInterventions } from "../risk/interventions.js";
@@ -59,7 +59,7 @@ import {
 } from "../risk/ai-analyzer.js";
 import { runMRP, type MRPConfig } from "../mrp/mrp-engine.js";
 import { analyzeSupplyImpact } from "../mrp/pegging.js";
-import type { MRPRunResult, LotSizingPolicy, BucketSize } from "../mrp/types.js";
+import type { MRPRunResult, LotSizingPolicy, BucketSize, PlannedOrder } from "../mrp/types.js";
 
 const PORT = 8089;
 const NAME = "supply-chain-agent";
@@ -154,6 +154,15 @@ const SupplyChainSchemas = {
     itemNo: z.string(),
     delayDays: z.number().int().positive(),
   }).passthrough(),
+
+  // ── Vendor & Order Management Skills ──
+  vendor_health: z.object({
+    vendorNo: z.string().optional(),
+  }).passthrough(),
+
+  firm_orders: z.object({
+    orderIds: z.array(z.string()).min(1),
+  }).passthrough(),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -220,6 +229,16 @@ const AGENT_CARD = {
       name: "MRP Impact Analysis",
       description: "Analyze the downstream impact of a supply delay: 'If component X is delayed by N days, which sales orders and production orders are affected?' Uses pegging data for full traceability.",
     },
+    {
+      id: "vendor_health",
+      name: "Vendor Health",
+      description: "Analyze vendor delivery performance: on-time %, lead time variance, consistency, and trend. Aggregates posted receipt data per vendor into health scores.",
+    },
+    {
+      id: "firm_orders",
+      name: "Firm Orders",
+      description: "Firm planned orders so they are excluded from MRP replanning. Firmed orders become fixed supply that MRP treats as committed.",
+    },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory" },
   ],
@@ -238,6 +257,8 @@ let cachedPostedReceipts: PostedReceipt[] = [];
 let cachedERPWorkCenters: WorkCenterData[] = [];
 let lastAnalysisTimestamp: string | null = null;
 let cachedMRPResult: MRPRunResult | null = null;
+let firmedOrders: PlannedOrder[] = [];
+let cachedPeggingCache: unknown = undefined;
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -927,6 +948,7 @@ async function handleRunMRP(args: Record<string, unknown>): Promise<string> {
     lotSizingPolicy: policy,
     includeCapacity,
     includePegging,
+    previousPeggingCache: cachedPeggingCache as MRPConfig["previousPeggingCache"],
   };
 
   log(`running MRP: ${horizonWeeks} weeks, ${bucketSize} buckets, ${lotSizingPolicy} lot sizing`);
@@ -938,10 +960,12 @@ async function handleRunMRP(args: Record<string, unknown>): Promise<string> {
     components: allComponents,
     availability: cachedAvailability,
     erpWorkCenters: cachedERPWorkCenters.length > 0 ? cachedERPWorkCenters : undefined,
+    firmedOrders: firmedOrders.length > 0 ? firmedOrders : undefined,
     config: mrpConfig,
   });
 
   cachedMRPResult = result;
+  cachedPeggingCache = result.peggingCache;
 
   // Build a focused response (full result can be very large)
   const response = {
@@ -1019,6 +1043,81 @@ async function handleMRPImpact(args: Record<string, unknown>): Promise<string> {
   }, 2);
 }
 
+async function handleVendorHealth(args: Record<string, unknown>): Promise<string> {
+  const { vendorNo } = SupplyChainSchemas.vendor_health.parse(args);
+  const erp = requireConnector();
+
+  const vendors = await erp.getVendors();
+  const vendorsToAnalyze = vendorNo
+    ? vendors.filter((v) => v.no === vendorNo)
+    : vendors;
+
+  if (vendorsToAnalyze.length === 0) {
+    return safeStringify({ error: vendorNo ? `Vendor ${vendorNo} not found` : "No vendors found" });
+  }
+
+  const postedReceipts = cachedPostedReceipts.length > 0
+    ? cachedPostedReceipts
+    : await erp.getPostedReceipts({ limit: 2000 });
+
+  const scores = analyzeVendorHealth(postedReceipts, cachedPurchaseOrders, vendorsToAnalyze);
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    vendorCount: scores.length,
+    scores: scores.map((s) => ({
+      vendorNo: s.vendorNo,
+      vendorName: s.vendorName,
+      overallScore: s.overallScore,
+      onTimeDeliveryPct: s.onTimeDeliveryPct,
+      avgLeadTimeVarianceDays: s.avgLeadTimeVarianceDays,
+      leadTimeConsistency: s.leadTimeConsistency,
+      totalDeliveries: s.totalDeliveries,
+      trend: s.trend,
+      flags: s.flags,
+    })),
+    summary: {
+      avgScore: scores.length > 0
+        ? Math.round(scores.reduce((s, v) => s + v.overallScore, 0) / scores.length)
+        : 0,
+      poorHealthVendors: scores.filter((s) => s.overallScore < 50).length,
+      deterioratingVendors: scores.filter((s) => s.trend === "deteriorating").length,
+    },
+  }, 2);
+}
+
+function handleFirmOrders(args: Record<string, unknown>): string {
+  const { orderIds } = SupplyChainSchemas.firm_orders.parse(args);
+
+  if (!cachedMRPResult) {
+    return safeStringify({ error: "No MRP result available. Run the run_mrp skill first." });
+  }
+
+  const firmed: Array<{ id: string; itemNo: string; itemName: string; quantity: number }> = [];
+  const notFound: string[] = [];
+
+  for (const orderId of orderIds) {
+    const order = cachedMRPResult.plannedOrders.find((o) => o.id === orderId && o.status === "planned");
+    if (order) {
+      order.status = "firmed";
+      firmedOrders.push(order);
+      firmed.push({ id: order.id, itemNo: order.itemNo, itemName: order.itemName, quantity: order.quantity });
+      log(`firmed planned order ${orderId} for ${order.itemName}`);
+    } else {
+      notFound.push(orderId);
+    }
+  }
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    firmedCount: firmed.length,
+    firmed,
+    notFound: notFound.length > 0 ? notFound : undefined,
+    totalFirmedOrders: firmedOrders.length,
+    note: "Firmed orders will be treated as fixed supply in subsequent MRP runs.",
+  }, 2);
+}
+
 // ── Utilities ────────────────────────────────────────────────────
 
 function groupBy<T>(items: T[], keyFn: (item: T) => string): Record<string, number> {
@@ -1063,6 +1162,10 @@ async function handleSkill(
       return handleRunMRP(args);
     case "mrp_impact":
       return handleMRPImpact(args);
+    case "vendor_health":
+      return handleVendorHealth(args);
+    case "firm_orders":
+      return handleFirmOrders(args);
     default:
       return `Unknown skill: ${skillId}`;
   }

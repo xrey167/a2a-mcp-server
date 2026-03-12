@@ -39,7 +39,7 @@ import type {
 import { buildPlanningHorizon, buildDemandPlanWithExceptions, type DemandForecast } from "./demand-plan.js";
 import { buildSupplyPlan, calculateGrossToNet } from "./gross-to-net.js";
 import { policyName } from "./lot-sizing.js";
-import { buildPeggingTrees, type PeggingInput } from "./pegging.js";
+import { buildPeggingTrees, buildPeggingTreesIncremental, type PeggingInput, type PeggingCache } from "./pegging.js";
 import { discoverWorkCenters, calculateCapacityLoads, detectCapacityExceptions } from "./capacity.js";
 
 function log(msg: string) {
@@ -69,6 +69,8 @@ export interface MRPConfig {
   includeCapacity?: boolean;
   /** Include pegging? (default: true) */
   includePegging?: boolean;
+  /** Previous pegging cache for incremental rebuild */
+  previousPeggingCache?: PeggingCache;
 }
 
 export interface MRPInput {
@@ -81,6 +83,8 @@ export interface MRPInput {
   erpWorkCenters?: WorkCenterData[];
   /** ERP routing master data (optional, used for planned order CRP) */
   erpRoutings?: Map<string, RoutingStep[]>;
+  /** Previously firmed planned orders — treated as fixed supply, not regenerated */
+  firmedOrders?: PlannedOrder[];
   config: MRPConfig;
 }
 
@@ -148,13 +152,36 @@ export function runMRP(input: MRPInput): MRPRunResult {
 
   log(`gross-to-net: ${g2nResult.netRequirements.size} items processed`);
 
-  // 6. Generate planned orders from net requirements
-  const plannedOrders = generatePlannedOrders(g2nResult.netRequirements, g2nResult.itemMetadata, horizon, components);
+  // 5b. Subtract firmed order quantities from net requirements
+  const firmed = input.firmedOrders ?? [];
+  if (firmed.length > 0) {
+    for (const fo of firmed) {
+      const nr = g2nResult.netRequirements.get(fo.itemNo);
+      if (!nr) continue;
+      let remaining = fo.quantity;
+      for (const bucket of nr.buckets) {
+        if (remaining <= 0) break;
+        if (bucket.netRequirement > 0) {
+          const deduct = Math.min(remaining, bucket.netRequirement);
+          bucket.netRequirement -= deduct;
+          bucket.plannedOrderReceipt = Math.max(0, bucket.plannedOrderReceipt - deduct);
+          bucket.plannedOrderRelease = Math.max(0, bucket.plannedOrderRelease - deduct);
+          remaining -= deduct;
+        }
+      }
+    }
+    log(`firmed orders: ${firmed.length} orders subtracted from net requirements`);
+  }
 
-  log(`planned orders: ${plannedOrders.length} generated`);
+  // 6. Generate planned orders from net requirements
+  const newPlannedOrders = generatePlannedOrders(g2nResult.netRequirements, g2nResult.itemMetadata, horizon, components);
+  const plannedOrders = [...firmed, ...newPlannedOrders];
+
+  log(`planned orders: ${newPlannedOrders.length} new + ${firmed.length} firmed = ${plannedOrders.length} total`);
 
   // 7. Pegging
   let pegging: MRPRunResult["pegging"] = [];
+  let peggingCache: PeggingCache | undefined;
   if (config.includePegging !== false) {
     const peggingInput: PeggingInput = {
       salesOrders,
@@ -164,7 +191,13 @@ export function runMRP(input: MRPInput): MRPRunResult {
       plannedOrders,
       netRequirements: g2nResult.netRequirements,
     };
-    pegging = buildPeggingTrees(peggingInput);
+    if (config.previousPeggingCache) {
+      const result = buildPeggingTreesIncremental(peggingInput, config.previousPeggingCache);
+      pegging = result.trees;
+      peggingCache = result.cache;
+    } else {
+      pegging = buildPeggingTrees(peggingInput);
+    }
     log(`pegging: ${pegging.length} trees built`);
   }
 
@@ -227,6 +260,7 @@ export function runMRP(input: MRPInput): MRPRunResult {
     capacityLoads,
     exceptions,
     summary,
+    peggingCache,
   };
 }
 

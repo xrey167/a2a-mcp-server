@@ -11,7 +11,7 @@
  * Score 0-100 per dimension (100 = highest risk).
  */
 
-import type { BOMComponent, RiskScore, PurchaseOrder, ItemAvailability } from "../erp/types.js";
+import type { BOMComponent, RiskScore, PurchaseOrder, ItemAvailability, VendorHealthScore } from "../erp/types.js";
 import type { LeadTimeAnalysis } from "./lead-time.js";
 import { shouldStopRecursion } from "../mrp/bom-guard.js";
 
@@ -31,6 +31,8 @@ export interface ScoringContext {
   externalFactors?: ExternalRiskFactors;
   /** Demand quantity needed for the production order */
   demandQty?: number;
+  /** Vendor-level health scores for delivery risk assessment */
+  vendorHealthScores?: VendorHealthScore[];
 }
 
 /**
@@ -165,6 +167,15 @@ function scoreDelivery(comp: BOMComponent, ctx: ScoringContext, flags: string[])
     flags.push("LONG_LEAD_TIME_GT30");
   } else if (comp.leadTimeDays > 14) {
     score += 5;
+  }
+
+  // Vendor health score integration
+  if (comp.vendorNo && ctx.vendorHealthScores) {
+    const vendorHealth = ctx.vendorHealthScores.find((v) => v.vendorNo === comp.vendorNo);
+    if (vendorHealth && vendorHealth.overallScore < 50) {
+      score += 15;
+      flags.push("VENDOR_POOR_HEALTH");
+    }
   }
 
   // Check for open POs that might be late

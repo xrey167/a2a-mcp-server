@@ -38,6 +38,8 @@ export interface BOMComponent {
   children?: BOMComponent[];
   /** True when BOM recursion was truncated at depth limit — deeper levels exist but were not fetched */
   truncated?: boolean;
+  /** Item costing method from ERP (e.g. "FIFO", "Average", "Standard") */
+  costingMethod?: string;
 }
 
 export interface RoutingStep {
@@ -93,6 +95,21 @@ export interface Vendor {
   leadTimeDays: number;
   currencyCode: string;
   blocked: boolean;
+  paymentTermsCode?: string;
+}
+
+export interface VendorHealthScore {
+  vendorNo: string;
+  vendorName: string;
+  /** 0-100 where 100 = excellent */
+  overallScore: number;
+  onTimeDeliveryPct: number;
+  avgLeadTimeVarianceDays: number;
+  /** 0-100 where 100 = perfectly consistent */
+  leadTimeConsistency: number;
+  totalDeliveries: number;
+  trend: "improving" | "stable" | "deteriorating" | "unknown";
+  flags: string[];
 }
 
 export interface PurchaseOrder {

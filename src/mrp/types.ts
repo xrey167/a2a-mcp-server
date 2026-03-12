@@ -243,6 +243,8 @@ export interface MRPRunResult {
   exceptions: MRPException[];
   /** Summary statistics */
   summary: MRPSummary;
+  /** Pegging cache for incremental rebuilds on subsequent runs */
+  peggingCache?: unknown;
 }
 
 export interface MRPException {

@@ -192,6 +192,7 @@ export class OdooConnector implements ERPConnector {
     reorderPoint: number;
     itemCategory?: string;
     scrapPercent?: number;
+    costingMethod?: string;
   }> {
     const raw = await this.searchRead("product.product", [["id", "=", productId]], [
       "standard_price", "qty_available", "seller_ids",
@@ -274,6 +275,19 @@ export class OdooConnector implements ERPConnector {
       // stock module variations
     }
 
+    // Fetch costing method from product category
+    let costingMethod: string | undefined;
+    if (categId) {
+      try {
+        const cats = await this.searchRead("product.category", [
+          ["id", "=", categId[0]],
+        ], ["property_cost_method"], 1);
+        if (cats.length > 0 && cats[0].property_cost_method) {
+          costingMethod = String(cats[0].property_cost_method);
+        }
+      } catch { /* category costing not available */ }
+    }
+
     return {
       replenishmentMethod,
       vendorNo,
@@ -286,6 +300,7 @@ export class OdooConnector implements ERPConnector {
       reorderPoint,
       itemCategory,
       scrapPercent,
+      costingMethod,
     };
   }
 
@@ -396,7 +411,7 @@ export class OdooConnector implements ERPConnector {
       ["supplier_rank", ">", 0],
     ], [
       "id", "name", "country_id", "city",
-      "property_supplier_payment_term_id",
+      "property_supplier_payment_term_id", "active",
     ], 1000);
 
     // Fetch supplier info records for lead time data (delay field)
@@ -432,7 +447,10 @@ export class OdooConnector implements ERPConnector {
         city: r.city ? String(r.city) : undefined,
         leadTimeDays: avgLeadTime,
         currencyCode: "",
-        blocked: false,
+        blocked: r.active === false,
+        paymentTermsCode: r.property_supplier_payment_term_id
+          ? String((r.property_supplier_payment_term_id as [number, string])?.[1] ?? "")
+          : undefined,
       };
     });
   }

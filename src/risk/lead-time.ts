@@ -5,7 +5,7 @@
  * Falls back to PO expected dates when no receipt history is available.
  */
 
-import type { BOMComponent, PurchaseOrder, PostedReceipt } from "../erp/types.js";
+import type { BOMComponent, PurchaseOrder, PostedReceipt, Vendor, VendorHealthScore } from "../erp/types.js";
 
 export interface LeadTimeAnalysis {
   itemNo: string;
@@ -213,7 +213,7 @@ function emptyResult(
 /**
  * Detect lead time trend using simple linear regression on recent values.
  */
-function detectTrend(values: number[]): LeadTimeAnalysis["trend"] {
+export function detectTrend(values: number[]): LeadTimeAnalysis["trend"] {
   if (values.length < 3) return "unknown";
 
   const recent = values.slice(-10);
@@ -232,7 +232,7 @@ function detectTrend(values: number[]): LeadTimeAnalysis["trend"] {
   return "stable";
 }
 
-function calculateStdDev(values: number[]): number | null {
+export function calculateStdDev(values: number[]): number | null {
   if (values.length < 2) return null;
   const mean = values.reduce((a, b) => a + b, 0) / values.length;
   const squaredDiffs = values.map((v) => (v - mean) ** 2);
@@ -254,4 +254,117 @@ export function findCriticalLeadTimeIssues(
     (a.variance !== null && a.variance > varianceThreshold) ||
     a.trend === "increasing",
   );
+}
+
+/**
+ * Analyze vendor-level delivery health by aggregating receipt data per vendor.
+ */
+export function analyzeVendorHealth(
+  postedReceipts: PostedReceipt[],
+  purchaseOrders: PurchaseOrder[],
+  vendors: Vendor[],
+): VendorHealthScore[] {
+  const vendorMap = new Map(vendors.map((v) => [v.no, v]));
+
+  // Group receipts by vendor
+  const receiptsByVendor = new Map<string, PostedReceipt[]>();
+  for (const r of postedReceipts) {
+    if (!receiptsByVendor.has(r.vendorNo)) receiptsByVendor.set(r.vendorNo, []);
+    receiptsByVendor.get(r.vendorNo)!.push(r);
+  }
+
+  // Also consider vendors with POs but no receipts yet
+  for (const po of purchaseOrders) {
+    if (!receiptsByVendor.has(po.vendorNo) && vendorMap.has(po.vendorNo)) {
+      receiptsByVendor.set(po.vendorNo, []);
+    }
+  }
+
+  const scores: VendorHealthScore[] = [];
+
+  for (const [vendorNo, receipts] of receiptsByVendor) {
+    const vendor = vendorMap.get(vendorNo);
+    if (!vendor) continue;
+
+    const flags: string[] = [];
+
+    if (receipts.length === 0) {
+      scores.push({
+        vendorNo,
+        vendorName: vendor.name,
+        overallScore: 50,
+        onTimeDeliveryPct: 0,
+        avgLeadTimeVarianceDays: 0,
+        leadTimeConsistency: 50,
+        totalDeliveries: 0,
+        trend: "unknown",
+        flags: ["NO_DELIVERY_HISTORY"],
+      });
+      continue;
+    }
+
+    // On-time delivery percentage
+    const onTimeCount = receipts.filter((r) => r.varianceDays <= 0).length;
+    const onTimeDeliveryPct = Math.round((onTimeCount / receipts.length) * 100);
+
+    // Average lead time variance (positive = late)
+    const avgVariance = receipts.reduce((sum, r) => sum + r.varianceDays, 0) / receipts.length;
+
+    // Lead time consistency (inverse of std dev, normalized to 0-100)
+    const actualLeadTimes = receipts.filter((r) => r.actualLeadTimeDays > 0).map((r) => r.actualLeadTimeDays);
+    const stdDev = calculateStdDev(actualLeadTimes);
+    const avgLeadTime = actualLeadTimes.length > 0
+      ? actualLeadTimes.reduce((a, b) => a + b, 0) / actualLeadTimes.length
+      : 1;
+    // Consistency: 100 if stdDev=0, drops as stdDev grows relative to mean
+    const consistency = stdDev !== null
+      ? Math.max(0, Math.min(100, Math.round(100 - (stdDev / Math.max(avgLeadTime, 1)) * 100)))
+      : 50;
+
+    // Trend from recent lead times
+    const trend = actualLeadTimes.length >= 3
+      ? mapHealthTrend(detectTrend(actualLeadTimes))
+      : "unknown" as const;
+
+    // Flags
+    if (onTimeDeliveryPct < 50) flags.push("LOW_ON_TIME_DELIVERY");
+    if (avgVariance > 5) flags.push("HIGH_AVG_VARIANCE");
+    if (consistency < 40) flags.push("INCONSISTENT_LEAD_TIMES");
+    if (trend === "deteriorating") flags.push("DETERIORATING_PERFORMANCE");
+    if (vendor.blocked) flags.push("VENDOR_BLOCKED");
+
+    // Overall score (100 = excellent)
+    let overallScore = 100;
+    overallScore -= Math.max(0, (100 - onTimeDeliveryPct) * 0.4);
+    overallScore -= Math.max(0, Math.min(30, avgVariance * 3));
+    overallScore -= Math.max(0, (100 - consistency) * 0.2);
+    if (trend === "deteriorating") overallScore -= 10;
+    if (vendor.blocked) overallScore -= 30;
+    overallScore = Math.max(0, Math.min(100, Math.round(overallScore)));
+
+    scores.push({
+      vendorNo,
+      vendorName: vendor.name,
+      overallScore,
+      onTimeDeliveryPct,
+      avgLeadTimeVarianceDays: Math.round(avgVariance * 10) / 10,
+      leadTimeConsistency: consistency,
+      totalDeliveries: receipts.length,
+      trend,
+      flags,
+    });
+  }
+
+  return scores.sort((a, b) => a.overallScore - b.overallScore);
+}
+
+function mapHealthTrend(
+  trend: LeadTimeAnalysis["trend"],
+): VendorHealthScore["trend"] {
+  switch (trend) {
+    case "increasing": return "deteriorating";
+    case "decreasing": return "improving";
+    case "stable": return "stable";
+    default: return "unknown";
+  }
 }

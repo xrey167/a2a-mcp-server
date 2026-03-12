@@ -257,6 +257,187 @@ function pegDependentDemand(
   }
 }
 
+// ── Incremental Pegging ──────────────────────────────────────────
+
+export interface PeggingCache {
+  trees: PeggingTree[];
+  /** Fingerprints of demand records per item */
+  demandFingerprints: Map<string, string>;
+  /** Fingerprints of supply records per item */
+  supplyFingerprints: Map<string, string>;
+  timestamp: string;
+}
+
+/**
+ * Build pegging trees incrementally — only re-peg items where demand or supply changed.
+ * Falls back to full rebuild when > 50% of items changed.
+ */
+export function buildPeggingTreesIncremental(
+  input: PeggingInput,
+  previousCache?: PeggingCache,
+): { trees: PeggingTree[]; cache: PeggingCache } {
+  // Build current fingerprints
+  const currentDemandFP = buildDemandFingerprints(input);
+  const currentSupplyFP = buildSupplyFingerprints(input);
+
+  // No previous cache — full build
+  if (!previousCache) {
+    log("incremental pegging: no cache — full rebuild");
+    const trees = buildPeggingTrees(input);
+    return {
+      trees,
+      cache: {
+        trees,
+        demandFingerprints: currentDemandFP,
+        supplyFingerprints: currentSupplyFP,
+        timestamp: new Date().toISOString(),
+      },
+    };
+  }
+
+  // Detect changed items
+  const allItems = new Set([
+    ...currentDemandFP.keys(),
+    ...currentSupplyFP.keys(),
+    ...previousCache.demandFingerprints.keys(),
+    ...previousCache.supplyFingerprints.keys(),
+  ]);
+
+  const changedItems = new Set<string>();
+  for (const itemNo of allItems) {
+    const demandChanged = (currentDemandFP.get(itemNo) ?? "") !== (previousCache.demandFingerprints.get(itemNo) ?? "");
+    const supplyChanged = (currentSupplyFP.get(itemNo) ?? "") !== (previousCache.supplyFingerprints.get(itemNo) ?? "");
+    if (demandChanged || supplyChanged) changedItems.add(itemNo);
+  }
+
+  // If > 50% changed, full rebuild is cheaper
+  if (changedItems.size > allItems.size * 0.5) {
+    log(`incremental pegging: ${changedItems.size}/${allItems.size} items changed — full rebuild`);
+    const trees = buildPeggingTrees(input);
+    return {
+      trees,
+      cache: {
+        trees,
+        demandFingerprints: currentDemandFP,
+        supplyFingerprints: currentSupplyFP,
+        timestamp: new Date().toISOString(),
+      },
+    };
+  }
+
+  // Incremental: keep unchanged trees, rebuild affected ones
+  log(`incremental pegging: ${changedItems.size}/${allItems.size} items changed — selective rebuild`);
+
+  // Find which root demand trees are affected (their items overlap with changed set)
+  const unchangedTrees: PeggingTree[] = [];
+  const affectedRootItems = new Set<string>();
+
+  for (const tree of previousCache.trees) {
+    const treeItems = new Set([
+      tree.rootDemand.itemNo,
+      ...tree.pegs.map((p) => p.demandItemNo),
+      ...tree.pegs.map((p) => p.supplyItemNo),
+    ]);
+    const isAffected = [...treeItems].some((item) => changedItems.has(item));
+    if (isAffected) {
+      affectedRootItems.add(tree.rootDemand.itemNo);
+    } else {
+      unchangedTrees.push(tree);
+    }
+  }
+
+  // Rebuild only affected trees using the same logic as full build
+  const supplyIndex = buildSupplyIndex(input);
+  const rebuiltTrees: PeggingTree[] = [];
+
+  for (const so of input.salesOrders) {
+    if (so.status !== "open" && so.status !== "released") continue;
+    for (const line of so.lines) {
+      if (!affectedRootItems.has(line.itemNo)) continue;
+
+      const tree: PeggingTree = {
+        rootDemand: {
+          sourceType: "sales_order",
+          sourceId: so.number,
+          itemNo: line.itemNo,
+          itemName: line.itemName,
+          quantity: line.quantity,
+          dueDate: line.requestedDeliveryDate || so.requestedDeliveryDate,
+        },
+        pegs: [],
+        shortages: [],
+      };
+
+      pegItem(
+        line.itemNo, line.itemName, line.quantity,
+        line.requestedDeliveryDate || so.requestedDeliveryDate,
+        "sales_order", so.number, supplyIndex, tree,
+      );
+      pegDependentDemand(line.itemNo, line.quantity, input.productionOrders, supplyIndex, tree, new Set([line.itemNo]), 0);
+      rebuiltTrees.push(tree);
+    }
+  }
+
+  const trees = [...unchangedTrees, ...rebuiltTrees];
+  log(`incremental pegging: ${unchangedTrees.length} reused, ${rebuiltTrees.length} rebuilt`);
+
+  return {
+    trees,
+    cache: {
+      trees,
+      demandFingerprints: currentDemandFP,
+      supplyFingerprints: currentSupplyFP,
+      timestamp: new Date().toISOString(),
+    },
+  };
+}
+
+function buildDemandFingerprints(input: PeggingInput): Map<string, string> {
+  const fp = new Map<string, string>();
+  const demandByItem = new Map<string, string[]>();
+
+  for (const so of input.salesOrders) {
+    for (const line of so.lines) {
+      if (!demandByItem.has(line.itemNo)) demandByItem.set(line.itemNo, []);
+      demandByItem.get(line.itemNo)!.push(`${so.number}:${line.quantity}:${line.requestedDeliveryDate}`);
+    }
+  }
+  for (const po of input.productionOrders) {
+    if (!demandByItem.has(po.itemNo)) demandByItem.set(po.itemNo, []);
+    demandByItem.get(po.itemNo)!.push(`${po.number}:${po.quantity}:${po.dueDate}`);
+  }
+
+  for (const [itemNo, records] of demandByItem) {
+    fp.set(itemNo, String(Bun.hash(records.sort().join("|"))));
+  }
+  return fp;
+}
+
+function buildSupplyFingerprints(input: PeggingInput): Map<string, string> {
+  const fp = new Map<string, string>();
+  const supplyByItem = new Map<string, string[]>();
+
+  for (const a of input.availability) {
+    if (!supplyByItem.has(a.itemNo)) supplyByItem.set(a.itemNo, []);
+    supplyByItem.get(a.itemNo)!.push(`INV:${a.available}`);
+  }
+  for (const po of input.purchaseOrders) {
+    for (const line of po.lines) {
+      if (!supplyByItem.has(line.itemNo)) supplyByItem.set(line.itemNo, []);
+      supplyByItem.get(line.itemNo)!.push(`PO:${po.number}:${line.quantity}:${line.expectedReceiptDate}`);
+    }
+  }
+  for (const po of input.plannedOrders) {
+    if (!supplyByItem.has(po.itemNo)) supplyByItem.set(po.itemNo, []);
+    supplyByItem.get(po.itemNo)!.push(`PLN:${po.id}:${po.quantity}:${po.dueDate}`);
+  }
+
+  for (const [itemNo, records] of supplyByItem) {
+    fp.set(itemNo, String(Bun.hash(records.sort().join("|"))));
+  }
+  return fp;
+}
+
 // ── Impact Analysis ──────────────────────────────────────────────
 
 export interface SupplyImpact {

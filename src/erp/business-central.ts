@@ -232,6 +232,7 @@ export class BusinessCentralConnector implements ERPConnector {
         orderMultiple: r.orderMultiple != null ? Number(r.orderMultiple) : undefined,
         vendorCountry: r.vendorCountry ? String(r.vendorCountry) : undefined,
         bomVersionCode: r.productionBOMVersionCode ? String(r.productionBOMVersionCode) : undefined,
+        costingMethod: r.costingMethod ? String(r.costingMethod) : undefined,
       };
 
       // Recurse into sub-assemblies
@@ -286,6 +287,7 @@ export class BusinessCentralConnector implements ERPConnector {
         leadTimeDays: avgLeadTime,
         currencyCode: String(r.currencyCode ?? ""),
         blocked: String(r.blocked ?? "") !== " ",
+        paymentTermsCode: r.paymentTermsCode ? String(r.paymentTermsCode) : undefined,
       };
     });
   }
