@@ -203,6 +203,7 @@ const ALL_WORKERS = [
   { name: "design",    path: join(__dirname, "workers/design.ts"),    port: 8086 },
   { name: "factory",   path: join(__dirname, "workers/factory.ts"),   port: 8087 },
   { name: "data",      path: join(__dirname, "workers/data.ts"),      port: 8088 },
+  { name: "supply-chain", path: join(__dirname, "workers/supply-chain.ts"), port: 8089 },
 ];
 
 // Apply config: filter by enabled workers and override ports
