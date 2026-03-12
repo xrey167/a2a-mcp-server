@@ -8903,12 +8903,26 @@ export function getCustomer360Profile(
   );
 
   // 9. Health history snapshot (max 1 per day)
-  const todayStart = now.slice(0, 10);
-  const existingSnapshot = db.query<{ id: string }, [string, string, string]>(
+  const nowDate = new Date(now);
+  const dayStart = new Date(Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    nowDate.getUTCDate(),
+    0, 0, 0, 0,
+  ));
+  const nextDayStart = new Date(Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    nowDate.getUTCDate() + 1,
+    0, 0, 0, 0,
+  ));
+  const dayStartIso = dayStart.toISOString();
+  const nextDayStartIso = nextDayStart.toISOString();
+  const existingSnapshot = db.query<{ id: string }, [string, string, string, string]>(
     `SELECT id FROM customer360_health_history
-     WHERE workspace_id = ? AND customer_external_id = ? AND created_at >= ?
+     WHERE workspace_id = ? AND customer_external_id = ? AND created_at >= ? AND created_at < ?
      LIMIT 1`,
-  ).get(workspaceId, customerExternalId, todayStart);
+  ).get(workspaceId, customerExternalId, dayStartIso, nextDayStartIso);
   if (!existingSnapshot) {
     db.run(
       `INSERT INTO customer360_health_history (
