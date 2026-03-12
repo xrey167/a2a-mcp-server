@@ -59,7 +59,7 @@ const Customer360HealthInputSchema = z.object({
 const Customer360TimelineInputSchema = z.object({
   workspaceId: z.string().min(1),
   customerExternalId: z.string().min(1),
-  since: z.string().optional(),
+  since: z.string().datetime().optional(),
   limit: z.number().int().min(1).max(500).optional().default(100),
   interactionTypes: z.array(Customer360InteractionTypeSchema).optional(),
 }).strict();
@@ -8699,7 +8699,7 @@ export function getCustomer360Profile(
   workspaceIdInput: unknown,
   customerExternalIdInput: unknown,
   forceRefreshInput: unknown = false,
-): Record<string, unknown> {
+): Customer360Profile { // TODO: Define Customer360Profile interface
   const workspaceId = z.string().min(1).parse(workspaceIdInput);
   const customerExternalId = z.string().min(1).parse(customerExternalIdInput);
   const forceRefresh = z.boolean().optional().default(false).parse(forceRefreshInput);
@@ -8712,10 +8712,19 @@ export function getCustomer360Profile(
     if (cached) {
       const age = Date.now() - new Date(cached.computed_at).getTime();
       if (age < 3600_000) {
+        const {
+          contacts_json,
+          metadata_json,
+          workspace_id,
+          customer_external_id,
+          // Exclude any other internal-only columns here as needed.
+          ...publicFields
+        } = cached as unknown as Record<string, any>;
+
         return {
-          ...cached,
-          contacts: JSON.parse(cached.contacts_json),
-          metadata: JSON.parse(cached.metadata_json),
+          ...publicFields,
+          contacts: JSON.parse(contacts_json),
+          metadata: JSON.parse(metadata_json),
           fromCache: true,
         };
       }
@@ -8909,12 +8918,26 @@ export function getCustomer360Profile(
   );
 
   // 9. Health history snapshot (max 1 per day)
-  const todayStart = now.slice(0, 10);
-  const existingSnapshot = db.query<{ id: string }, [string, string, string]>(
+  const nowDate = new Date(now);
+  const dayStart = new Date(Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    nowDate.getUTCDate(),
+    0, 0, 0, 0,
+  ));
+  const nextDayStart = new Date(Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    nowDate.getUTCDate() + 1,
+    0, 0, 0, 0,
+  ));
+  const dayStartIso = dayStart.toISOString();
+  const nextDayStartIso = nextDayStart.toISOString();
+  const existingSnapshot = db.query<{ id: string }, [string, string, string, string]>(
     `SELECT id FROM customer360_health_history
-     WHERE workspace_id = ? AND customer_external_id = ? AND created_at >= ?
+     WHERE workspace_id = ? AND customer_external_id = ? AND created_at >= ? AND created_at < ?
      LIMIT 1`,
-  ).get(workspaceId, customerExternalId, todayStart);
+  ).get(workspaceId, customerExternalId, dayStartIso, nextDayStartIso);
   if (!existingSnapshot) {
     db.run(
       `INSERT INTO customer360_health_history (
@@ -9102,7 +9125,7 @@ export function getCustomer360Segments(filtersInput: unknown): Record<string, un
     ).all(filters.workspaceId).map(r => r.customer_external_id),
   );
 
-  // Compute profiles for unprofile customers (batch, up to 50 at a time)
+  // Compute profiles for unprofiled customers (batch, up to 50 at a time)
   let computed = 0;
   for (const c of knownCustomers) {
     if (!profiledSet.has(c.customer_external_id) && computed < 50) {
