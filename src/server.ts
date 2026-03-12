@@ -133,6 +133,11 @@ import {
   getCustomer360Timeline,
   getCustomer360Segments,
   getCustomer360ChurnRisk,
+  Customer360ProfileInputSchema,
+  Customer360HealthInputSchema,
+  Customer360TimelineInputSchema,
+  Customer360SegmentsInputSchema,
+  Customer360ChurnRiskInputSchema,
 } from "./erp-platform.js";
 
 // Extend Fastify's request interface with rawBody for HMAC verification
@@ -936,54 +941,11 @@ const OrchestratorSchemas = {
   erp_analytics_ops: z.object({
     since: z.string().optional(),
   }).strict(),
-  erp_customer360_profile: z.object({
-    workspaceId: z.string().min(1),
-    customerExternalId: z.string().min(1),
-    forceRefresh: z.boolean().optional().default(false),
-  }).strict(),
-  erp_customer360_health: z.object({
-    workspaceId: z.string().min(1),
-    customerExternalId: z.string().min(1),
-    weights: z.object({
-      engagement: z.number().min(0).max(1).optional().default(0.3),
-      revenue: z.number().min(0).max(1).optional().default(0.3),
-      sentiment: z.number().min(0).max(1).optional().default(0.2),
-      responsiveness: z.number().min(0).max(1).optional().default(0.2),
-    })
-      .optional()
-      .refine((w) => {
-        if (!w) return true;
-        const sum =
-          (w.engagement ?? 0) +
-          (w.revenue ?? 0) +
-          (w.sentiment ?? 0) +
-          (w.responsiveness ?? 0);
-        return sum > 0 && Math.abs(sum - 1) <= 0.01;
-      }, {
-        message: "weights must sum to 1 (within a small tolerance)",
-      }),
-  }).strict(),
-  erp_customer360_timeline: z.object({
-    workspaceId: z.string().min(1),
-    customerExternalId: z.string().min(1),
-    since: z.string().optional(),
-    limit: z.number().int().min(1).max(500).optional().default(100),
-    interactionTypes: z.array(z.enum([
-      "quote_created", "quote_approved", "quote_rejected", "quote_converted",
-      "quote_fulfilled", "communication", "followup", "consent_change", "order_created",
-    ])).optional(),
-  }).strict(),
-  erp_customer360_segments: z.object({
-    workspaceId: z.string().min(1),
-    segment: z.enum(["champion", "loyal", "promising", "at_risk", "churning", "new", "dormant"]).optional(),
-    limit: z.number().int().min(1).max(500).optional().default(100),
-  }).strict(),
-  erp_customer360_churn_risk: z.object({
-    workspaceId: z.string().min(1),
-    customerExternalId: z.string().optional(),
-    threshold: z.number().min(0).max(100).optional().default(50),
-    limit: z.number().int().min(1).max(200).optional().default(50),
-  }).strict(),
+  erp_customer360_profile: Customer360ProfileInputSchema,
+  erp_customer360_health: Customer360HealthInputSchema,
+  erp_customer360_timeline: Customer360TimelineInputSchema,
+  erp_customer360_segments: Customer360SegmentsInputSchema,
+  erp_customer360_churn_risk: Customer360ChurnRiskInputSchema,
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
