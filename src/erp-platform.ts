@@ -9322,52 +9322,80 @@ function computeCustomer360ChurnRisk(metrics: Customer360Metrics): { riskPct: nu
   return { riskPct: Math.min(100, risk), factors };
 }
 
-export function getCustomer360Profile(
-  workspaceIdInput: unknown,
-  customerExternalIdInput: unknown,
-  forceRefreshInput: unknown = false,
-): Customer360Profile { // TODO: Define Customer360Profile interface
-  const workspaceId = z.string().min(1).parse(workspaceIdInput);
-  const customerExternalId = z.string().min(1).parse(customerExternalIdInput);
-  const forceRefresh = z.boolean().optional().default(false).parse(forceRefreshInput);
+// ========== Customer 360 Profile Helper Functions ==========
 
-  // Check cache (1-hour TTL)
-  if (!forceRefresh) {
-    const cached = db.query<Customer360ProfileRow, [string, string]>(
-      `SELECT * FROM customer360_profiles WHERE workspace_id = ? AND customer_external_id = ? LIMIT 1`,
-    ).get(workspaceId, customerExternalId);
-    if (cached) {
-      const age = Date.now() - new Date(cached.computed_at).getTime();
-      if (age < 3600_000) {
-        const {
-          contacts_json,
-          metadata_json,
-          workspace_id,
-          customer_external_id,
-          // Exclude any other internal-only columns here as needed.
-          ...publicFields
-        } = cached as unknown as Record<string, any>;
+/**
+ * Try to retrieve a cached Customer 360 profile.
+ * Returns the cached profile if found and not expired (1-hour TTL), otherwise null.
+ */
+function tryGetCachedProfile(
+  workspaceId: string,
+  customerExternalId: string,
+): Record<string, unknown> | null {
+  const cached = db.query<Customer360ProfileRow, [string, string]>(
+    `SELECT * FROM customer360_profiles WHERE workspace_id = ? AND customer_external_id = ? LIMIT 1`,
+  ).get(workspaceId, customerExternalId);
 
-        return {
-          ...publicFields,
-          contacts: JSON.parse(contacts_json),
-          metadata: JSON.parse(metadata_json),
-          fromCache: true,
-        };
-      }
-    }
-  }
+  if (!cached) return null;
 
-  const now = nowIso();
+  const age = Date.now() - new Date(cached.computed_at).getTime();
+  if (age >= 3600_000) return null;
 
-  // 1. Master data
+  const {
+    contacts_json,
+    metadata_json,
+    workspace_id,
+    customer_external_id,
+    ...publicFields
+  } = cached as unknown as Record<string, any>;
+
+  return {
+    ...publicFields,
+    contacts: JSON.parse(contacts_json),
+    metadata: JSON.parse(metadata_json),
+    fromCache: true,
+  };
+}
+
+/**
+ * Fetch master data for a customer.
+ */
+function fetchCustomer360MasterData(
+  workspaceId: string,
+  customerExternalId: string,
+): { masterPayload: Record<string, unknown>; displayName: string } {
   const masterRow = db.query<MasterDataRecordRow, [string, string]>(
     `SELECT * FROM erp_master_data_records WHERE workspace_id = ? AND entity = 'customer' AND external_id = ? LIMIT 1`,
   ).get(workspaceId, customerExternalId);
+
   const masterPayload = masterRow ? JSON.parse(masterRow.payload_json) as Record<string, unknown> : {};
   const displayName = (masterPayload.name as string) || (masterPayload.displayName as string) || customerExternalId;
 
-  // 2. Quote metrics
+  return { masterPayload, displayName };
+}
+
+interface QuoteMetricsResult {
+  quotes: QuoteToOrderRecordRow[];
+  totalQuotes: number;
+  convertedQuotes: number;
+  fulfilledQuotes: number;
+  rejectedQuotes: number;
+  totalOrders: number;
+  totalRevenue: number;
+  avgDealSize: number;
+  conversionRate: number;
+  rejectionRate: number;
+  activeQuotes: QuoteToOrderRecordRow[];
+  workspaceAvgDealSize: number;
+}
+
+/**
+ * Fetch and compute quote-related metrics for a customer.
+ */
+function fetchCustomer360QuoteMetrics(
+  workspaceId: string,
+  customerExternalId: string,
+): QuoteMetricsResult {
   const quotes = db.query<QuoteToOrderRecordRow, [string, string]>(
     `SELECT * FROM quote_to_order_records WHERE workspace_id = ? AND customer_external_id = ?`,
   ).all(workspaceId, customerExternalId);
@@ -9393,8 +9421,36 @@ export function getCustomer360Profile(
   ).get(workspaceId);
   const workspaceAvgDealSize = wsAvgRow?.avg_deal ?? 0;
 
-  // 3. Communication metrics
-  const quoteIds = quotes.map(q => q.quote_external_id);
+  return {
+    quotes,
+    totalQuotes,
+    convertedQuotes,
+    fulfilledQuotes,
+    rejectedQuotes,
+    totalOrders,
+    totalRevenue,
+    avgDealSize,
+    conversionRate,
+    rejectionRate,
+    activeQuotes,
+    workspaceAvgDealSize,
+  };
+}
+
+interface CommunicationMetricsResult {
+  commRows: QuoteCommunicationEventRow[];
+  sentimentCounts: { positive: number; neutral: number; negative: number };
+  sentimentTrend: number;
+  avgResponseHours: number;
+}
+
+/**
+ * Fetch and compute communication-related metrics for a customer.
+ */
+function fetchCustomer360CommunicationMetrics(
+  workspaceId: string,
+  quoteIds: string[],
+): CommunicationMetricsResult {
   let commRows: QuoteCommunicationEventRow[] = [];
   if (quoteIds.length > 0) {
     const placeholders = quoteIds.map(() => "?").join(",");
@@ -9432,9 +9488,25 @@ export function getCustomer360Profile(
   }
   const avgResponseHours = responsePairs > 0 ? totalResponseHours / responsePairs : 24;
 
-  // 4. Followup metrics
+  return { commRows, sentimentCounts, sentimentTrend, avgResponseHours };
+}
+
+interface FollowupMetricsResult {
+  overdueFollowupCount: number;
+  totalFollowups: number;
+  overdueFollowupRatio: number;
+}
+
+/**
+ * Fetch and compute followup-related metrics for a customer.
+ */
+function fetchCustomer360FollowupMetrics(
+  workspaceId: string,
+  quoteIds: string[],
+): FollowupMetricsResult {
   let overdueFollowupCount = 0;
   let totalFollowups = 0;
+
   if (quoteIds.length > 0) {
     const placeholders = quoteIds.map(() => "?").join(",");
     const followupRows = db.query<{ status: string; due_at: string }, unknown[]>(
@@ -9446,14 +9518,44 @@ export function getCustomer360Profile(
       f => f.status === "open" && new Date(f.due_at) < new Date(),
     ).length;
   }
-  const overdueFollowupRatio = totalFollowups > 0 ? overdueFollowupCount / totalFollowups : 0;
 
-  // 5. Interaction dates
-  const allDates: number[] = [];
-  for (const q of quotes) allDates.push(new Date(q.created_at).getTime());
-  for (const c of commRows) allDates.push(new Date(c.occurred_at).getTime());
-  const firstInteractionAt = allDates.length > 0 ? new Date(Math.min(...allDates)).toISOString() : null;
-  const lastInteractionAt = allDates.length > 0 ? new Date(Math.max(...allDates)).toISOString() : null;
+  const overdueFollowupRatio = totalFollowups > 0 ? overdueFollowupCount / totalFollowups : 0;
+  return { overdueFollowupCount, totalFollowups, overdueFollowupRatio };
+}
+
+interface InteractionDatesResult {
+  firstInteractionAt: string | null;
+  lastInteractionAt: string | null;
+  daysSinceLastInteraction: number;
+  daysSinceFirstInteraction: number;
+}
+
+/**
+ * Compute interaction date metrics from quotes and communication events.
+ */
+function computeCustomer360InteractionDates(
+  quotes: QuoteToOrderRecordRow[],
+  commRows: QuoteCommunicationEventRow[],
+): InteractionDatesResult {
+  let minTime: number | null = null;
+  let maxTime: number | null = null;
+
+  for (const q of quotes) {
+    const t = new Date(q.created_at).getTime();
+    if (Number.isNaN(t)) continue;
+    if (minTime === null || t < minTime) minTime = t;
+    if (maxTime === null || t > maxTime) maxTime = t;
+  }
+
+  for (const c of commRows) {
+    const t = new Date(c.occurred_at).getTime();
+    if (Number.isNaN(t)) continue;
+    if (minTime === null || t < minTime) minTime = t;
+    if (maxTime === null || t > maxTime) maxTime = t;
+  }
+
+  const firstInteractionAt = minTime !== null ? new Date(minTime).toISOString() : null;
+  const lastInteractionAt = maxTime !== null ? new Date(maxTime).toISOString() : null;
   const daysSinceLastInteraction = lastInteractionAt
     ? (Date.now() - new Date(lastInteractionAt).getTime()) / 86_400_000
     : 999;
@@ -9461,7 +9563,16 @@ export function getCustomer360Profile(
     ? (Date.now() - new Date(firstInteractionAt).getTime()) / 86_400_000
     : 0;
 
-  // 6. Revenue graph contacts
+  return { firstInteractionAt, lastInteractionAt, daysSinceLastInteraction, daysSinceFirstInteraction };
+}
+
+/**
+ * Fetch revenue graph contacts for a customer.
+ */
+function fetchCustomer360Contacts(
+  workspaceId: string,
+  customerExternalId: string,
+): Record<string, unknown>[] {
   // Look up the account entity by external_id to get the correct entity_key
   const accountEntity = db.query<RevenueGraphEntityRow, [string, string]>(
     `SELECT entity_key FROM revenue_graph_entities
@@ -9473,6 +9584,7 @@ export function getCustomer360Profile(
     `SELECT * FROM revenue_graph_edges
      WHERE workspace_id = ? AND from_entity_key = ? AND relation IN ('has_contact', 'employs')`,
   ).all(workspaceId, accountKey);
+
   const contacts: Record<string, unknown>[] = [];
   for (const edge of contactEdges) {
     const contactEntity = db.query<RevenueGraphEntityRow, [string, string]>(
@@ -9491,7 +9603,168 @@ export function getCustomer360Profile(
     }
   }
 
-  // 7. Compute health, segment, churn
+  return contacts;
+}
+
+/**
+ * Persist the computed Customer 360 profile to the database.
+ */
+type Customer360ProfilePersistInput = {
+  workspaceId: string;
+  customerExternalId: string;
+  displayName: string;
+  segment: Customer360Segment;
+  health: Customer360HealthResult;
+  churn: { riskPct: number; factors: string[] };
+  totalQuotes: number;
+  totalOrders: number;
+  fulfilledQuotes: number;
+  totalRevenue: number;
+  avgDealSize: number;
+  conversionRate: number;
+  lastInteractionAt: string | null;
+  firstInteractionAt: string | null;
+  contacts: Record<string, unknown>[];
+  masterPayload: Record<string, unknown>;
+  now: string;
+};
+
+function persistCustomer360Profile(input: Customer360ProfilePersistInput): void {
+  const {
+    workspaceId,
+    customerExternalId,
+    displayName,
+    segment,
+    health,
+    churn,
+    totalQuotes,
+    totalOrders,
+    fulfilledQuotes,
+    totalRevenue,
+    avgDealSize,
+    conversionRate,
+    lastInteractionAt,
+    firstInteractionAt,
+    contacts,
+    masterPayload,
+    now,
+  } = input;
+  const profileId = randomUUID();
+  db.run(
+    `INSERT INTO customer360_profiles (
+      id, workspace_id, customer_external_id, display_name, segment,
+      health_score, health_engagement, health_revenue, health_sentiment, health_responsiveness,
+      churn_risk_pct, total_quotes, total_orders, total_revenue, avg_deal_size, conversion_rate,
+      last_interaction_at, first_interaction_at, contacts_json, metadata_json, computed_at, created_at, updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(workspace_id, customer_external_id) DO UPDATE SET
+      display_name = excluded.display_name, segment = excluded.segment,
+      health_score = excluded.health_score, health_engagement = excluded.health_engagement,
+      health_revenue = excluded.health_revenue, health_sentiment = excluded.health_sentiment,
+      health_responsiveness = excluded.health_responsiveness, churn_risk_pct = excluded.churn_risk_pct,
+      total_quotes = excluded.total_quotes, total_orders = excluded.total_orders,
+      total_revenue = excluded.total_revenue, avg_deal_size = excluded.avg_deal_size,
+      conversion_rate = excluded.conversion_rate, last_interaction_at = excluded.last_interaction_at,
+      first_interaction_at = excluded.first_interaction_at, contacts_json = excluded.contacts_json,
+      metadata_json = excluded.metadata_json, computed_at = excluded.computed_at, updated_at = excluded.updated_at`,
+    profileId, workspaceId, customerExternalId, displayName, segment,
+    health.score, health.engagement, health.revenue, health.sentiment, health.responsiveness,
+    churn.riskPct, totalQuotes, totalOrders, totalRevenue, avgDealSize, conversionRate,
+    lastInteractionAt, firstInteractionAt, JSON.stringify(contacts), JSON.stringify(masterPayload),
+    now, now, now,
+  );
+}
+
+/**
+ * Create a health history snapshot (max 1 per day).
+ */
+function createCustomer360HealthSnapshot(
+  workspaceId: string,
+  customerExternalId: string,
+  health: Customer360HealthResult,
+  segment: Customer360Segment,
+  churnRiskPct: number,
+  now: string,
+): void {
+  const nowDate = new Date(now);
+  const dayStart = new Date(Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    nowDate.getUTCDate(),
+    0, 0, 0, 0,
+  ));
+  const nextDayStart = new Date(Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    nowDate.getUTCDate() + 1,
+    0, 0, 0, 0,
+  ));
+  const dayStartIso = dayStart.toISOString();
+  const nextDayStartIso = nextDayStart.toISOString();
+
+  const existingSnapshot = db.query<{ id: string }, [string, string, string, string]>(
+    `SELECT id FROM customer360_health_history
+     WHERE workspace_id = ? AND customer_external_id = ? AND created_at >= ? AND created_at < ?
+     LIMIT 1`,
+  ).get(workspaceId, customerExternalId, dayStartIso, nextDayStartIso);
+
+  if (!existingSnapshot) {
+    db.run(
+      `INSERT INTO customer360_health_history (
+        id, workspace_id, customer_external_id, health_score,
+        health_engagement, health_revenue, health_sentiment, health_responsiveness,
+        segment, churn_risk_pct, created_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      randomUUID(), workspaceId, customerExternalId, health.score,
+      health.engagement, health.revenue, health.sentiment, health.responsiveness,
+      segment, churnRiskPct, now,
+    );
+  }
+}
+
+// ========== Main Customer 360 Profile Function ==========
+
+export function getCustomer360Profile(
+  workspaceIdInput: unknown,
+  customerExternalIdInput: unknown,
+  forceRefreshInput: unknown = false,
+): Record<string, unknown> {
+  const workspaceId = z.string().min(1).parse(workspaceIdInput);
+  const customerExternalId = z.string().min(1).parse(customerExternalIdInput);
+  const forceRefresh = z.boolean().optional().default(false).parse(forceRefreshInput);
+
+  // Try cache first
+  if (!forceRefresh) {
+    const cached = tryGetCachedProfile(workspaceId, customerExternalId);
+    if (cached) return cached;
+  }
+
+  const now = nowIso();
+
+  // Fetch master data
+  const { masterPayload, displayName } = fetchCustomer360MasterData(workspaceId, customerExternalId);
+
+  // Fetch and compute quote metrics
+  const quoteMetrics = fetchCustomer360QuoteMetrics(workspaceId, customerExternalId);
+  const { quotes, totalQuotes, convertedQuotes, fulfilledQuotes, rejectedQuotes, totalOrders, totalRevenue, avgDealSize, conversionRate, rejectionRate, activeQuotes, workspaceAvgDealSize } = quoteMetrics;
+
+  // Fetch and compute communication metrics
+  const quoteIds = quotes.map(q => q.quote_external_id);
+  const commMetrics = fetchCustomer360CommunicationMetrics(workspaceId, quoteIds);
+  const { commRows, sentimentCounts, sentimentTrend, avgResponseHours } = commMetrics;
+
+  // Fetch followup metrics
+  const followupMetrics = fetchCustomer360FollowupMetrics(workspaceId, quoteIds);
+  const { overdueFollowupCount, totalFollowups, overdueFollowupRatio } = followupMetrics;
+
+  // Compute interaction dates
+  const interactionDates = computeCustomer360InteractionDates(quotes, commRows);
+  const { firstInteractionAt, lastInteractionAt, daysSinceLastInteraction, daysSinceFirstInteraction } = interactionDates;
+
+  // Fetch contacts
+  const contacts = fetchCustomer360Contacts(workspaceId, customerExternalId);
+
+  // Compute health, segment, and churn risk
   const healthData: Customer360HealthData = {
     communicationCount: commRows.length,
     daysSinceLastInteraction,
@@ -9520,65 +9793,29 @@ export function getCustomer360Profile(
   const segment = computeCustomer360Segment(segmentMetrics);
   const churn = computeCustomer360ChurnRisk(segmentMetrics);
 
-  // 8. Persist profile
-  const profileId = randomUUID();
-  db.run(
-    `INSERT INTO customer360_profiles (
-      id, workspace_id, customer_external_id, display_name, segment,
-      health_score, health_engagement, health_revenue, health_sentiment, health_responsiveness,
-      churn_risk_pct, total_quotes, total_orders, total_revenue, avg_deal_size, conversion_rate,
-      last_interaction_at, first_interaction_at, contacts_json, metadata_json, computed_at, created_at, updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(workspace_id, customer_external_id) DO UPDATE SET
-      display_name = excluded.display_name, segment = excluded.segment,
-      health_score = excluded.health_score, health_engagement = excluded.health_engagement,
-      health_revenue = excluded.health_revenue, health_sentiment = excluded.health_sentiment,
-      health_responsiveness = excluded.health_responsiveness, churn_risk_pct = excluded.churn_risk_pct,
-      total_quotes = excluded.total_quotes, total_orders = excluded.total_orders,
-      total_revenue = excluded.total_revenue, avg_deal_size = excluded.avg_deal_size,
-      conversion_rate = excluded.conversion_rate, last_interaction_at = excluded.last_interaction_at,
-      first_interaction_at = excluded.first_interaction_at, contacts_json = excluded.contacts_json,
-      metadata_json = excluded.metadata_json, computed_at = excluded.computed_at, updated_at = excluded.updated_at`,
-    profileId, workspaceId, customerExternalId, displayName, segment,
-    health.score, health.engagement, health.revenue, health.sentiment, health.responsiveness,
-    churn.riskPct, totalQuotes, totalOrders, totalRevenue, avgDealSize, conversionRate,
-    lastInteractionAt, firstInteractionAt, JSON.stringify(contacts), JSON.stringify(masterPayload),
-    now, now, now,
-  );
+  // Persist profile to database
+  persistCustomer360Profile({
+    workspaceId,
+    customerExternalId,
+    displayName,
+    segment,
+    health,
+    churn,
+    totalQuotes,
+    totalOrders,
+    fulfilledQuotes,
+    totalRevenue,
+    avgDealSize,
+    conversionRate,
+    lastInteractionAt,
+    firstInteractionAt,
+    contacts,
+    masterPayload,
+    now,
+  });
 
-  // 9. Health history snapshot (max 1 per day)
-  const nowDate = new Date(now);
-  const dayStart = new Date(Date.UTC(
-    nowDate.getUTCFullYear(),
-    nowDate.getUTCMonth(),
-    nowDate.getUTCDate(),
-    0, 0, 0, 0,
-  ));
-  const nextDayStart = new Date(Date.UTC(
-    nowDate.getUTCFullYear(),
-    nowDate.getUTCMonth(),
-    nowDate.getUTCDate() + 1,
-    0, 0, 0, 0,
-  ));
-  const dayStartIso = dayStart.toISOString();
-  const nextDayStartIso = nextDayStart.toISOString();
-  const existingSnapshot = db.query<{ id: string }, [string, string, string, string]>(
-    `SELECT id FROM customer360_health_history
-     WHERE workspace_id = ? AND customer_external_id = ? AND created_at >= ? AND created_at < ?
-     LIMIT 1`,
-  ).get(workspaceId, customerExternalId, dayStartIso, nextDayStartIso);
-  if (!existingSnapshot) {
-    db.run(
-      `INSERT INTO customer360_health_history (
-        id, workspace_id, customer_external_id, health_score,
-        health_engagement, health_revenue, health_sentiment, health_responsiveness,
-        segment, churn_risk_pct, created_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-      randomUUID(), workspaceId, customerExternalId, health.score,
-      health.engagement, health.revenue, health.sentiment, health.responsiveness,
-      segment, churn.riskPct, now,
-    );
-  }
+  // Create health history snapshot
+  createCustomer360HealthSnapshot(workspaceId, customerExternalId, health, segment, churn.riskPct, now);
 
   return {
     workspaceId,
