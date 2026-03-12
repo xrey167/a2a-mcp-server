@@ -9090,18 +9090,40 @@ export function getCustomer360Timeline(
 
   // Consent change events
   if (!allowedTypes || allowedTypes.has("consent_change")) {
-    let auditSql = `SELECT * FROM trust_audit_log WHERE workspace_id = ? AND entity_type = 'contact'`;
-    const auditParams: unknown[] = [opts.workspaceId];
-    if (sinceFilter) { auditSql += ` AND created_at >= ?`; auditParams.push(sinceFilter); }
-    auditSql += ` ORDER BY created_at DESC LIMIT 200`;
-    const auditRows = db.query<TrustAuditRow, unknown[]>(auditSql).all(...auditParams);
-    for (const a of auditRows) {
-      entries.push({
-        type: "consent_change",
-        timestamp: a.created_at,
-        summary: `Consent ${a.event_type} by ${a.actor}`,
-        details: JSON.parse(a.details_json) as Record<string, unknown>,
-      });
+    // Get contact keys associated with this customer from revenue graph
+    const accountKey = `account:${opts.customerExternalId.trim().toLowerCase()}`;
+    const contactEdges = db.query<RevenueGraphEdgeRow, [string, string]>(
+      `SELECT * FROM revenue_graph_edges
+       WHERE workspace_id = ? AND from_entity_key = ? AND relation IN ('has_contact', 'employs')`,
+    ).all(opts.workspaceId, accountKey);
+
+    const contactKeys: string[] = [];
+    for (const edge of contactEdges) {
+      const contactEntity = db.query<RevenueGraphEntityRow, [string, string]>(
+        `SELECT * FROM revenue_graph_entities WHERE workspace_id = ? AND entity_key = ? LIMIT 1`,
+      ).get(opts.workspaceId, edge.to_entity_key);
+      if (contactEntity && contactEntity.external_id) {
+        contactKeys.push(contactEntity.external_id);
+      }
+    }
+
+    // Only query audit logs if there are contacts associated with this customer
+    if (contactKeys.length > 0) {
+      const placeholders = contactKeys.map(() => "?").join(",");
+      let auditSql = `SELECT * FROM trust_audit_log
+        WHERE workspace_id = ? AND entity_type = 'contact' AND entity_id IN (${placeholders})`;
+      const auditParams: unknown[] = [opts.workspaceId, ...contactKeys];
+      if (sinceFilter) { auditSql += ` AND created_at >= ?`; auditParams.push(sinceFilter); }
+      auditSql += ` ORDER BY created_at DESC LIMIT 200`;
+      const auditRows = db.query<TrustAuditRow, unknown[]>(auditSql).all(...auditParams);
+      for (const a of auditRows) {
+        entries.push({
+          type: "consent_change",
+          timestamp: a.created_at,
+          summary: `Consent ${a.event_type} by ${a.actor}`,
+          details: JSON.parse(a.details_json) as Record<string, unknown>,
+        });
+      }
     }
   }
 
