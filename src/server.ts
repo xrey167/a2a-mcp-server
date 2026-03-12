@@ -949,7 +949,19 @@ const OrchestratorSchemas = {
       revenue: z.number().min(0).max(1).optional().default(0.3),
       sentiment: z.number().min(0).max(1).optional().default(0.2),
       responsiveness: z.number().min(0).max(1).optional().default(0.2),
-    }).optional(),
+    })
+      .optional()
+      .refine((w) => {
+        if (!w) return true;
+        const sum =
+          (w.engagement ?? 0) +
+          (w.revenue ?? 0) +
+          (w.sentiment ?? 0) +
+          (w.responsiveness ?? 0);
+        return sum > 0 && Math.abs(sum - 1) <= 0.01;
+      }, {
+        message: "weights must sum to 1 (within a small tolerance)",
+      }),
   }).strict(),
   erp_customer360_timeline: z.object({
     workspaceId: z.string().min(1),
