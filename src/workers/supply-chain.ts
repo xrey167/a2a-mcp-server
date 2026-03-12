@@ -10,13 +10,16 @@
  * interventions (make-or-buy, safety stock, dual sourcing, etc.).
  *
  * Skills:
- *   connect_erp        — Configure ERP connection (BC or Odoo)
- *   analyze_orders      — Analyze production/sales orders and their components
- *   critical_path       — Compute critical path and identify bottlenecks
- *   assess_risk         — Multi-dimensional risk scoring with external factors
- *   recommend_actions   — Generate prioritized intervention recommendations
- *   monitor_dashboard   — Aggregated supply chain status overview
- *   remember / recall   — Shared persistent memory
+ *   connect_erp              — Configure ERP connection (BC or Odoo)
+ *   analyze_orders           — Analyze production/sales orders and their components
+ *   critical_path            — Compute critical path and identify bottlenecks
+ *   assess_risk              — Multi-dimensional risk scoring with external factors
+ *   recommend_actions        — Generate prioritized intervention recommendations (with AI evaluation)
+ *   monitor_dashboard        — Aggregated supply chain status overview
+ *   intelligence_report      — AI-powered comprehensive supply chain intelligence briefing
+ *   predict_bottlenecks      — Predictive analysis of future bottlenecks from current trends
+ *   deep_bom_analysis        — AI deep analysis of BOM structure for hidden risks
+ *   remember / recall        — Shared persistent memory
  */
 
 import Fastify from "fastify";
@@ -43,6 +46,13 @@ import { scoreComponents, topRisks, riskLevel } from "../risk/scoring.js";
 import type { ExternalRiskFactors } from "../risk/scoring.js";
 import { generateInterventions } from "../risk/interventions.js";
 import { assessExternalRisks } from "../risk/sources.js";
+import {
+  analyzeDeepBOM,
+  evaluateInterventionsWithAI,
+  generateIntelligenceReport,
+  gatherWebIntelligence,
+  predictBottlenecks,
+} from "../risk/ai-analyzer.js";
 
 const PORT = 8089;
 const NAME = "supply-chain-agent";
@@ -97,6 +107,7 @@ const SupplyChainSchemas = {
     riskThreshold: z.number().optional().default(40),
     maxRecommendations: z.number().int().positive().optional().default(20),
     includeCosting: z.boolean().optional().default(true),
+    includeAIEvaluation: z.boolean().optional().default(true),
     strategies: z.array(z.enum([
       "make_or_buy", "safety_stock", "dual_source", "advance_purchase", "reschedule",
     ])).optional(),
@@ -106,6 +117,20 @@ const SupplyChainSchemas = {
   monitor_dashboard: z.object({
     period: z.string().optional(),
   }).passthrough(),
+
+  intelligence_report: z.object({
+    includeWebIntelligence: z.boolean().optional().default(true),
+    includeDeepAnalysis: z.boolean().optional().default(true),
+    productionOrderId: z.string().optional(),
+  }).passthrough(),
+
+  predict_bottlenecks: z.object({
+    productionOrderId: z.string().optional(),
+  }).passthrough(),
+
+  deep_bom_analysis: z.object({
+    productionOrderId: z.string().optional(),
+  }).passthrough(),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -114,7 +139,7 @@ const AGENT_CARD = {
   name: NAME,
   description: "Supply chain risk agent — analyzes production/sales orders from Business Central or Odoo, identifies critical paths, assesses global risks, and recommends interventions",
   url: `http://localhost:${PORT}`,
-  version: "1.0.0",
+  version: "2.0.0",
   capabilities: { streaming: false },
   skills: [
     {
@@ -146,6 +171,21 @@ const AGENT_CARD = {
       id: "monitor_dashboard",
       name: "Monitor Dashboard",
       description: "Aggregated supply chain status overview: risk levels, critical components, open interventions, and trend data.",
+    },
+    {
+      id: "intelligence_report",
+      name: "Intelligence Report",
+      description: "AI-powered comprehensive supply chain intelligence briefing. Combines ERP data analysis, deep BOM inspection, real-time web intelligence, and external risk factors into an executive report with prioritized action items.",
+    },
+    {
+      id: "predict_bottlenecks",
+      name: "Predict Bottlenecks",
+      description: "AI-powered predictive analysis that detects future bottlenecks from current trends in lead times, inventory levels, and demand patterns. Returns predictions with confidence levels and mitigation windows.",
+    },
+    {
+      id: "deep_bom_analysis",
+      name: "Deep BOM Analysis",
+      description: "AI deep analysis of Bill of Materials structure. Identifies concentration risks, cascade effects, demand-supply mismatches, and strategic vulnerabilities that rule-based scoring misses.",
     },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory" },
@@ -497,6 +537,7 @@ async function handleRecommendActions(args: Record<string, unknown>): Promise<st
   const {
     riskThreshold,
     maxRecommendations,
+    includeAIEvaluation,
     strategies,
     productionOrderId,
   } = SupplyChainSchemas.recommend_actions.parse(args);
@@ -521,7 +562,7 @@ async function handleRecommendActions(args: Record<string, unknown>): Promise<st
     leadTimeAnalyses,
   });
 
-  // Generate interventions
+  // Generate rule-based interventions
   const dueDate = targetOrders.length > 0
     ? targetOrders.reduce((earliest, o) =>
         o.dueDate < earliest ? o.dueDate : earliest,
@@ -538,6 +579,21 @@ async function handleRecommendActions(args: Record<string, unknown>): Promise<st
     { riskThreshold, maxRecommendations, strategies },
   );
 
+  // AI evaluation: re-rank interventions considering interdependencies and context
+  let aiEvaluation = null;
+  if (includeAIEvaluation && interventions.length > 0) {
+    log("running AI evaluation of interventions");
+    try {
+      aiEvaluation = await evaluateInterventionsWithAI(
+        interventions,
+        riskScores,
+        targetOrders,
+      );
+    } catch (err) {
+      log(`AI evaluation failed: ${err}`);
+    }
+  }
+
   // Summarize by type
   const byType: Record<string, number> = {};
   const byPriority: Record<string, number> = {};
@@ -548,6 +604,11 @@ async function handleRecommendActions(args: Record<string, unknown>): Promise<st
 
   const totalCostImpact = interventions.reduce((a, b) => a + b.estimatedCostImpact, 0);
 
+  // Merge AI scores into interventions if available
+  const aiScoreMap = new Map(
+    aiEvaluation?.rankedInterventions?.map((r) => [r.id, r]) ?? [],
+  );
+
   const result = {
     timestamp: new Date().toISOString(),
     summary: {
@@ -556,16 +617,34 @@ async function handleRecommendActions(args: Record<string, unknown>): Promise<st
       byPriority,
       totalEstimatedCostImpact: totalCostImpact,
     },
-    interventions: interventions.map((i) => ({
-      id: i.id,
-      type: i.type,
-      priority: i.priority,
-      component: `${i.componentName} (${i.componentId})`,
-      description: i.description,
-      costImpact: i.estimatedCostImpact,
-      riskReduction: i.estimatedRiskReduction,
-      details: i.details,
-    })),
+    interventions: interventions.map((i) => {
+      const aiScore = aiScoreMap.get(i.id);
+      return {
+        id: i.id,
+        type: i.type,
+        priority: i.priority,
+        component: `${i.componentName} (${i.componentId})`,
+        description: i.description,
+        costImpact: i.estimatedCostImpact,
+        riskReduction: i.estimatedRiskReduction,
+        details: i.details,
+        // AI enrichment
+        ...(aiScore ? {
+          aiScore: aiScore.aiScore,
+          aiReasoning: aiScore.reasoning,
+          sideEffects: aiScore.sideEffects,
+          implementationComplexity: aiScore.implementationComplexity,
+          timeToEffect: aiScore.timeToEffect,
+        } : {}),
+      };
+    }),
+    // AI combined strategy
+    ...(aiEvaluation ? {
+      aiStrategy: {
+        combinedStrategy: aiEvaluation.combinedStrategy,
+        estimatedOverallRiskReduction: aiEvaluation.estimatedOverallRiskReduction,
+      },
+    } : {}),
   };
 
   return safeStringify(result, 2);
@@ -636,6 +715,135 @@ async function handleMonitorDashboard(args: Record<string, unknown>): Promise<st
   return safeStringify(dashboard, 2);
 }
 
+// ── AI-Powered Skill Handlers ────────────────────────────────────
+
+async function handleIntelligenceReport(args: Record<string, unknown>): Promise<string> {
+  const erp = requireConnector();
+  const { includeWebIntelligence, includeDeepAnalysis, productionOrderId } =
+    SupplyChainSchemas.intelligence_report.parse(args);
+
+  // Ensure we have data
+  if (cachedProductionOrders.length === 0) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  let targetOrders = cachedProductionOrders;
+  if (productionOrderId) {
+    targetOrders = targetOrders.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+  }
+
+  const allComponents = collectAllComponents(targetOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders);
+  const riskScores = scoreComponents(allComponents, {
+    purchaseOrders: cachedPurchaseOrders,
+    availability: cachedAvailability,
+    leadTimeAnalyses,
+  });
+
+  const interventions = generateInterventions({
+    components: allComponents,
+    riskScores,
+    leadTimeAnalyses,
+  });
+
+  // Parallel: gather web intelligence + deep BOM analysis + external risks
+  const countries = extractVendorCountries(targetOrders, erp);
+  const categories = extractComponentCategories(allComponents);
+
+  const [webIntelligence, deepAnalysis, externalFactors] = await Promise.all([
+    includeWebIntelligence
+      ? gatherWebIntelligence(countries, categories).catch(() => [] as string[])
+      : Promise.resolve([] as string[]),
+    includeDeepAnalysis
+      ? analyzeDeepBOM(targetOrders, allComponents, leadTimeAnalyses, riskScores, cachedAvailability)
+          .catch(() => undefined)
+      : Promise.resolve(undefined),
+    assessExternalRisks({ vendorCountries: countries, componentCategories: categories })
+      .catch(() => undefined),
+  ]);
+
+  log(`intelligence report: ${webIntelligence.length} web items, deep=${!!deepAnalysis}, external=${!!externalFactors}`);
+
+  const report = await generateIntelligenceReport({
+    productionOrders: targetOrders,
+    salesOrders: cachedSalesOrders,
+    components: allComponents,
+    riskScores,
+    leadTimeAnalyses,
+    interventions,
+    externalFactors,
+    deepAnalysis,
+    webIntelligence,
+  });
+
+  return safeStringify(report, 2);
+}
+
+async function handlePredictBottlenecks(args: Record<string, unknown>): Promise<string> {
+  requireConnector();
+  const { productionOrderId } = SupplyChainSchemas.predict_bottlenecks.parse(args);
+
+  if (cachedProductionOrders.length === 0) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  let targetOrders = cachedProductionOrders;
+  if (productionOrderId) {
+    targetOrders = targetOrders.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+  }
+
+  const allComponents = collectAllComponents(targetOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders);
+
+  const predictions = await predictBottlenecks(
+    allComponents,
+    leadTimeAnalyses,
+    targetOrders,
+    cachedPurchaseOrders,
+  );
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    predictionsCount: predictions.length,
+    predictions,
+  }, 2);
+}
+
+async function handleDeepBOMAnalysis(args: Record<string, unknown>): Promise<string> {
+  requireConnector();
+  const { productionOrderId } = SupplyChainSchemas.deep_bom_analysis.parse(args);
+
+  if (cachedProductionOrders.length === 0) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  let targetOrders = cachedProductionOrders;
+  if (productionOrderId) {
+    targetOrders = targetOrders.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+  }
+
+  const allComponents = collectAllComponents(targetOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders);
+  const riskScores = scoreComponents(allComponents, {
+    purchaseOrders: cachedPurchaseOrders,
+    availability: cachedAvailability,
+    leadTimeAnalyses,
+  });
+
+  const analysis = await analyzeDeepBOM(
+    targetOrders,
+    allComponents,
+    leadTimeAnalyses,
+    riskScores,
+    cachedAvailability,
+  );
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    ...analysis,
+  }, 2);
+}
+
 // ── Utilities ────────────────────────────────────────────────────
 
 function groupBy<T>(items: T[], keyFn: (item: T) => string): Record<string, number> {
@@ -670,6 +878,12 @@ async function handleSkill(
       return handleRecommendActions(args);
     case "monitor_dashboard":
       return handleMonitorDashboard(args);
+    case "intelligence_report":
+      return handleIntelligenceReport(args);
+    case "predict_bottlenecks":
+      return handlePredictBottlenecks(args);
+    case "deep_bom_analysis":
+      return handleDeepBOMAnalysis(args);
     default:
       return `Unknown skill: ${skillId}`;
   }
