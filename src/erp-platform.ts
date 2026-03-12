@@ -8972,24 +8972,44 @@ function fetchCustomer360Contacts(
 /**
  * Persist the computed Customer 360 profile to the database.
  */
-function persistCustomer360Profile(
-  workspaceId: string,
-  customerExternalId: string,
-  displayName: string,
-  segment: Customer360Segment,
-  health: Customer360HealthResult,
-  churn: { riskPct: number; factors: string[] },
-  totalQuotes: number,
-  fulfilledQuotes: number,
-  totalRevenue: number,
-  avgDealSize: number,
-  conversionRate: number,
-  lastInteractionAt: string | null,
-  firstInteractionAt: string | null,
-  contacts: Record<string, unknown>[],
-  masterPayload: Record<string, unknown>,
-  now: string,
-): void {
+type Customer360ProfilePersistInput = {
+  workspaceId: string;
+  customerExternalId: string;
+  displayName: string;
+  segment: Customer360Segment;
+  health: Customer360HealthResult;
+  churn: { riskPct: number; factors: string[] };
+  totalQuotes: number;
+  fulfilledQuotes: number;
+  totalRevenue: number;
+  avgDealSize: number;
+  conversionRate: number;
+  lastInteractionAt: string | null;
+  firstInteractionAt: string | null;
+  contacts: Record<string, unknown>[];
+  masterPayload: Record<string, unknown>;
+  now: string;
+};
+
+function persistCustomer360Profile(input: Customer360ProfilePersistInput): void {
+  const {
+    workspaceId,
+    customerExternalId,
+    displayName,
+    segment,
+    health,
+    churn,
+    totalQuotes,
+    fulfilledQuotes,
+    totalRevenue,
+    avgDealSize,
+    conversionRate,
+    lastInteractionAt,
+    firstInteractionAt,
+    contacts,
+    masterPayload,
+    now,
+  } = input;
   const profileId = randomUUID();
   db.run(
     `INSERT INTO customer360_profiles (
