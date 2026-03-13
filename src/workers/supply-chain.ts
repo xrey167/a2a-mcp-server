@@ -1,0 +1,1269 @@
+/**
+ * Supply Chain Risk Agent — production order analysis, critical path detection,
+ * global risk assessment, and intervention recommendations.
+ *
+ * Port: 8089
+ *
+ * Connects to Business Central or Odoo to analyze production orders, sales orders,
+ * BOM structures, and procurement methods. Evaluates components against global
+ * supply chain risks (weather, freight, economics, geopolitics) and recommends
+ * interventions (make-or-buy, safety stock, dual sourcing, etc.).
+ *
+ * Skills:
+ *   connect_erp              — Configure ERP connection (BC or Odoo)
+ *   analyze_orders           — Analyze production/sales orders and their components
+ *   critical_path            — Compute critical path and identify bottlenecks
+ *   assess_risk              — Multi-dimensional risk scoring with external factors
+ *   recommend_actions        — Generate prioritized intervention recommendations (with AI evaluation)
+ *   monitor_dashboard        — Aggregated supply chain status overview
+ *   intelligence_report      — AI-powered comprehensive supply chain intelligence briefing
+ *   predict_bottlenecks      — Predictive analysis of future bottlenecks from current trends
+ *   deep_bom_analysis        — AI deep analysis of BOM structure for hidden risks
+ *   run_mrp                  — Full MRP cycle: demand explosion, gross-to-net, lot sizing, planned orders, pegging, CRP
+ *   mrp_impact               — Supply delay impact analysis using pegging data
+ *   remember / recall        — Shared persistent memory
+ */
+
+import Fastify from "fastify";
+import { z } from "zod";
+import { handleMemorySkill } from "../worker-memory.js";
+import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
+import { safeStringify } from "../safe-json.js";
+import { getPersona, watchPersonas } from "../persona-loader.js";
+
+import type {
+  ERPConnector,
+  ERPConnectionConfig,
+  ProductionOrder,
+  SalesOrder,
+  BOMComponent,
+  PurchaseOrder,
+  ItemAvailability,
+  PostedReceipt,
+  WorkCenterData,
+} from "../erp/types.js";
+import { BusinessCentralConnector } from "../erp/business-central.js";
+import { OdooConnector } from "../erp/odoo.js";
+import { computeCriticalPath, findLongLeadItems, findSingleSourceComponents } from "../risk/critical-path.js";
+import { analyzeLeadTimes, findCriticalLeadTimeIssues, analyzeVendorHealth } from "../risk/lead-time.js";
+import { scoreComponents, topRisks, riskLevel } from "../risk/scoring.js";
+import type { ExternalRiskFactors } from "../risk/scoring.js";
+import { generateInterventions } from "../risk/interventions.js";
+import { assessExternalRisks } from "../risk/sources.js";
+import {
+  analyzeDeepBOM,
+  evaluateInterventionsWithAI,
+  generateIntelligenceReport,
+  gatherWebIntelligence,
+  predictBottlenecks,
+} from "../risk/ai-analyzer.js";
+import { runMRP, type MRPConfig } from "../mrp/mrp-engine.js";
+import { analyzeSupplyImpact } from "../mrp/pegging.js";
+import type { MRPRunResult, LotSizingPolicy, BucketSize, PlannedOrder } from "../mrp/types.js";
+
+const PORT = 8095;
+const NAME = "supply-chain-agent";
+
+// ── Zod Schemas ──────────────────────────────────────────────────
+
+const SupplyChainSchemas = {
+  connect_erp: z.discriminatedUnion("system", [
+    z.object({
+      system: z.literal("bc"),
+      baseUrl: z.string().url(),
+      tenantId: z.string().min(1),
+      environment: z.string().min(1),
+      company: z.string().min(1),
+      authType: z.enum(["oauth2", "apikey"]).default("apikey"),
+      clientId: z.string().optional(),
+      clientSecret: z.string().optional(),
+      apiKey: z.string().optional(),
+    }),
+    z.object({
+      system: z.literal("odoo"),
+      url: z.string().url(),
+      database: z.string().min(1),
+      username: z.string().min(1),
+      apiKey: z.string().min(1),
+    }),
+  ]),
+
+  analyze_orders: z.object({
+    orderType: z.enum(["production", "sales", "both"]).optional().default("both"),
+    status: z.string().optional(),
+    dateFrom: z.string().optional(),
+    dateTo: z.string().optional(),
+    itemFilter: z.string().optional(),
+  }).passthrough(),
+
+  critical_path: z.object({
+    productionOrderId: z.string().optional(),
+    itemNo: z.string().optional(),
+    depth: z.number().int().positive().optional().default(5),
+    longLeadThresholdDays: z.number().optional().default(14),
+  }).passthrough(),
+
+  assess_risk: z.object({
+    scope: z.enum(["all", "critical_only"]).optional().default("all"),
+    includeExternal: z.boolean().optional().default(true),
+    riskCategories: z.array(z.string()).optional(),
+    productionOrderId: z.string().optional(),
+  }).passthrough(),
+
+  recommend_actions: z.object({
+    riskThreshold: z.number().optional().default(40),
+    maxRecommendations: z.number().int().positive().optional().default(20),
+    includeCosting: z.boolean().optional().default(true),
+    includeAIEvaluation: z.boolean().optional().default(true),
+    strategies: z.array(z.enum([
+      "make_or_buy", "safety_stock", "dual_source", "advance_purchase", "reschedule",
+    ])).optional(),
+    productionOrderId: z.string().optional(),
+  }).passthrough(),
+
+  monitor_dashboard: z.object({
+    period: z.string().optional(),
+  }).passthrough(),
+
+  intelligence_report: z.object({
+    includeWebIntelligence: z.boolean().optional().default(true),
+    includeDeepAnalysis: z.boolean().optional().default(true),
+    productionOrderId: z.string().optional(),
+  }).passthrough(),
+
+  predict_bottlenecks: z.object({
+    productionOrderId: z.string().optional(),
+  }).passthrough(),
+
+  deep_bom_analysis: z.object({
+    productionOrderId: z.string().optional(),
+  }).passthrough(),
+
+  // ── MRP Skills ──
+  run_mrp: z.object({
+    horizonWeeks: z.number().int().positive().optional().default(12),
+    bucketSize: z.enum(["day", "week", "month"]).optional().default("week"),
+    safetyLeadTimeDays: z.number().optional().default(2),
+    lotSizingPolicy: z.enum(["lot_for_lot", "fixed_order_qty", "eoq", "period_order_qty"]).optional().default("lot_for_lot"),
+    fixedOrderQty: z.number().optional(),
+    includeCapacity: z.boolean().optional().default(true),
+    includePegging: z.boolean().optional().default(true),
+  }).passthrough(),
+
+  mrp_impact: z.object({
+    itemNo: z.string(),
+    delayDays: z.number().int().positive(),
+  }).passthrough(),
+
+  // ── Vendor & Order Management Skills ──
+  vendor_health: z.object({
+    vendorNo: z.string().optional(),
+  }).passthrough(),
+
+  firm_orders: z.object({
+    orderIds: z.array(z.string()).min(1),
+  }).passthrough(),
+};
+
+// ── Agent Card ───────────────────────────────────────────────────
+
+const AGENT_CARD = {
+  name: NAME,
+  description: "Supply chain risk agent — analyzes production/sales orders from Business Central or Odoo, identifies critical paths, assesses global risks, and recommends interventions",
+  url: `http://localhost:${PORT}`,
+  version: "3.0.0",
+  capabilities: { streaming: false },
+  skills: [
+    {
+      id: "connect_erp",
+      name: "Connect ERP",
+      description: "Configure connection to Business Central (OData) or Odoo (JSON-RPC). Tests connectivity and stores credentials.",
+    },
+    {
+      id: "analyze_orders",
+      name: "Analyze Orders",
+      description: "Load and analyze production orders, sales orders, their BOM components, procurement methods, and vendor details from the connected ERP system.",
+    },
+    {
+      id: "critical_path",
+      name: "Critical Path",
+      description: "Compute the critical path through a production order's BOM tree. Identifies long-lead-time parts, single-source components, and bottlenecks.",
+    },
+    {
+      id: "assess_risk",
+      name: "Assess Risk",
+      description: "Multi-dimensional risk scoring (availability, delivery, price, lead time, external) for BOM components. Checks against global supply chain factors (weather, freight, geopolitics, economics).",
+    },
+    {
+      id: "recommend_actions",
+      name: "Recommend Actions",
+      description: "Generate prioritized intervention recommendations: make-or-buy analysis, safety stock adjustments, dual sourcing, advance purchasing, production rescheduling. Includes cost-benefit estimates.",
+    },
+    {
+      id: "monitor_dashboard",
+      name: "Monitor Dashboard",
+      description: "Aggregated supply chain status overview: risk levels, critical components, open interventions, and trend data.",
+    },
+    {
+      id: "intelligence_report",
+      name: "Intelligence Report",
+      description: "AI-powered comprehensive supply chain intelligence briefing. Combines ERP data analysis, deep BOM inspection, real-time web intelligence, and external risk factors into an executive report with prioritized action items.",
+    },
+    {
+      id: "predict_bottlenecks",
+      name: "Predict Bottlenecks",
+      description: "AI-powered predictive analysis that detects future bottlenecks from current trends in lead times, inventory levels, and demand patterns. Returns predictions with confidence levels and mitigation windows.",
+    },
+    {
+      id: "deep_bom_analysis",
+      name: "Deep BOM Analysis",
+      description: "AI deep analysis of Bill of Materials structure. Identifies concentration risks, cascade effects, demand-supply mismatches, and strategic vulnerabilities that rule-based scoring misses.",
+    },
+    {
+      id: "run_mrp",
+      name: "Run MRP",
+      description: "Execute full Material Requirements Planning cycle: demand explosion, gross-to-net calculation, lot sizing, planned order generation, pegging (demand↔supply traceability), and capacity planning (CRP). Returns planned orders, net requirements, exceptions, and capacity loads.",
+    },
+    {
+      id: "mrp_impact",
+      name: "MRP Impact Analysis",
+      description: "Analyze the downstream impact of a supply delay: 'If component X is delayed by N days, which sales orders and production orders are affected?' Uses pegging data for full traceability.",
+    },
+    {
+      id: "vendor_health",
+      name: "Vendor Health",
+      description: "Analyze vendor delivery performance: on-time %, lead time variance, consistency, and trend. Aggregates posted receipt data per vendor into health scores.",
+    },
+    {
+      id: "firm_orders",
+      name: "Firm Orders",
+      description: "Firm planned orders so they are excluded from MRP replanning. Firmed orders become fixed supply that MRP treats as committed.",
+    },
+    { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
+    { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory" },
+  ],
+};
+
+// ── State ────────────────────────────────────────────────────────
+
+let connector: ERPConnector | null = null;
+
+// Cached data from last analysis
+let cachedProductionOrders: ProductionOrder[] = [];
+let cachedSalesOrders: SalesOrder[] = [];
+let cachedPurchaseOrders: PurchaseOrder[] = [];
+let cachedAvailability: ItemAvailability[] = [];
+let cachedPostedReceipts: PostedReceipt[] = [];
+let cachedERPWorkCenters: WorkCenterData[] = [];
+let lastAnalysisTimestamp: string | null = null;
+let cachedMRPResult: MRPRunResult | null = null;
+let firmedOrders: PlannedOrder[] = [];
+let cachedPeggingCache: unknown = undefined;
+let cachedExternalFactors: ExternalRiskFactors | undefined;
+let cachedVendorHealthScores: import("../erp/types.js").VendorHealthScore[] | undefined;
+
+/** Reset all caches (new ERP connection) */
+function invalidateCaches() {
+  cachedProductionOrders = [];
+  cachedSalesOrders = [];
+  cachedPurchaseOrders = [];
+  cachedAvailability = [];
+  cachedPostedReceipts = [];
+  cachedERPWorkCenters = [];
+  lastAnalysisTimestamp = null;
+  invalidateDerivedCaches();
+  log("all caches invalidated (new ERP connection)");
+}
+
+/** Reset derived caches only (fresh data load) */
+function invalidateDerivedCaches() {
+  cachedMRPResult = null;
+  firmedOrders = [];
+  cachedPeggingCache = undefined;
+  cachedExternalFactors = undefined;
+  cachedVendorHealthScores = undefined;
+  log("derived caches invalidated (fresh data)");
+}
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+function log(msg: string) {
+  process.stderr.write(`[${NAME}] ${msg}\n`);
+}
+
+function requireConnector(): ERPConnector {
+  if (!connector) {
+    throw new Error("No ERP connection configured. Use the connect_erp skill first.");
+  }
+  return connector;
+}
+
+/** Collect all unique components from production orders. */
+function collectAllComponents(orders: ProductionOrder[]): BOMComponent[] {
+  const seen = new Set<string>();
+  const all: BOMComponent[] = [];
+
+  function walk(comps: BOMComponent[]) {
+    for (const c of comps) {
+      if (!seen.has(c.itemNo)) {
+        seen.add(c.itemNo);
+        all.push(c);
+      }
+      if (c.children) walk(c.children);
+    }
+  }
+
+  for (const order of orders) {
+    walk(order.components);
+  }
+
+  return all;
+}
+
+/** Extract vendor countries from components. */
+function extractVendorCountries(orders: ProductionOrder[], erp: ERPConnector): string[] {
+  const countries = new Set<string>();
+  for (const order of orders) {
+    for (const comp of order.components) {
+      if (comp.vendorName) {
+        // Use vendor name as hint; in real usage vendor records provide country
+        countries.add(comp.vendorName);
+      }
+    }
+  }
+  return countries.size > 0 ? [...countries] : ["Global"];
+}
+
+/** Extract component categories from BOM. */
+function extractComponentCategories(components: BOMComponent[]): string[] {
+  const cats = new Set<string>();
+  for (const c of components) {
+    cats.add(c.itemName.split(/[\s-]/)[0] ?? "General");
+  }
+  return [...cats].slice(0, 10);
+}
+
+// ── Skill Handlers ───────────────────────────────────────────────
+
+async function handleConnectERP(args: Record<string, unknown>): Promise<string> {
+  const parsed = SupplyChainSchemas.connect_erp.parse(args);
+
+  let config: ERPConnectionConfig;
+
+  if (parsed.system === "bc") {
+    config = {
+      system: "bc",
+      baseUrl: parsed.baseUrl,
+      tenantId: parsed.tenantId,
+      environment: parsed.environment,
+      company: parsed.company,
+      auth: parsed.authType === "oauth2"
+        ? { type: "oauth2", clientId: parsed.clientId ?? "", clientSecret: parsed.clientSecret ?? "" }
+        : { type: "apikey", key: parsed.apiKey ?? "" },
+    };
+    connector = new BusinessCentralConnector(config);
+  } else {
+    config = {
+      system: "odoo",
+      url: parsed.url,
+      database: parsed.database,
+      username: parsed.username,
+      apiKey: parsed.apiKey,
+    };
+    connector = new OdooConnector(config);
+  }
+
+  log(`testing ${parsed.system} connection`);
+  const result = await connector.testConnection();
+
+  if (!result.ok) {
+    connector = null;
+    throw new Error(`ERP connection failed: ${result.message}`);
+  }
+
+  // New ERP connection invalidates all cached data
+  invalidateCaches();
+
+  return safeStringify({
+    status: "connected",
+    system: parsed.system,
+    message: result.message,
+  }, 2);
+}
+
+async function handleAnalyzeOrders(args: Record<string, unknown>): Promise<string> {
+  const erp = requireConnector();
+  const { orderType, status, dateFrom, dateTo, itemFilter } = SupplyChainSchemas.analyze_orders.parse(args);
+
+  // Fresh data load invalidates derived caches (MRP, pegging, risk scores)
+  invalidateDerivedCaches();
+
+  const filters = { status, dateFrom, dateTo, itemFilter };
+
+  let productionOrders: ProductionOrder[] = [];
+  let salesOrders: SalesOrder[] = [];
+
+  if (orderType === "production" || orderType === "both") {
+    log("loading production orders");
+    productionOrders = await erp.getProductionOrders(filters);
+    log(`found ${productionOrders.length} production orders`);
+  }
+
+  if (orderType === "sales" || orderType === "both") {
+    log("loading sales orders");
+    salesOrders = await erp.getSalesOrders(filters);
+    log(`found ${salesOrders.length} sales orders`);
+  }
+
+  // Also load purchase orders for context
+  log("loading purchase orders");
+  const purchaseOrders = await erp.getPurchaseOrders({ dateFrom, dateTo });
+
+  // Collect all components and get availability
+  const allComponents = collectAllComponents(productionOrders);
+  const itemNos = allComponents.map((c) => c.itemNo);
+  const availability = itemNos.length > 0 ? await erp.getItemAvailability(itemNos) : [];
+
+  // Fetch posted receipts for actual lead time data
+  log("loading posted receipts and work centers");
+  const [postedReceipts, erpWorkCenters] = await Promise.all([
+    erp.getPostedReceipts({ dateFrom, dateTo }).catch(() => [] as PostedReceipt[]),
+    erp.getWorkCenters().catch(() => [] as WorkCenterData[]),
+  ]);
+
+  // Cache for use in other skills
+  cachedProductionOrders = productionOrders;
+  cachedSalesOrders = salesOrders;
+  cachedPurchaseOrders = purchaseOrders;
+  cachedAvailability = availability;
+  cachedPostedReceipts = postedReceipts;
+  cachedERPWorkCenters = erpWorkCenters;
+  lastAnalysisTimestamp = new Date().toISOString();
+
+  // Build summary
+  const summary: Record<string, unknown> = {
+    timestamp: lastAnalysisTimestamp,
+    system: erp.system,
+    productionOrders: {
+      count: productionOrders.length,
+      byStatus: groupBy(productionOrders, (o) => o.status),
+      items: productionOrders.map((o) => ({
+        number: o.number,
+        item: o.itemName,
+        qty: o.quantity,
+        dueDate: o.dueDate,
+        status: o.status,
+        componentCount: o.components.length,
+      })),
+    },
+    salesOrders: {
+      count: salesOrders.length,
+      byStatus: groupBy(salesOrders, (o) => o.status),
+    },
+    components: {
+      totalUnique: allComponents.length,
+      byReplenishment: groupBy(allComponents, (c) => c.replenishmentMethod),
+      lowStock: allComponents.filter((c) => c.inventoryLevel <= c.safetyStock).map((c) => ({
+        itemNo: c.itemNo,
+        name: c.itemName,
+        inventory: c.inventoryLevel,
+        safetyStock: c.safetyStock,
+      })),
+    },
+    purchaseOrders: {
+      count: purchaseOrders.length,
+    },
+  };
+
+  return safeStringify(summary, 2);
+}
+
+async function handleCriticalPath(args: Record<string, unknown>): Promise<string> {
+  const erp = requireConnector();
+  const { productionOrderId, itemNo, depth, longLeadThresholdDays } = SupplyChainSchemas.critical_path.parse(args);
+
+  let targetOrders: ProductionOrder[];
+
+  if (productionOrderId) {
+    targetOrders = cachedProductionOrders.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+    if (targetOrders.length === 0) {
+      // Fetch fresh
+      const all = await erp.getProductionOrders();
+      targetOrders = all.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+    }
+  } else if (itemNo) {
+    targetOrders = cachedProductionOrders.filter((o) => o.itemNo === itemNo);
+    if (targetOrders.length === 0) {
+      targetOrders = await erp.getProductionOrders({ itemFilter: itemNo });
+    }
+  } else {
+    // Use cached or fetch all
+    targetOrders = cachedProductionOrders.length > 0
+      ? cachedProductionOrders
+      : await erp.getProductionOrders();
+  }
+
+  if (targetOrders.length === 0) {
+    return safeStringify({ error: "No production orders found matching the criteria" });
+  }
+
+  const results = targetOrders.map((order) => {
+    // Ensure components are loaded (may need deeper BOM)
+    const graph = computeCriticalPath(order.itemNo, order.itemName, order.components);
+    const longLeadItems = findLongLeadItems(order.components, longLeadThresholdDays);
+    const singleSourceItems = findSingleSourceComponents(order.components);
+
+    return {
+      orderNumber: order.number,
+      item: order.itemName,
+      dueDate: order.dueDate,
+      criticalPath: {
+        path: graph.criticalPath,
+        totalDurationDays: graph.totalDurationDays,
+        nodeCount: graph.nodes.length,
+      },
+      longLeadItems: longLeadItems.map((c) => ({
+        itemNo: c.itemNo,
+        name: c.itemName,
+        leadTimeDays: c.leadTimeDays,
+        vendor: c.vendorName ?? c.vendorNo,
+        replenishment: c.replenishmentMethod,
+      })),
+      singleSourceItems: singleSourceItems.map((c) => ({
+        itemNo: c.itemNo,
+        name: c.itemName,
+        vendor: c.vendorName ?? c.vendorNo,
+      })),
+      graph: {
+        nodes: graph.nodes.map((n) => ({
+          id: n.id,
+          label: n.label,
+          type: n.type,
+          durationDays: n.durationDays,
+          earliestStart: n.earliestStart,
+          earliestFinish: n.earliestFinish,
+          slack: n.slack,
+          isCritical: n.slack === 0 && n.durationDays > 0,
+        })),
+        edges: graph.edges,
+      },
+    };
+  });
+
+  return safeStringify(results, 2);
+}
+
+async function handleAssessRisk(args: Record<string, unknown>): Promise<string> {
+  const erp = requireConnector();
+  const { scope, includeExternal, productionOrderId } = SupplyChainSchemas.assess_risk.parse(args);
+
+  // Ensure we have data
+  if (cachedProductionOrders.length === 0) {
+    log("no cached data — running analysis first");
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  let targetOrders = cachedProductionOrders;
+  if (productionOrderId) {
+    targetOrders = targetOrders.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+  }
+
+  const allComponents = collectAllComponents(targetOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
+
+  // External risk assessment (optional, uses AI)
+  let externalFactors: ExternalRiskFactors | undefined;
+  if (includeExternal) {
+    log("assessing external risk factors");
+    const countries = extractVendorCountries(targetOrders, erp);
+    const categories = extractComponentCategories(allComponents);
+    try {
+      externalFactors = await assessExternalRisks({
+        vendorCountries: countries,
+        componentCategories: categories,
+      });
+    } catch (err) {
+      log(`external risk assessment failed: ${err}`);
+    }
+  }
+
+  // Cache external factors for use by recommend_actions
+  cachedExternalFactors = externalFactors;
+
+  // Compute vendor health scores for integrated risk scoring
+  let vendorHealthScores: import("../erp/types.js").VendorHealthScore[] | undefined;
+  try {
+    const vendors = await erp.getVendors();
+    vendorHealthScores = analyzeVendorHealth(cachedPostedReceipts, cachedPurchaseOrders, vendors);
+    cachedVendorHealthScores = vendorHealthScores;
+  } catch (err) {
+    log(`vendor health analysis failed: ${err}`);
+  }
+
+  // Score components
+  const riskScores = scoreComponents(allComponents, {
+    purchaseOrders: cachedPurchaseOrders,
+    availability: cachedAvailability,
+    leadTimeAnalyses,
+    externalFactors,
+    vendorHealthScores,
+  });
+
+  // Filter by scope
+  const filteredScores = scope === "critical_only"
+    ? riskScores.filter((r) => riskLevel(r.overallScore) === "critical" || riskLevel(r.overallScore) === "high")
+    : riskScores;
+
+  // Lead time issues
+  const criticalLeadTimes = findCriticalLeadTimeIssues(leadTimeAnalyses);
+
+  const result = {
+    timestamp: new Date().toISOString(),
+    summary: {
+      totalComponents: allComponents.length,
+      scoredComponents: filteredScores.length,
+      riskDistribution: {
+        critical: filteredScores.filter((r) => riskLevel(r.overallScore) === "critical").length,
+        high: filteredScores.filter((r) => riskLevel(r.overallScore) === "high").length,
+        medium: filteredScores.filter((r) => riskLevel(r.overallScore) === "medium").length,
+        low: filteredScores.filter((r) => riskLevel(r.overallScore) === "low").length,
+      },
+      averageRiskScore: filteredScores.length > 0
+        ? Math.round(filteredScores.reduce((a, b) => a + b.overallScore, 0) / filteredScores.length)
+        : 0,
+    },
+    topRisks: topRisks(filteredScores, 10).map((r) => ({
+      ...r,
+      riskLevel: riskLevel(r.overallScore),
+    })),
+    criticalLeadTimes: criticalLeadTimes.slice(0, 10),
+    externalFactors: externalFactors ?? null,
+  };
+
+  return safeStringify(result, 2);
+}
+
+async function handleRecommendActions(args: Record<string, unknown>): Promise<string> {
+  const erp = requireConnector();
+  const {
+    riskThreshold,
+    maxRecommendations,
+    includeAIEvaluation,
+    strategies,
+    productionOrderId,
+  } = SupplyChainSchemas.recommend_actions.parse(args);
+
+  // Ensure we have data
+  if (cachedProductionOrders.length === 0) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  let targetOrders = cachedProductionOrders;
+  if (productionOrderId) {
+    targetOrders = targetOrders.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+  }
+
+  const allComponents = collectAllComponents(targetOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
+
+  // Score with external factors and vendor health (use cached values from assess_risk)
+  const riskScores = scoreComponents(allComponents, {
+    purchaseOrders: cachedPurchaseOrders,
+    availability: cachedAvailability,
+    leadTimeAnalyses,
+    externalFactors: cachedExternalFactors,
+    vendorHealthScores: cachedVendorHealthScores,
+  });
+
+  // Generate rule-based interventions
+  const dueDate = targetOrders.length > 0
+    ? targetOrders.reduce((earliest, o) =>
+        o.dueDate < earliest ? o.dueDate : earliest,
+      targetOrders[0].dueDate)
+    : undefined;
+
+  const interventions = generateInterventions(
+    {
+      components: allComponents,
+      riskScores,
+      leadTimeAnalyses,
+      productionDueDate: dueDate,
+    },
+    { riskThreshold, maxRecommendations, strategies },
+  );
+
+  // AI evaluation: re-rank interventions considering interdependencies and context
+  let aiEvaluation = null;
+  if (includeAIEvaluation && interventions.length > 0) {
+    log("running AI evaluation of interventions");
+    try {
+      aiEvaluation = await evaluateInterventionsWithAI(
+        interventions,
+        riskScores,
+        targetOrders,
+      );
+    } catch (err) {
+      log(`AI evaluation failed: ${err}`);
+    }
+  }
+
+  // Summarize by type
+  const byType: Record<string, number> = {};
+  const byPriority: Record<string, number> = {};
+  for (const i of interventions) {
+    byType[i.type] = (byType[i.type] ?? 0) + 1;
+    byPriority[i.priority] = (byPriority[i.priority] ?? 0) + 1;
+  }
+
+  const totalCostImpact = interventions.reduce((a, b) => a + b.estimatedCostImpact, 0);
+
+  // Merge AI scores into interventions if available
+  const aiScoreMap = new Map(
+    aiEvaluation?.rankedInterventions?.map((r) => [r.id, r]) ?? [],
+  );
+
+  const result = {
+    timestamp: new Date().toISOString(),
+    summary: {
+      totalRecommendations: interventions.length,
+      byType,
+      byPriority,
+      totalEstimatedCostImpact: totalCostImpact,
+    },
+    interventions: interventions.map((i) => {
+      const aiScore = aiScoreMap.get(i.id);
+      return {
+        id: i.id,
+        type: i.type,
+        priority: i.priority,
+        component: `${i.componentName} (${i.componentId})`,
+        description: i.description,
+        costImpact: i.estimatedCostImpact,
+        riskReduction: i.estimatedRiskReduction,
+        details: i.details,
+        // AI enrichment
+        ...(aiScore ? {
+          aiScore: aiScore.aiScore,
+          aiReasoning: aiScore.reasoning,
+          sideEffects: aiScore.sideEffects,
+          implementationComplexity: aiScore.implementationComplexity,
+          timeToEffect: aiScore.timeToEffect,
+        } : {}),
+      };
+    }),
+    // AI combined strategy
+    ...(aiEvaluation ? {
+      aiStrategy: {
+        combinedStrategy: aiEvaluation.combinedStrategy,
+        estimatedOverallRiskReduction: aiEvaluation.estimatedOverallRiskReduction,
+      },
+    } : {}),
+  };
+
+  return safeStringify(result, 2);
+}
+
+async function handleMonitorDashboard(args: Record<string, unknown>): Promise<string> {
+  const erp = requireConnector();
+  const { period } = SupplyChainSchemas.monitor_dashboard.parse(args);
+
+  // Refresh data if stale (older than 1 hour)
+  const isStale = !lastAnalysisTimestamp ||
+    (Date.now() - new Date(lastAnalysisTimestamp).getTime()) > 3_600_000;
+
+  if (isStale) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  const allComponents = collectAllComponents(cachedProductionOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
+  const riskScores = scoreComponents(allComponents, {
+    purchaseOrders: cachedPurchaseOrders,
+    availability: cachedAvailability,
+    leadTimeAnalyses,
+  });
+
+  const dashboard = {
+    timestamp: new Date().toISOString(),
+    lastDataRefresh: lastAnalysisTimestamp,
+    erpSystem: erp.system,
+    kpis: {
+      activeProductionOrders: cachedProductionOrders.filter((o) => o.status !== "finished").length,
+      openSalesOrders: cachedSalesOrders.filter((o) => o.status === "open" || o.status === "released").length,
+      pendingPurchaseOrders: cachedPurchaseOrders.filter((o) => o.status !== "released").length,
+      uniqueComponents: allComponents.length,
+      averageRiskScore: riskScores.length > 0
+        ? Math.round(riskScores.reduce((a, b) => a + b.overallScore, 0) / riskScores.length)
+        : 0,
+      criticalRiskCount: riskScores.filter((r) => riskLevel(r.overallScore) === "critical").length,
+      highRiskCount: riskScores.filter((r) => riskLevel(r.overallScore) === "high").length,
+      belowSafetyStockCount: allComponents.filter((c) => c.inventoryLevel < c.safetyStock).length,
+      singleSourceCount: findSingleSourceComponents(allComponents).length,
+    },
+    topRisks: topRisks(riskScores, 5).map((r) => ({
+      component: r.componentName,
+      score: r.overallScore,
+      level: riskLevel(r.overallScore),
+      flags: r.flags,
+    })),
+    criticalLeadTimes: findCriticalLeadTimeIssues(leadTimeAnalyses).slice(0, 5).map((a) => ({
+      item: a.itemName,
+      planned: a.plannedLeadTimeDays,
+      actual: a.actualLeadTimeDays,
+      reliability: a.reliabilityScore,
+      trend: a.trend,
+    })),
+    upcomingDueDates: cachedProductionOrders
+      .filter((o) => o.status !== "finished")
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+      .slice(0, 5)
+      .map((o) => ({
+        order: o.number,
+        item: o.itemName,
+        dueDate: o.dueDate,
+        status: o.status,
+      })),
+  };
+
+  return safeStringify(dashboard, 2);
+}
+
+// ── AI-Powered Skill Handlers ────────────────────────────────────
+
+async function handleIntelligenceReport(args: Record<string, unknown>): Promise<string> {
+  const erp = requireConnector();
+  const { includeWebIntelligence, includeDeepAnalysis, productionOrderId } =
+    SupplyChainSchemas.intelligence_report.parse(args);
+
+  // Ensure we have data
+  if (cachedProductionOrders.length === 0) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  let targetOrders = cachedProductionOrders;
+  if (productionOrderId) {
+    targetOrders = targetOrders.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+  }
+
+  const allComponents = collectAllComponents(targetOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
+  const riskScores = scoreComponents(allComponents, {
+    purchaseOrders: cachedPurchaseOrders,
+    availability: cachedAvailability,
+    leadTimeAnalyses,
+  });
+
+  const interventions = generateInterventions({
+    components: allComponents,
+    riskScores,
+    leadTimeAnalyses,
+  });
+
+  // Parallel: gather web intelligence + deep BOM analysis + external risks
+  const countries = extractVendorCountries(targetOrders, erp);
+  const categories = extractComponentCategories(allComponents);
+
+  const [webIntelligence, deepAnalysis, externalFactors] = await Promise.all([
+    includeWebIntelligence
+      ? gatherWebIntelligence(countries, categories).catch(() => [] as string[])
+      : Promise.resolve([] as string[]),
+    includeDeepAnalysis
+      ? analyzeDeepBOM(targetOrders, allComponents, leadTimeAnalyses, riskScores, cachedAvailability)
+          .catch(() => undefined)
+      : Promise.resolve(undefined),
+    assessExternalRisks({ vendorCountries: countries, componentCategories: categories })
+      .catch(() => undefined),
+  ]);
+
+  log(`intelligence report: ${webIntelligence.length} web items, deep=${!!deepAnalysis}, external=${!!externalFactors}`);
+
+  const report = await generateIntelligenceReport({
+    productionOrders: targetOrders,
+    salesOrders: cachedSalesOrders,
+    components: allComponents,
+    riskScores,
+    leadTimeAnalyses,
+    interventions,
+    externalFactors,
+    deepAnalysis,
+    webIntelligence,
+  });
+
+  return safeStringify(report, 2);
+}
+
+async function handlePredictBottlenecks(args: Record<string, unknown>): Promise<string> {
+  requireConnector();
+  const { productionOrderId } = SupplyChainSchemas.predict_bottlenecks.parse(args);
+
+  if (cachedProductionOrders.length === 0) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  let targetOrders = cachedProductionOrders;
+  if (productionOrderId) {
+    targetOrders = targetOrders.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+  }
+
+  const allComponents = collectAllComponents(targetOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
+
+  const predictions = await predictBottlenecks(
+    allComponents,
+    leadTimeAnalyses,
+    targetOrders,
+    cachedPurchaseOrders,
+  );
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    predictionsCount: predictions.length,
+    predictions,
+  }, 2);
+}
+
+async function handleDeepBOMAnalysis(args: Record<string, unknown>): Promise<string> {
+  requireConnector();
+  const { productionOrderId } = SupplyChainSchemas.deep_bom_analysis.parse(args);
+
+  if (cachedProductionOrders.length === 0) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  let targetOrders = cachedProductionOrders;
+  if (productionOrderId) {
+    targetOrders = targetOrders.filter((o) => o.id === productionOrderId || o.number === productionOrderId);
+  }
+
+  const allComponents = collectAllComponents(targetOrders);
+  const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
+  const riskScores = scoreComponents(allComponents, {
+    purchaseOrders: cachedPurchaseOrders,
+    availability: cachedAvailability,
+    leadTimeAnalyses,
+  });
+
+  const analysis = await analyzeDeepBOM(
+    targetOrders,
+    allComponents,
+    leadTimeAnalyses,
+    riskScores,
+    cachedAvailability,
+  );
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    ...analysis,
+  }, 2);
+}
+
+// ── MRP Skill Handlers ───────────────────────────────────────────
+
+async function handleRunMRP(args: Record<string, unknown>): Promise<string> {
+  requireConnector();
+  const {
+    horizonWeeks,
+    bucketSize,
+    safetyLeadTimeDays,
+    lotSizingPolicy,
+    fixedOrderQty,
+    includeCapacity,
+    includePegging,
+  } = SupplyChainSchemas.run_mrp.parse(args);
+
+  // Ensure we have data
+  if (cachedProductionOrders.length === 0) {
+    await handleAnalyzeOrders({ orderType: "both" });
+  }
+
+  const allComponents = collectAllComponents(cachedProductionOrders);
+
+  // Build lot sizing policy
+  let policy: LotSizingPolicy = { type: "lot_for_lot" };
+  if (lotSizingPolicy === "fixed_order_qty" && fixedOrderQty) {
+    policy = { type: "fixed_order_qty", quantity: fixedOrderQty };
+  } else if (lotSizingPolicy === "eoq") {
+    policy = { type: "eoq", annualDemand: 0, orderingCost: 50, holdingCostRate: 0.25 };
+  } else if (lotSizingPolicy === "period_order_qty") {
+    policy = { type: "period_order_qty", periods: 4 };
+  }
+
+  const mrpConfig: MRPConfig = {
+    horizonWeeks,
+    bucketSize: bucketSize as BucketSize,
+    safetyLeadTimeDays,
+    lotSizingPolicy: policy,
+    includeCapacity,
+    includePegging,
+    previousPeggingCache: cachedPeggingCache as MRPConfig["previousPeggingCache"],
+  };
+
+  log(`running MRP: ${horizonWeeks} weeks, ${bucketSize} buckets, ${lotSizingPolicy} lot sizing`);
+
+  const result = runMRP({
+    productionOrders: cachedProductionOrders,
+    salesOrders: cachedSalesOrders,
+    purchaseOrders: cachedPurchaseOrders,
+    components: allComponents,
+    availability: cachedAvailability,
+    erpWorkCenters: cachedERPWorkCenters.length > 0 ? cachedERPWorkCenters : undefined,
+    firmedOrders: firmedOrders.length > 0 ? firmedOrders : undefined,
+    config: mrpConfig,
+  });
+
+  cachedMRPResult = result;
+  cachedPeggingCache = result.peggingCache;
+
+  // Build a focused response (full result can be very large)
+  const response = {
+    timestamp: result.timestamp,
+    horizon: {
+      start: result.horizon.startDate,
+      end: result.horizon.endDate,
+      buckets: result.horizon.buckets.length,
+      bucketSize: result.horizon.bucketSize,
+    },
+    summary: result.summary,
+    plannedOrders: result.plannedOrders.map((o) => ({
+      id: o.id,
+      item: `${o.itemName} (${o.itemNo})`,
+      quantity: o.quantity,
+      type: o.type,
+      orderDate: o.orderDate,
+      dueDate: o.dueDate,
+      action: o.action,
+      vendor: o.vendorName ?? o.vendorNo ?? "—",
+      lotSizing: o.lotSizingPolicy,
+      status: o.status,
+    })),
+    exceptions: result.exceptions.slice(0, 25),
+    capacitySummary: result.capacityLoads.map((cl) => ({
+      workCenter: cl.workCenterName,
+      avgUtilization: cl.averageUtilization,
+      peakUtilization: cl.peakUtilization,
+      overloadedBuckets: cl.overloadedBuckets,
+    })),
+    peggingSummary: {
+      trees: result.pegging.length,
+      totalShortages: result.pegging.reduce((s, t) => s + t.shortages.length, 0),
+      shortages: result.pegging
+        .flatMap((t) => t.shortages)
+        .slice(0, 15)
+        .map((s) => ({
+          item: `${s.itemName} (${s.itemNo})`,
+          shortage: s.shortageQuantity,
+          neededBy: s.neededBy,
+        })),
+    },
+  };
+
+  return safeStringify(response, 2);
+}
+
+async function handleMRPImpact(args: Record<string, unknown>): Promise<string> {
+  const { itemNo, delayDays } = SupplyChainSchemas.mrp_impact.parse(args);
+
+  // Need a recent MRP run with pegging data
+  if (!cachedMRPResult || cachedMRPResult.pegging.length === 0) {
+    log("no MRP result cached — running MRP first");
+    await handleRunMRP({ includePegging: true });
+  }
+
+  if (!cachedMRPResult) {
+    return safeStringify({ error: "MRP run failed — cannot perform impact analysis" });
+  }
+
+  const impact = analyzeSupplyImpact(itemNo, delayDays, cachedMRPResult.pegging);
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    scenario: {
+      item: itemNo,
+      delayDays,
+      description: `What happens if ${itemNo} is delayed by ${delayDays} days?`,
+    },
+    impact: {
+      affectedOrdersCount: impact.affectedOrders.length,
+      totalAffectedQuantity: impact.totalAffectedQuantity,
+      affectedOrders: impact.affectedOrders,
+    },
+  }, 2);
+}
+
+async function handleVendorHealth(args: Record<string, unknown>): Promise<string> {
+  const { vendorNo } = SupplyChainSchemas.vendor_health.parse(args);
+  const erp = requireConnector();
+
+  const vendors = await erp.getVendors();
+  const vendorsToAnalyze = vendorNo
+    ? vendors.filter((v) => v.no === vendorNo)
+    : vendors;
+
+  if (vendorsToAnalyze.length === 0) {
+    return safeStringify({ error: vendorNo ? `Vendor ${vendorNo} not found` : "No vendors found" });
+  }
+
+  const postedReceipts = cachedPostedReceipts.length > 0
+    ? cachedPostedReceipts
+    : await erp.getPostedReceipts({ limit: 2000 });
+
+  const scores = analyzeVendorHealth(postedReceipts, cachedPurchaseOrders, vendorsToAnalyze);
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    vendorCount: scores.length,
+    scores: scores.map((s) => ({
+      vendorNo: s.vendorNo,
+      vendorName: s.vendorName,
+      overallScore: s.overallScore,
+      onTimeDeliveryPct: s.onTimeDeliveryPct,
+      avgLeadTimeVarianceDays: s.avgLeadTimeVarianceDays,
+      leadTimeConsistency: s.leadTimeConsistency,
+      totalDeliveries: s.totalDeliveries,
+      trend: s.trend,
+      flags: s.flags,
+    })),
+    summary: {
+      avgScore: scores.length > 0
+        ? Math.round(scores.reduce((s, v) => s + v.overallScore, 0) / scores.length)
+        : 0,
+      poorHealthVendors: scores.filter((s) => s.overallScore < 50).length,
+      deterioratingVendors: scores.filter((s) => s.trend === "deteriorating").length,
+    },
+  }, 2);
+}
+
+function handleFirmOrders(args: Record<string, unknown>): string {
+  const { orderIds } = SupplyChainSchemas.firm_orders.parse(args);
+
+  if (!cachedMRPResult) {
+    return safeStringify({ error: "No MRP result available. Run the run_mrp skill first." });
+  }
+
+  const firmed: Array<{ id: string; itemNo: string; itemName: string; quantity: number }> = [];
+  const notFound: string[] = [];
+
+  for (const orderId of orderIds) {
+    const order = cachedMRPResult.plannedOrders.find((o) => o.id === orderId && o.status === "planned");
+    if (order) {
+      order.status = "firmed";
+      firmedOrders.push(order);
+      firmed.push({ id: order.id, itemNo: order.itemNo, itemName: order.itemName, quantity: order.quantity });
+      log(`firmed planned order ${orderId} for ${order.itemName}`);
+    } else {
+      notFound.push(orderId);
+    }
+  }
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    firmedCount: firmed.length,
+    firmed,
+    notFound: notFound.length > 0 ? notFound : undefined,
+    totalFirmedOrders: firmedOrders.length,
+    note: "Firmed orders will be treated as fixed supply in subsequent MRP runs.",
+  }, 2);
+}
+
+// ── Utilities ────────────────────────────────────────────────────
+
+function groupBy<T>(items: T[], keyFn: (item: T) => string): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const item of items) {
+    const key = keyFn(item);
+    result[key] = (result[key] ?? 0) + 1;
+  }
+  return result;
+}
+
+// ── Skill Dispatcher ─────────────────────────────────────────────
+
+async function handleSkill(
+  skillId: string,
+  args: Record<string, unknown>,
+  text: string,
+): Promise<string> {
+  const memResult = handleMemorySkill(NAME, skillId, args);
+  if (memResult !== null) return memResult;
+
+  switch (skillId) {
+    case "connect_erp":
+      return handleConnectERP(args);
+    case "analyze_orders":
+      return handleAnalyzeOrders(args);
+    case "critical_path":
+      return handleCriticalPath(args);
+    case "assess_risk":
+      return handleAssessRisk(args);
+    case "recommend_actions":
+      return handleRecommendActions(args);
+    case "monitor_dashboard":
+      return handleMonitorDashboard(args);
+    case "intelligence_report":
+      return handleIntelligenceReport(args);
+    case "predict_bottlenecks":
+      return handlePredictBottlenecks(args);
+    case "deep_bom_analysis":
+      return handleDeepBOMAnalysis(args);
+    case "run_mrp":
+      return handleRunMRP(args);
+    case "mrp_impact":
+      return handleMRPImpact(args);
+    case "vendor_health":
+      return handleVendorHealth(args);
+    case "firm_orders":
+      return handleFirmOrders(args);
+    default:
+      return `Unknown skill: ${skillId}`;
+  }
+}
+
+// ── Fastify Server ──────────────────────────────────────────────
+
+const app = Fastify({ logger: false });
+
+app.get("/.well-known/agent.json", async () => AGENT_CARD);
+
+app.get("/healthz", async () => ({
+  status: "ok",
+  agent: NAME,
+  uptime: process.uptime(),
+  skills: AGENT_CARD.skills.map((s) => s.id),
+  erpConnected: connector !== null,
+  erpSystem: connector?.system ?? null,
+  lastAnalysis: lastAnalysisTimestamp,
+}));
+
+app.post<{ Body: Record<string, unknown> }>("/", async (request, reply) => {
+  const data = request.body;
+  if (data?.method !== "tasks/send") {
+    reply.code(404);
+    return { jsonrpc: "2.0", error: { code: -32601, message: "Method not found" } };
+  }
+
+  const { skillId, args, message, id: taskId } = data.params as Record<string, unknown> ?? {};
+  const text: string = ((message as Record<string, unknown>)?.parts as Array<{ text: string }>)?.[0]?.text ?? "";
+  const sid = (skillId as string) ?? "monitor_dashboard";
+
+  const sizeErr = checkRequestSize(data);
+  if (sizeErr) {
+    reply.code(413);
+    return { jsonrpc: "2.0", error: { code: -32000, message: sizeErr } };
+  }
+
+  try {
+    const result = await handleSkill(sid, (args as Record<string, unknown>) ?? {}, text);
+    return buildA2AResponse(data.id, taskId, result);
+  } catch (err) {
+    log(`skill ${sid} failed: ${err instanceof Error ? err.message : String(err)}`);
+    reply.code(500);
+    return buildA2AError(data.id, err);
+  }
+});
+
+getPersona(NAME);
+watchPersonas();
+
+app.listen({ port: PORT, host: "localhost" }).then(() => {
+  log(`listening on http://localhost:${PORT}`);
+});
