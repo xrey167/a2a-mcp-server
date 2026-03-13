@@ -193,6 +193,10 @@ export class OdooConnector implements ERPConnector {
     itemCategory?: string;
     scrapPercent?: number;
     costingMethod?: string;
+    lotSizingPolicy?: BOMComponent["lotSizingPolicy"];
+    orderQuantity?: number;
+    minimumOrderQty?: number;
+    orderMultiple?: number;
   }> {
     const raw = await this.searchRead("product.product", [["id", "=", productId]], [
       "standard_price", "qty_available", "seller_ids",
@@ -245,31 +249,54 @@ export class OdooConnector implements ERPConnector {
       }
     }
 
-    // Determine replenishment from BOM existence
+    // Determine replenishment from BOM existence + scrap percentage
     let replenishmentMethod: BOMComponent["replenishmentMethod"] = "purchase";
     let scrapPercent: number | undefined;
     try {
       const boms = await this.searchRead("mrp.bom", [
         ["product_id", "=", productId],
-      ], ["id", "type", "product_qty"], 1);
+      ], ["id", "type", "product_qty", "scrap"], 1);
       if (boms.length > 0) {
         const bomType = String(boms[0].type ?? "normal");
         replenishmentMethod = bomType === "subcontract" ? "purchase" : "production";
+        const bomScrap = Number(boms[0].scrap ?? 0);
+        if (bomScrap > 0) scrapPercent = bomScrap;
       }
     } catch {
       // mrp module may not be installed
     }
 
-    // Get orderpoint for safety stock / reorder point
+    // Get orderpoint for safety stock / reorder point / lot sizing
     let safetyStock = 0;
     let reorderPoint = 0;
+    let lotSizingPolicy: BOMComponent["lotSizingPolicy"] | undefined;
+    let orderQuantity: number | undefined;
+    let minimumOrderQty: number | undefined;
+    let orderMultiple: number | undefined;
     try {
       const orderpoints = await this.searchRead("stock.warehouse.orderpoint", [
         ["product_id", "=", productId],
-      ], ["product_min_qty", "product_max_qty"], 1);
+      ], ["product_min_qty", "product_max_qty", "qty_multiple"], 1);
       if (orderpoints.length > 0) {
-        reorderPoint = Number(orderpoints[0].product_min_qty ?? 0);
+        const op = orderpoints[0];
+        reorderPoint = Number(op.product_min_qty ?? 0);
         safetyStock = reorderPoint; // In Odoo, min qty acts as safety stock
+        const maxQty = Number(op.product_max_qty ?? 0);
+        const qtyMultiple = Number(op.qty_multiple ?? 0);
+
+        // Derive lot sizing policy from orderpoint configuration
+        if (maxQty > 0 && reorderPoint > 0) {
+          lotSizingPolicy = "maximum_qty";
+          orderQuantity = maxQty;
+          minimumOrderQty = reorderPoint;
+          // qty_multiple is an order rounding multiple when used with min/max
+          if (qtyMultiple > 1) orderMultiple = qtyMultiple;
+        } else if (qtyMultiple > 0) {
+          lotSizingPolicy = "fixed_order_qty";
+          orderQuantity = qtyMultiple;
+        } else {
+          lotSizingPolicy = "lot_for_lot";
+        }
       }
     } catch {
       // stock module variations
@@ -301,6 +328,10 @@ export class OdooConnector implements ERPConnector {
       itemCategory,
       scrapPercent,
       costingMethod,
+      lotSizingPolicy,
+      orderQuantity,
+      minimumOrderQty,
+      orderMultiple,
     };
   }
 

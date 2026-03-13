@@ -12,6 +12,7 @@
 import type { BOMComponent, RiskScore, Intervention } from "../erp/types.js";
 import type { LeadTimeAnalysis } from "./lead-time.js";
 import { riskLevel } from "./scoring.js";
+import { shouldStopRecursion } from "../mrp/bom-guard.js";
 
 export interface InterventionContext {
   components: BOMComponent[];
@@ -291,13 +292,17 @@ function evaluateReschedule(
 function buildComponentMap(components: BOMComponent[]): Map<string, BOMComponent> {
   const map = new Map<string, BOMComponent>();
 
-  function walk(comps: BOMComponent[]) {
+  function walk(comps: BOMComponent[], visited: Set<string>, depth: number) {
     for (const c of comps) {
       map.set(c.itemNo, c);
-      if (c.children) walk(c.children);
+      if (c.children && !shouldStopRecursion(c.itemNo, visited, depth)) {
+        const childVisited = new Set(visited);
+        childVisited.add(c.itemNo);
+        walk(c.children, childVisited, depth + 1);
+      }
     }
   }
 
-  walk(components);
+  walk(components, new Set(), 0);
   return map;
 }

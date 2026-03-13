@@ -17,43 +17,62 @@ import type { LotSizingPolicy } from "./types.js";
  * @param netRequirement - The net requirement to cover
  * @param policy - The lot sizing policy to apply
  * @param periodsAhead - Demand in upcoming periods (for POQ)
+ * @param orderMultiple - Round up to nearest multiple (e.g., 25 = order in multiples of 25)
  * @returns The order quantity (>= netRequirement)
  */
 export function calculateLotSize(
   netRequirement: number,
   policy: LotSizingPolicy,
   periodsAhead?: number[],
+  orderMultiple?: number,
 ): number {
   if (netRequirement <= 0) return 0;
 
+  let qty: number;
+
   switch (policy.type) {
     case "lot_for_lot":
-      return netRequirement;
+      qty = netRequirement;
+      break;
 
     case "fixed_order_qty":
       // Order in multiples of fixed quantity
-      return Math.ceil(netRequirement / policy.quantity) * policy.quantity;
+      qty = Math.ceil(netRequirement / policy.quantity) * policy.quantity;
+      break;
 
     case "eoq": {
       const eoq = computeEOQ(policy.annualDemand, policy.orderingCost, policy.holdingCostRate);
       // Order at least the net requirement, but round up to EOQ multiple
-      return Math.max(netRequirement, Math.ceil(netRequirement / eoq) * eoq);
+      qty = Math.max(netRequirement, Math.ceil(netRequirement / eoq) * eoq);
+      break;
     }
 
     case "period_order_qty": {
       // Combine this period plus N-1 future periods
-      if (!periodsAhead || periodsAhead.length === 0) return netRequirement;
-      const combinedDemand = netRequirement +
-        periodsAhead.slice(0, policy.periods - 1).reduce((a, b) => a + b, 0);
-      return Math.max(netRequirement, combinedDemand);
+      if (!periodsAhead || periodsAhead.length === 0) {
+        qty = netRequirement;
+      } else {
+        const combinedDemand = netRequirement +
+          periodsAhead.slice(0, policy.periods - 1).reduce((a, b) => a + b, 0);
+        qty = Math.max(netRequirement, combinedDemand);
+      }
+      break;
     }
 
     case "min_max":
       // If below min, order up to max
-      if (netRequirement <= policy.min) return policy.min;
-      if (netRequirement > policy.max) return netRequirement; // can't cap below need
-      return policy.max;
+      if (netRequirement <= policy.min) qty = policy.min;
+      else if (netRequirement > policy.max) qty = netRequirement; // can't cap below need
+      else qty = policy.max;
+      break;
   }
+
+  // Apply order multiple rounding (e.g., round 73 up to 75 if multiple is 25)
+  if (orderMultiple && orderMultiple > 1) {
+    qty = Math.ceil(qty / orderMultiple) * orderMultiple;
+  }
+
+  return qty;
 }
 
 /**

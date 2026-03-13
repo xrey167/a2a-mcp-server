@@ -208,7 +208,7 @@ export function calculateGrossToNet(input: GrossToNetInput): GrossToNetResult {
         netReq = safetyStock - projectedBeforePlanned;
         // Apply lot sizing
         const futuredemands = demand.buckets.slice(i + 1).map((b) => b.grossDemand);
-        plannedOrderReceipt = calculateLotSize(netReq, policy, futuredemands);
+        plannedOrderReceipt = calculateLotSize(netReq, policy, futuredemands, comp?.orderMultiple);
       }
 
       // Calculate the release bucket (offset by lead time)

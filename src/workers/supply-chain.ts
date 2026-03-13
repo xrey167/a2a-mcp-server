@@ -259,6 +259,31 @@ let lastAnalysisTimestamp: string | null = null;
 let cachedMRPResult: MRPRunResult | null = null;
 let firmedOrders: PlannedOrder[] = [];
 let cachedPeggingCache: unknown = undefined;
+let cachedExternalFactors: ExternalRiskFactors | undefined;
+let cachedVendorHealthScores: import("../erp/types.js").VendorHealthScore[] | undefined;
+
+/** Reset all caches (new ERP connection) */
+function invalidateCaches() {
+  cachedProductionOrders = [];
+  cachedSalesOrders = [];
+  cachedPurchaseOrders = [];
+  cachedAvailability = [];
+  cachedPostedReceipts = [];
+  cachedERPWorkCenters = [];
+  lastAnalysisTimestamp = null;
+  invalidateDerivedCaches();
+  log("all caches invalidated (new ERP connection)");
+}
+
+/** Reset derived caches only (fresh data load) */
+function invalidateDerivedCaches() {
+  cachedMRPResult = null;
+  firmedOrders = [];
+  cachedPeggingCache = undefined;
+  cachedExternalFactors = undefined;
+  cachedVendorHealthScores = undefined;
+  log("derived caches invalidated (fresh data)");
+}
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -356,6 +381,9 @@ async function handleConnectERP(args: Record<string, unknown>): Promise<string> 
     throw new Error(`ERP connection failed: ${result.message}`);
   }
 
+  // New ERP connection invalidates all cached data
+  invalidateCaches();
+
   return safeStringify({
     status: "connected",
     system: parsed.system,
@@ -366,6 +394,9 @@ async function handleConnectERP(args: Record<string, unknown>): Promise<string> 
 async function handleAnalyzeOrders(args: Record<string, unknown>): Promise<string> {
   const erp = requireConnector();
   const { orderType, status, dateFrom, dateTo, itemFilter } = SupplyChainSchemas.analyze_orders.parse(args);
+
+  // Fresh data load invalidates derived caches (MRP, pegging, risk scores)
+  invalidateDerivedCaches();
 
   const filters = { status, dateFrom, dateTo, itemFilter };
 
@@ -556,12 +587,26 @@ async function handleAssessRisk(args: Record<string, unknown>): Promise<string> 
     }
   }
 
+  // Cache external factors for use by recommend_actions
+  cachedExternalFactors = externalFactors;
+
+  // Compute vendor health scores for integrated risk scoring
+  let vendorHealthScores: import("../erp/types.js").VendorHealthScore[] | undefined;
+  try {
+    const vendors = await erp.getVendors();
+    vendorHealthScores = analyzeVendorHealth(cachedPostedReceipts, cachedPurchaseOrders, vendors);
+    cachedVendorHealthScores = vendorHealthScores;
+  } catch (err) {
+    log(`vendor health analysis failed: ${err}`);
+  }
+
   // Score components
   const riskScores = scoreComponents(allComponents, {
     purchaseOrders: cachedPurchaseOrders,
     availability: cachedAvailability,
     leadTimeAnalyses,
     externalFactors,
+    vendorHealthScores,
   });
 
   // Filter by scope
@@ -621,11 +666,13 @@ async function handleRecommendActions(args: Record<string, unknown>): Promise<st
   const allComponents = collectAllComponents(targetOrders);
   const leadTimeAnalyses = analyzeLeadTimes(allComponents, cachedPurchaseOrders, cachedPostedReceipts);
 
-  // Score first
+  // Score with external factors and vendor health (use cached values from assess_risk)
   const riskScores = scoreComponents(allComponents, {
     purchaseOrders: cachedPurchaseOrders,
     availability: cachedAvailability,
     leadTimeAnalyses,
+    externalFactors: cachedExternalFactors,
+    vendorHealthScores: cachedVendorHealthScores,
   });
 
   // Generate rule-based interventions
