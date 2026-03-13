@@ -159,7 +159,35 @@ function parseRssFeed(xml: string, sourceUrl: string, limit: number): Article[] 
   return articles.filter(a => a.title.length > 0);
 }
 
+/** Block requests to private/internal network addresses (SSRF prevention). */
+function validateUrlNotInternal(urlStr: string): void {
+  const parsed = new URL(urlStr);
+  const hostname = parsed.hostname.toLowerCase();
+
+  // Block localhost variants
+  if (hostname === "localhost" || hostname === "[::1]" || hostname === "0.0.0.0") {
+    throw new Error(`SSRF blocked: private/internal address "${hostname}"`);
+  }
+
+  // Block private/internal IP ranges
+  const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (ipMatch) {
+    const [, a, b] = ipMatch.map(Number);
+    if (
+      a === 127 ||                          // 127.x.x.x loopback
+      a === 10 ||                            // 10.x.x.x private
+      (a === 172 && b >= 16 && b <= 31) ||   // 172.16-31.x.x private
+      (a === 192 && b === 168) ||            // 192.168.x.x private
+      (a === 169 && b === 254) ||            // 169.254.x.x link-local
+      a === 0                                // 0.0.0.0/8
+    ) {
+      throw new Error(`SSRF blocked: private/internal address "${hostname}"`);
+    }
+  }
+}
+
 async function fetchRss(url: string, limit: number, timeout: number): Promise<Article[]> {
+  validateUrlNotInternal(url);
   const res = await fetch(url, {
     signal: AbortSignal.timeout(timeout),
     headers: { "User-Agent": "A2A-News-Agent/1.0", "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml" },
@@ -199,18 +227,6 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   tech: ["ai ", "artificial intelligence", "machine learning", "startup", "silicon valley", "tech company", "semiconductor", "chip", "quantum", "blockchain"],
   energy: ["oil", "opec", "crude", "natural gas", "pipeline", "lng", "renewable", "solar", "wind energy", "nuclear energy", "petroleum"],
   humanitarian: ["refugee", "displacement", "famine", "humanitarian", "aid", "crisis", "poverty", "migration", "asylum"],
-};
-
-const IMPORTANCE_KEYWORDS: Record<string, { level: string; weight: number }[]> = {
-  critical: [
-    { level: "critical", weight: 5 },
-  ],
-  high: [
-    { level: "high", weight: 3 },
-  ],
-  medium: [
-    { level: "medium", weight: 1 },
-  ],
 };
 
 const CRITICAL_TERMS = ["breaking", "urgent", "emergency", "crisis", "war declared", "nuclear", "invasion", "mass casualt"];

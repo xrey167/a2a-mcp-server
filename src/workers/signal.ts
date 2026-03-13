@@ -125,6 +125,7 @@ const AGENT_CARD = {
 
 // ── Haversine Distance ───────────────────────────────────────────
 
+// TODO: extract haversineKm to shared utility — duplicated in monitor.ts and climate.ts
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -136,6 +137,7 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// TODO: extract round to shared utility — duplicated in monitor.ts, climate.ts, and market.ts
 function round(n: number, decimals = 4): number {
   const f = 10 ** decimals;
   return Math.round(n * f) / f;
@@ -363,6 +365,37 @@ function detectConvergence(signals: GeoSignal[], radiusKm: number, minTypes: num
   const zones: ConvergenceZone[] = [];
   const assigned = new Set<number>();
 
+  // Coarse grid-based spatial hash (~50km cells) to avoid O(n²) full comparison.
+  // Only signals in the same or adjacent cells need haversine checks.
+  const cellSizeKm = 50;
+  const cellSizeDeg = cellSizeKm / 111; // ~0.45 degrees
+
+  const grid = new Map<string, number[]>();
+  for (let i = 0; i < signals.length; i++) {
+    const cellX = Math.floor(signals[i].lon / cellSizeDeg);
+    const cellY = Math.floor(signals[i].lat / cellSizeDeg);
+    const key = `${cellX},${cellY}`;
+    if (!grid.has(key)) grid.set(key, []);
+    grid.get(key)!.push(i);
+  }
+
+  // How many adjacent cells to check based on radius vs cell size
+  const cellRadius = Math.ceil(radiusKm / cellSizeKm);
+
+  /** Get all signal indices in the same or adjacent grid cells */
+  function getNearbyCandidates(sig: GeoSignal): number[] {
+    const cx = Math.floor(sig.lon / cellSizeDeg);
+    const cy = Math.floor(sig.lat / cellSizeDeg);
+    const candidates: number[] = [];
+    for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+      for (let dy = -cellRadius; dy <= cellRadius; dy++) {
+        const nearby = grid.get(`${cx + dx},${cy + dy}`);
+        if (nearby) candidates.push(...nearby);
+      }
+    }
+    return candidates;
+  }
+
   for (let i = 0; i < signals.length; i++) {
     if (assigned.has(i)) continue;
 
@@ -370,9 +403,10 @@ function detectConvergence(signals: GeoSignal[], radiusKm: number, minTypes: num
       { signal: signals[i], index: i, distance: 0 },
     ];
 
-    // Find all signals within radius
-    for (let j = i + 1; j < signals.length; j++) {
-      if (assigned.has(j)) continue;
+    // Find all signals within radius using spatial hash
+    const candidates = getNearbyCandidates(signals[i]);
+    for (const j of candidates) {
+      if (j <= i || assigned.has(j)) continue;
       const dist = haversineKm(signals[i].lat, signals[i].lon, signals[j].lat, signals[j].lon);
       if (dist <= radiusKm) {
         cluster.push({ signal: signals[j], index: j, distance: dist });

@@ -28,9 +28,6 @@ const NAME = "infra-agent";
 
 // ── Zod Schemas ──────────────────────────────────────────────────
 
-const NodeTypeEnum = z.enum(["cable", "pipeline", "port", "chokepoint", "country", "datacenter", "powerplant", "refinery", "exchange", "hub"]);
-const EdgeTypeEnum = z.enum(["serves", "lands_at", "trade_dependency", "controls_access", "powers", "feeds", "connects", "routes_through"]);
-
 const InfraSchemas = {
   cascade_analysis: z.object({
     nodes: z.array(z.object({
@@ -123,7 +120,7 @@ const InfraSchemas = {
       type: z.string().optional().default("depends_on"),
       weight: z.number().min(0).max(1).optional().default(1),
     })),
-    query: z.enum(["stats", "critical_path", "single_points_of_failure", "impact_of", "depends_on"]).optional().default("stats"),
+    query: z.enum(["stats", "critical_nodes", "single_points_of_failure", "impact_of", "depends_on"]).optional().default("stats"),
     targetNode: z.string().optional(),
   }).passthrough(),
 };
@@ -141,7 +138,7 @@ const AGENT_CARD = {
     { id: "supply_chain_map", name: "Supply Chain Map", description: "Map supply chain routes with per-leg risk scoring, chokepoint exposure, and transit analysis" },
     { id: "chokepoint_assess", name: "Chokepoint Assess", description: "Assess strategic chokepoint vulnerability based on traffic, width, alternatives, and threats" },
     { id: "redundancy_score", name: "Redundancy Score", description: "Score infrastructure redundancy for a region across cables, ports, power, pipelines, etc." },
-    { id: "dependency_graph", name: "Dependency Graph", description: "Build dependency graphs and query: critical paths, single points of failure, impact analysis" },
+    { id: "dependency_graph", name: "Dependency Graph", description: "Build dependency graphs and query: critical nodes (high in-degree), single points of failure, impact analysis" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -559,8 +556,8 @@ function analyzeGraph(
       return { singlePointsOfFailure: spofs, count: spofs.length };
     }
 
-    case "critical_path": {
-      // Find the path through the most critical nodes
+    case "critical_nodes": {
+      // Find nodes with highest criticality and connectivity
       const criticalNodes = nodes
         .filter(n => n.criticality === "critical" || n.criticality === "high")
         .sort((a, b) => (CRITICALITY_WEIGHT[b.criticality] ?? 0) - (CRITICALITY_WEIGHT[a.criticality] ?? 0));

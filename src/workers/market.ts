@@ -208,6 +208,7 @@ async function fetchCoinbaseQuote(symbol: string): Promise<Record<string, unknow
 
 // ── Technical Indicators ─────────────────────────────────────────
 
+// TODO: extract round to shared utility — duplicated in signal.ts, monitor.ts, and climate.ts
 function round(n: number, decimals = 4): number {
   const f = 10 ** decimals;
   return Math.round(n * f) / f;
@@ -263,18 +264,7 @@ function computeRSI(prices: number[], period: number): (number | null)[] {
       const rs = losses === 0 ? 100 : gains / losses;
       result.push(round(100 - 100 / (1 + rs)));
     } else {
-      // Use smoothed averages
-      const prevRsi = result[i]!; // previous RSI
-      const change = changes[i];
-      const gain = change > 0 ? change : 0;
-      const loss = change < 0 ? Math.abs(change) : 0;
-
-      // Approximate smoothed RS from previous RSI
-      const prevRS = prevRsi >= 100 ? 1000 : prevRsi / (100 - prevRsi);
-      const avgGain = (prevRS * (period - 1) / (1 + prevRS) * (period - 1) + gain) / period;
-      const avgLoss = ((period - 1) / (1 + prevRS) * (period - 1) + loss) / period;
-
-      // Simplified: recalculate from window
+      // Recalculate from window
       const window = changes.slice(Math.max(0, i - period + 1), i + 1);
       const gains = window.filter(c => c > 0).reduce((a, b) => a + b, 0) / period;
       const losses = window.filter(c => c < 0).reduce((a, b) => a + Math.abs(b), 0) / period;

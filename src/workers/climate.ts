@@ -133,11 +133,13 @@ const AGENT_CARD = {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+// TODO: extract round to shared utility — duplicated in signal.ts, monitor.ts, and market.ts
 function round(n: number, decimals = 2): number {
   const f = 10 ** decimals;
   return Math.round(n * f) / f;
 }
 
+// TODO: extract haversineKm to shared utility — duplicated in signal.ts and monitor.ts
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -230,7 +232,11 @@ async function fetchWildfires(
   // NASA FIRMS CSV API — requires MAP_KEY env or falls back to FIRMS open data
   const mapKey = process.env.NASA_FIRMS_KEY ?? "OPEN";
   const area = lat !== undefined && lon !== undefined && radiusKm !== undefined
-    ? `${lon - radiusKm / 111},${lat - radiusKm / 111},${lon + radiusKm / 111},${lat + radiusKm / 111}`
+    ? (() => {
+        const latRange = radiusKm / 111;
+        const lonRange = radiusKm / (111.32 * Math.cos(lat * Math.PI / 180));
+        return `${lon - lonRange},${lat - latRange},${lon + lonRange},${lat + latRange}`;
+      })()
     : "world";
 
   const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${mapKey}/${source}/${area}/${days}`;

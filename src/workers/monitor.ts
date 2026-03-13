@@ -147,11 +147,13 @@ const AGENT_CARD = {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+// TODO: extract round to shared utility — duplicated in signal.ts, climate.ts, and market.ts
 function round(n: number, decimals = 2): number {
   const f = 10 ** decimals;
   return Math.round(n * f) / f;
 }
 
+// TODO: extract haversineKm to shared utility — duplicated in signal.ts and climate.ts
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
