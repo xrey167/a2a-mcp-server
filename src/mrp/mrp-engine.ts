@@ -46,6 +46,23 @@ function log(msg: string) {
   process.stderr.write(`[mrp-engine] ${msg}\n`);
 }
 
+// ── EOQ estimation constants ─────────────────────────────────────
+
+/** Weeks per year — used to annualise weekly demand estimates */
+const WEEKS_PER_YEAR = 52;
+/** Months per year — used when falling back to safety-stock-based demand */
+const MONTHS_PER_YEAR = 12;
+/**
+ * Ordering cost as a fraction of unit cost (10%).
+ * Represents the administrative / transaction cost of placing one order.
+ */
+const EOQ_ORDERING_COST_FACTOR = 0.10;
+/**
+ * Annual holding cost as a fraction of unit cost (25%).
+ * Covers warehousing, insurance, obsolescence, and capital cost of inventory.
+ */
+const EOQ_HOLDING_COST_FACTOR = 0.25;
+
 // ── MRP Run Configuration ────────────────────────────────────────
 
 export interface MRPConfig {
@@ -436,9 +453,23 @@ function mapERPLotSizingPolicy(comp: BOMComponent): LotSizingPolicy | null {
     case "fixed_order_qty":
       return { type: "fixed_order_qty", quantity: comp.orderQuantity ?? 1 };
 
-    case "eoq":
-      // EOQ needs annual demand — estimate from safety stock and lead time
-      return { type: "eoq", annualDemand: (comp.safetyStock ?? 0) * 12, orderingCost: comp.unitCost * 0.1, holdingCostRate: comp.unitCost * 0.25 };
+    case "eoq": {
+      // EOQ needs annual demand — estimate from BOM usage per period.
+      // Best proxy: quantityPer (usage per parent unit) * 52 weeks as a
+      // rough annualised figure.  Fall back to safetyStock * 12 (monthly
+      // proxy), and finally to a minimum of 1 to keep the formula valid.
+      const weeklyDemandEstimate = comp.quantityPer > 0
+        ? comp.quantityPer * WEEKS_PER_YEAR
+        : (comp.safetyStock ?? 0) > 0
+          ? comp.safetyStock! * MONTHS_PER_YEAR
+          : WEEKS_PER_YEAR; // absolute floor: 52 units/year
+      return {
+        type: "eoq",
+        annualDemand: weeklyDemandEstimate,
+        orderingCost: comp.unitCost * EOQ_ORDERING_COST_FACTOR,
+        holdingCostRate: comp.unitCost * EOQ_HOLDING_COST_FACTOR,
+      };
+    }
 
     case "maximum_qty":
       return {

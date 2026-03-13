@@ -587,6 +587,7 @@ function mapBCLotSizing(s: string): BOMComponent["lotSizingPolicy"] {
   const lower = s.toLowerCase();
   if (lower.includes("fixed")) return "fixed_order_qty";
   if (lower.includes("lot-for-lot") || lower.includes("lot for lot")) return "lot_for_lot";
+  // BC "Order" reordering policy = lot-for-lot (one order per demand)
   if (lower.includes("order")) return "order";
   if (lower.includes("maximum") || lower.includes("max")) return "maximum_qty";
   return "lot_for_lot";

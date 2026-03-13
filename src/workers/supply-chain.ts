@@ -320,14 +320,13 @@ function collectAllComponents(orders: ProductionOrder[]): BOMComponent[] {
   return all;
 }
 
-/** Extract vendor countries from components. */
-function extractVendorCountries(orders: ProductionOrder[], erp: ERPConnector): string[] {
+/** Extract vendor countries from components, preferring the vendorCountry field on BOMComponent. */
+function extractVendorCountries(orders: ProductionOrder[]): string[] {
   const countries = new Set<string>();
   for (const order of orders) {
     for (const comp of order.components) {
-      if (comp.vendorName) {
-        // Use vendor name as hint; in real usage vendor records provide country
-        countries.add(comp.vendorName);
+      if (comp.vendorCountry) {
+        countries.add(comp.vendorCountry);
       }
     }
   }
@@ -507,8 +506,22 @@ async function handleCriticalPath(args: Record<string, unknown>): Promise<string
     return safeStringify({ error: "No production orders found matching the criteria" });
   }
 
+  // Re-fetch BOM components at the requested depth when it differs from default
+  if (depth && depth !== 3) {
+    for (let i = 0; i < targetOrders.length; i++) {
+      const order = targetOrders[i];
+      try {
+        const deepComponents = await erp.getBOMComponents(order.itemNo, depth);
+        if (deepComponents.length > 0) {
+          targetOrders[i] = { ...order, components: deepComponents };
+        }
+      } catch (err) {
+        log(`re-fetch BOM at depth ${depth} failed for ${order.itemNo}: ${err}`);
+      }
+    }
+  }
+
   const results = targetOrders.map((order) => {
-    // Ensure components are loaded (may need deeper BOM)
     const graph = computeCriticalPath(order.itemNo, order.itemName, order.components);
     const longLeadItems = findLongLeadItems(order.components, longLeadThresholdDays);
     const singleSourceItems = findSingleSourceComponents(order.components);
@@ -575,7 +588,7 @@ async function handleAssessRisk(args: Record<string, unknown>): Promise<string> 
   let externalFactors: ExternalRiskFactors | undefined;
   if (includeExternal) {
     log("assessing external risk factors");
-    const countries = extractVendorCountries(targetOrders, erp);
+    const countries = extractVendorCountries(targetOrders);
     const categories = extractComponentCategories(allComponents);
     try {
       externalFactors = await assessExternalRisks({
@@ -860,7 +873,7 @@ async function handleIntelligenceReport(args: Record<string, unknown>): Promise<
   });
 
   // Parallel: gather web intelligence + deep BOM analysis + external risks
-  const countries = extractVendorCountries(targetOrders, erp);
+  const countries = extractVendorCountries(targetOrders);
   const categories = extractComponentCategories(allComponents);
 
   const [webIntelligence, deepAnalysis, externalFactors] = await Promise.all([

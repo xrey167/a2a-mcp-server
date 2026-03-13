@@ -22,7 +22,14 @@ export interface BOMComponent {
   scrapPercent?: number;
   /** Item category / group for classification */
   itemCategory?: string;
-  /** Lot sizing policy from ERP planning parameters */
+  /**
+   * Lot sizing policy from ERP planning parameters.
+   *
+   * `"order"` is an alias for `"lot_for_lot"` — Business Central uses the
+   * term "Order" on the Item Card reordering policy to mean one order per
+   * demand (i.e. lot-for-lot).  Both values are mapped identically by the
+   * MRP engine.
+   */
   lotSizingPolicy?: "lot_for_lot" | "fixed_order_qty" | "eoq" | "order" | "maximum_qty";
   /** Fixed/max order quantity (used with lot sizing) */
   orderQuantity?: number;

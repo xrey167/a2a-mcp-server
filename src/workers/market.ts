@@ -102,7 +102,42 @@ const AGENT_CARD = {
   ],
 };
 
+// ── SSRF Prevention ──────────────────────────────────────────────
+// Duplicated from news.ts — TODO: extract to a shared utility module.
+
+/** Block requests to private/internal network addresses (SSRF prevention). */
+function validateUrlNotInternal(urlStr: string): void {
+  const parsed = new URL(urlStr);
+  const hostname = parsed.hostname.toLowerCase();
+
+  // Block localhost variants
+  if (hostname === "localhost" || hostname === "[::1]" || hostname === "0.0.0.0") {
+    throw new Error(`SSRF blocked: private/internal address "${hostname}"`);
+  }
+
+  // Block private/internal IP ranges
+  const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (ipMatch) {
+    const [, a, b] = ipMatch.map(Number);
+    if (
+      a === 127 ||                          // 127.x.x.x loopback
+      a === 10 ||                            // 10.x.x.x private
+      (a === 172 && b >= 16 && b <= 31) ||   // 172.16-31.x.x private
+      (a === 192 && b === 168) ||            // 192.168.x.x private
+      (a === 169 && b === 254) ||            // 169.254.x.x link-local / cloud metadata
+      a === 0                                // 0.0.0.0/8
+    ) {
+      throw new Error(`SSRF blocked: private/internal address "${hostname}"`);
+    }
+  }
+}
+
 // ── Yahoo Finance Helpers ────────────────────────────────────────
+// NOTE: This uses Yahoo Finance's unofficial v8 chart API which is undocumented
+// and not covered by any public SLA. Yahoo may change, rate-limit, or remove
+// this endpoint without notice, breaking quote/history fetching.
+// TODO: Switch to an official market data provider (e.g. Alpha Vantage, Polygon.io,
+// Twelve Data, or IEX Cloud) for production reliability.
 
 const FETCH_TIMEOUT = 15_000;
 const UA = "A2A-Market-Agent/1.0";
@@ -254,21 +289,27 @@ function computeRSI(prices: number[], period: number): (number | null)[] {
     changes.push(prices[i] - prices[i - 1]);
   }
 
+  let prevAvgGain = 0;
+  let prevAvgLoss = 0;
+
   for (let i = 0; i < changes.length; i++) {
     if (i < period - 1) {
       result.push(null);
     } else if (i === period - 1) {
+      // Initial average: simple mean over first `period` changes
       const window = changes.slice(0, period);
-      const gains = window.filter(c => c > 0).reduce((a, b) => a + b, 0) / period;
-      const losses = window.filter(c => c < 0).reduce((a, b) => a + Math.abs(b), 0) / period;
-      const rs = losses === 0 ? 100 : gains / losses;
+      prevAvgGain = window.filter(c => c > 0).reduce((a, b) => a + b, 0) / period;
+      prevAvgLoss = window.filter(c => c < 0).reduce((a, b) => a + Math.abs(b), 0) / period;
+      const rs = prevAvgLoss === 0 ? 100 : prevAvgGain / prevAvgLoss;
       result.push(round(100 - 100 / (1 + rs)));
     } else {
-      // Recalculate from window
-      const window = changes.slice(Math.max(0, i - period + 1), i + 1);
-      const gains = window.filter(c => c > 0).reduce((a, b) => a + b, 0) / period;
-      const losses = window.filter(c => c < 0).reduce((a, b) => a + Math.abs(b), 0) / period;
-      const rs = losses === 0 ? 100 : gains / losses;
+      // Wilder's smoothing: avgGain = (prevAvgGain * (period-1) + currentGain) / period
+      const change = changes[i];
+      const currentGain = change > 0 ? change : 0;
+      const currentLoss = change < 0 ? Math.abs(change) : 0;
+      prevAvgGain = (prevAvgGain * (period - 1) + currentGain) / period;
+      prevAvgLoss = (prevAvgLoss * (period - 1) + currentLoss) / period;
+      const rs = prevAvgLoss === 0 ? 100 : prevAvgGain / prevAvgLoss;
       result.push(round(100 - 100 / (1 + rs)));
     }
   }
@@ -561,6 +602,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       if (provider === "coinbase") {
         quote = await fetchCoinbaseQuote(symbol);
       } else if (provider === "custom" && customUrl) {
+        validateUrlNotInternal(customUrl);
         const res = await fetch(customUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
         if (!res.ok) throw new Error(`Custom API HTTP ${res.status}`);
         quote = await res.json() as Record<string, unknown>;
@@ -573,6 +615,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     case "price_history": {
       const { symbol, interval, range, provider, customUrl } = MarketSchemas.price_history.parse({ symbol: args.symbol ?? text, ...args });
       if (provider === "custom" && customUrl) {
+        validateUrlNotInternal(customUrl);
         const res = await fetch(customUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
         if (!res.ok) throw new Error(`Custom API HTTP ${res.status}`);
         const data = await res.json();

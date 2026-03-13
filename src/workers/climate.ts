@@ -151,6 +151,44 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+/**
+ * Parse a single CSV line handling quoted fields with embedded commas.
+ * Fields wrapped in double quotes may contain commas and escaped quotes ("").
+ */
+function parseCSVLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        // Check for escaped quote ("")
+        if (i + 1 < line.length && line[i + 1] === '"') {
+          current += '"';
+          i++; // skip next quote
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        fields.push(current);
+        current = "";
+      } else {
+        current += ch;
+      }
+    }
+  }
+  fields.push(current);
+  return fields;
+}
+
 // ── USGS Earthquake Fetcher ──────────────────────────────────────
 
 interface Earthquake {
@@ -255,7 +293,7 @@ async function fetchWildfires(
   const lines = csv.split("\n").filter(l => l.trim().length > 0);
   if (lines.length < 2) return [];
 
-  const headers = lines[0].split(",").map(h => h.trim().toLowerCase());
+  const headers = parseCSVLine(lines[0]).map(h => h.trim().toLowerCase());
   const latIdx = headers.indexOf("latitude");
   const lonIdx = headers.indexOf("longitude");
   const brightIdx = headers.indexOf("bright_ti4") >= 0 ? headers.indexOf("bright_ti4") : headers.indexOf("brightness");
@@ -267,7 +305,7 @@ async function fetchWildfires(
 
   const hotspots: FireHotspot[] = [];
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(",");
+    const cols = parseCSVLine(lines[i]);
     const confidence = confIdx >= 0 ? (isNaN(Number(cols[confIdx])) ? cols[confIdx]?.trim() ?? "" : Number(cols[confIdx])) : 0;
 
     // Filter by confidence

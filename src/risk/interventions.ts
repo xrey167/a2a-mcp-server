@@ -14,6 +14,20 @@ import type { LeadTimeAnalysis } from "./lead-time.js";
 import { riskLevel } from "./scoring.js";
 import { shouldStopRecursion } from "../mrp/bom-guard.js";
 
+// ── Make-or-Buy estimation constants ──────────────────────────────
+
+/**
+ * Fraction of lead-time days assumed to be productive labour hours.
+ * E.g. 0.5 means each lead-time day contributes half a day of actual work.
+ */
+const INTERNAL_LABOUR_HOURS_PER_LEAD_DAY = 0.5;
+/**
+ * Material cost as a fraction of vendor unit cost for internal production.
+ * 0.6 assumes 40% of the purchase price is the vendor's margin / overhead,
+ * so raw materials can be acquired for roughly 60% of the finished-part cost.
+ */
+const INTERNAL_MATERIAL_COST_FRACTION = 0.6;
+
 export interface InterventionContext {
   components: BOMComponent[];
   riskScores: RiskScore[];
@@ -104,8 +118,8 @@ function evaluateMakeOrBuy(
 
   const hourlyRate = ctx.internalHourlyRate ?? 50;
   // Rough estimate: internal production cost = material + labor estimate
-  const estimatedInternalHours = comp.leadTimeDays * 0.5; // simplified
-  const internalCost = comp.unitCost * 0.6 + estimatedInternalHours * hourlyRate;
+  const estimatedInternalHours = comp.leadTimeDays * INTERNAL_LABOUR_HOURS_PER_LEAD_DAY;
+  const internalCost = comp.unitCost * INTERNAL_MATERIAL_COST_FRACTION + estimatedInternalHours * hourlyRate;
   const purchaseCost = comp.unitCost;
 
   const savingsPercent = ((purchaseCost - internalCost) / purchaseCost) * 100;
