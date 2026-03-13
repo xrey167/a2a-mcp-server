@@ -9,10 +9,13 @@ export interface AgentCard {
 export async function sendTask(agentUrl: string, params: {
   skillId?: string; args?: Record<string, unknown>;
   message: { role: string; parts: Array<{ text: string }> };
-}): Promise<string> {
+  [key: string]: unknown;
+}, opts?: { apiKey?: string }): Promise<string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (opts?.apiKey) headers["Authorization"] = `Bearer ${opts.apiKey}`;
   const res = await fetch(agentUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ jsonrpc: "2.0", method: "tasks/send", id: randomUUID(),
       params: { id: randomUUID(), ...params } }),
     redirect: "manual", // Prevent following redirects to bypass SSRF checks
