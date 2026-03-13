@@ -130,6 +130,8 @@ export class BusinessCentralConnector implements ERPConnector {
     dateTo?: string;
     itemFilter?: string;
   }): Promise<ProductionOrder[]> {
+    // OData v4 Edm.Date literals are bare YYYY-MM-DD (no quotes).
+    // See: https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/webservices/use-filter-expressions-in-odata-uris
     const filterParts: string[] = [];
     if (filters?.status) filterParts.push(`status eq '${filters.status}'`);
     if (filters?.dateFrom) filterParts.push(`dueDate ge ${filters.dateFrom}`);

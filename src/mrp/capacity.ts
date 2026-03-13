@@ -147,11 +147,28 @@ export function calculateCapacityLoads(input: CapacityInput): CapacityLoad[] {
 function calculateAvailableMinutes(wc: WorkCenter, startDate: string, endDate: string): number {
   const start = new Date(startDate);
   const end = new Date(endDate);
-  const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000));
+  const totalDays = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000));
 
   // Use ERP calendar working days if available, otherwise assume 5/7
   const daysPerWeek = wc.workingDaysPerWeek ?? 5;
-  const workingDays = Math.round(days * (daysPerWeek / 7));
+
+  // Count working days by iterating through the period to correctly
+  // handle partial weeks and weekend boundaries instead of using a
+  // simple ratio which is inaccurate for short periods.
+  let workingDays = 0;
+  const weekendDays = 7 - daysPerWeek;          // e.g. 2 for a 5-day week
+  const firstWeekendDay = daysPerWeek;           // e.g. day-of-week index 5 (Sat) for Mon-Fri
+  const cursor = new Date(start);
+  for (let i = 0; i < totalDays; i++) {
+    const dow = cursor.getDay();                 // 0=Sun .. 6=Sat
+    // Map JS day (0=Sun) to ISO-style Mon=0: (dow + 6) % 7
+    const isoDow = (dow + 6) % 7;               // 0=Mon .. 6=Sun
+    if (isoDow < daysPerWeek) {
+      workingDays++;
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
   return workingDays * wc.capacityMinutesPerDay * wc.efficiency * wc.unitCount;
 }
 

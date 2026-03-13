@@ -101,8 +101,24 @@ interface Article {
 }
 
 /**
+ * Lightweight regex-based RSS/Atom parser.
+ *
+ * Limitations:
+ * - This is NOT a full XML parser; it uses regex extraction which can fail on
+ *   malformed XML, deeply nested tags, or namespace-prefixed duplicates.
+ * - Self-closing tags with content attributes (e.g. Atom <link href="..."/>)
+ *   are handled specially but other self-closing patterns may be missed.
+ * - CDATA sections are supported (see extractTag), but nested CDATA or CDATA
+ *   containing "]]>" literals will not parse correctly.
+ * - Feeds with unusual encodings or XML declarations may cause issues.
+ * - For production use with diverse feed sources, consider a proper XML/RSS
+ *   parsing library (e.g. fast-xml-parser, rss-parser).
+ */
+
+/**
  * Minimal XML tag extractor — no dependency needed for RSS/Atom parsing.
  * Extracts the text content of the first occurrence of a tag.
+ * Handles CDATA sections (e.g. <title><![CDATA[Some <b>text</b>]]></title>).
  */
 function extractTag(xml: string, tag: string): string {
   // Handle CDATA sections
@@ -232,17 +248,28 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
 const CRITICAL_TERMS = ["breaking", "urgent", "emergency", "crisis", "war declared", "nuclear", "invasion", "mass casualt"];
 const HIGH_TERMS = ["escalat", "tension", "sanction", "deploy", "mobiliz", "threat", "alert", "surge"];
 
+// Pre-compiled regex for category keyword matching — avoids iterating all keywords per article.
+// Each category gets a single regex that matches any of its keywords in one pass.
+const CATEGORY_KEYWORD_REGEX: Array<{ category: string; regex: RegExp; keywords: string[] }> =
+  Object.entries(CATEGORY_KEYWORDS).map(([cat, keywords]) => ({
+    category: cat,
+    regex: new RegExp(keywords.map(kw => kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gi"),
+    keywords,
+  }));
+
 function classifyArticle(title: string, description: string): { category: string; importance: string; score: number } {
   const text = `${title} ${description}`.toLowerCase();
 
-  // Category detection
+  // Category detection — uses pre-compiled regex for efficient matching
   let bestCategory = "general";
   let bestCatScore = 0;
-  for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
-    const matches = keywords.filter(kw => text.includes(kw)).length;
+  for (const { category, regex } of CATEGORY_KEYWORD_REGEX) {
+    regex.lastIndex = 0;
+    let matches = 0;
+    while (regex.exec(text) !== null) matches++;
     if (matches > bestCatScore) {
       bestCatScore = matches;
-      bestCategory = cat;
+      bestCategory = category;
     }
   }
 
@@ -384,12 +411,15 @@ function detectSignals(
 
   // Extract topics (significant bigrams and keywords)
   function extractTopics(text: string): string[] {
-    const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(w => w.length > 3);
+    const lower = text.toLowerCase();
+    const words = lower.replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(w => w.length > 3);
     const topics: string[] = [];
-    // Single keywords from category terms
-    for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
-      for (const kw of keywords) {
-        if (text.toLowerCase().includes(kw)) topics.push(kw.trim());
+    // Single keywords from category terms — uses pre-compiled regex for O(n) matching per category
+    for (const { regex } of CATEGORY_KEYWORD_REGEX) {
+      regex.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(lower)) !== null) {
+        topics.push(m[0].trim());
       }
     }
     // Bigrams
