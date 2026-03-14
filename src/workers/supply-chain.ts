@@ -344,6 +344,10 @@ function extractComponentCategories(components: BOMComponent[]): string[] {
 
 // ── Skill Handlers ───────────────────────────────────────────────
 
+// Security: ERP credentials are held in-memory only for the lifetime of
+// the worker process. They are never persisted to disk. For production
+// deployments, pass credentials via environment variables sourced from
+// OS-level secret management (Keychain, Credential Manager, Vault, etc.).
 async function handleConnectERP(args: Record<string, unknown>): Promise<string> {
   const parsed = SupplyChainSchemas.connect_erp.parse(args);
 

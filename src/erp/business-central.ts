@@ -143,26 +143,31 @@ export class BusinessCentralConnector implements ERPConnector {
 
     const raw = await this.odata<Record<string, unknown>>("productionOrders", params);
 
-    const orders: ProductionOrder[] = [];
-    for (const r of raw) {
-      const orderId = String(r.id ?? r.systemId ?? "");
-      const components = await this.getBOMComponents(r.sourceNo as string);
-      const routings = await this.getProductionRoutings(orderId);
-      orders.push({
-        id: orderId,
-        number: String(r.no ?? ""),
-        itemNo: String(r.sourceNo ?? ""),
-        itemName: String(r.description ?? ""),
-        quantity: Number(r.quantity ?? 0),
-        dueDate: String(r.dueDate ?? ""),
-        startDate: String(r.startingDate ?? r.dueDate ?? ""),
-        status: mapBCProdStatus(String(r.status ?? "")),
-        components,
-        routings,
-      });
-    }
+    // Fetch BOM components and routings for all orders in parallel to avoid
+    // sequential N+1 queries (one per order).
+    const enrichments = await Promise.all(
+      raw.map(async (r) => {
+        const orderId = String(r.id ?? r.systemId ?? "");
+        const [components, routings] = await Promise.all([
+          this.getBOMComponents(r.sourceNo as string),
+          this.getProductionRoutings(orderId),
+        ]);
+        return { r, orderId, components, routings };
+      }),
+    );
 
-    return orders;
+    return enrichments.map(({ r, orderId, components, routings }) => ({
+      id: orderId,
+      number: String(r.no ?? ""),
+      itemNo: String(r.sourceNo ?? ""),
+      itemName: String(r.description ?? ""),
+      quantity: Number(r.quantity ?? 0),
+      dueDate: String(r.dueDate ?? ""),
+      startDate: String(r.startingDate ?? r.dueDate ?? ""),
+      status: mapBCProdStatus(String(r.status ?? "")),
+      components,
+      routings,
+    }));
   }
 
   async getSalesOrders(filters?: {

@@ -82,7 +82,15 @@ export function calculateLotSize(
  *   H = annual holding cost per unit
  */
 function computeEOQ(annualDemand: number, orderingCost: number, holdingCostRate: number): number {
-  if (holdingCostRate <= 0 || annualDemand <= 0 || orderingCost <= 0) return 1;
+  if (annualDemand <= 0) {
+    throw new Error(`EOQ: annualDemand must be > 0 (got ${annualDemand})`);
+  }
+  if (orderingCost <= 0) {
+    throw new Error(`EOQ: orderingCost must be > 0 (got ${orderingCost})`);
+  }
+  if (holdingCostRate <= 0) {
+    throw new Error(`EOQ: holdingCostRate must be > 0 (got ${holdingCostRate})`);
+  }
   const eoq = Math.sqrt((2 * annualDemand * orderingCost) / holdingCostRate);
   return Math.max(1, Math.round(eoq));
 }

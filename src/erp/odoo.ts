@@ -133,27 +133,31 @@ export class OdooConnector implements ERPConnector {
       "date_planned_finished", "state", "move_raw_ids",
     ]);
 
-    const orders: ProductionOrder[] = [];
-    for (const r of raw) {
-      const productId = (r.product_id as [number, string]) ?? [0, ""];
-      const components = await this.getMOComponents(r.id as number);
-      const routings = await this.getProductionRoutings(String(r.id));
+    // Fetch components and routings for all MOs in parallel to avoid
+    // sequential N+1 queries (one per order).
+    const enrichments = await Promise.all(
+      raw.map(async (r) => {
+        const productId = (r.product_id as [number, string]) ?? [0, ""];
+        const [components, routings] = await Promise.all([
+          this.getMOComponents(r.id as number),
+          this.getProductionRoutings(String(r.id)),
+        ]);
+        return { r, productId, components, routings };
+      }),
+    );
 
-      orders.push({
-        id: String(r.id),
-        number: String(r.name ?? ""),
-        itemNo: String(productId[0]),
-        itemName: productId[1] ?? "",
-        quantity: Number(r.product_qty ?? 0),
-        dueDate: String(r.date_planned_finished ?? ""),
-        startDate: String(r.date_planned_start ?? ""),
-        status: mapOdooMOStatus(String(r.state ?? "")),
-        components,
-        routings,
-      });
-    }
-
-    return orders;
+    return enrichments.map(({ r, productId, components, routings }) => ({
+      id: String(r.id),
+      number: String(r.name ?? ""),
+      itemNo: String(productId[0]),
+      itemName: productId[1] ?? "",
+      quantity: Number(r.product_qty ?? 0),
+      dueDate: String(r.date_planned_finished ?? ""),
+      startDate: String(r.date_planned_start ?? ""),
+      status: mapOdooMOStatus(String(r.state ?? "")),
+      components,
+      routings,
+    }));
   }
 
   private async getMOComponents(moId: number): Promise<BOMComponent[]> {
@@ -163,19 +167,20 @@ export class OdooConnector implements ERPConnector {
       "product_id", "product_uom_qty", "product_uom",
     ]);
 
-    const components: BOMComponent[] = [];
-    for (const r of raw) {
-      const productId = (r.product_id as [number, string]) ?? [0, ""];
-      const productDetails = await this.getProductDetails(productId[0]);
-
-      components.push({
-        itemNo: String(productId[0]),
-        itemName: productId[1] ?? "",
-        quantityPer: Number(r.product_uom_qty ?? 0),
-        unitOfMeasure: String((r.product_uom as [number, string])?.[1] ?? "Unit"),
-        ...productDetails,
-      });
-    }
+    // Fetch product details for all components in parallel to avoid N+1.
+    const components = await Promise.all(
+      raw.map(async (r) => {
+        const productId = (r.product_id as [number, string]) ?? [0, ""];
+        const productDetails = await this.getProductDetails(productId[0]);
+        return {
+          itemNo: String(productId[0]),
+          itemName: productId[1] ?? "",
+          quantityPer: Number(r.product_uom_qty ?? 0),
+          unitOfMeasure: String((r.product_uom as [number, string])?.[1] ?? "Unit"),
+          ...productDetails,
+        };
+      }),
+    );
 
     return components;
   }

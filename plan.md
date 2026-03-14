@@ -130,7 +130,10 @@ Neuer A2A Worker `supply-chain-agent` (Port 8089) der Produktionsaufträge, Verk
 ### `connect_erp`
 - Konfiguriert ERP-Verbindung (BC oder Odoo)
 - Parameter: `{ system: "bc" | "odoo", url: string, credentials: {...}, company?: string }`
-- Speichert Verbindungsdaten verschlüsselt in `~/.a2a-mcp/supply-chain.json`
+- Credentials are held **in-memory only** for the lifetime of the worker process — they are **not** persisted to disk.
+  For persistent credential storage, use OS-level secret management (macOS Keychain, Windows Credential Manager,
+  Linux libsecret / `secret-tool`, or a vault service like HashiCorp Vault) and pass credentials via environment
+  variables at process startup.
 - Testet Verbindung und gibt Status zurück
 
 ### `analyze_orders`

@@ -28,7 +28,7 @@ const NAME = "market-agent";
 const MarketSchemas = {
   fetch_quote: z.object({
     symbol: z.string().min(1),
-    provider: z.enum(["yahoo", "coinbase", "custom"]).optional().default("yahoo"),
+    provider: z.enum(["yahoo", "alphavantage", "coinbase", "custom"]).optional().default("yahoo"),
     customUrl: z.string().url().optional(),
   }).passthrough(),
 
@@ -36,7 +36,7 @@ const MarketSchemas = {
     symbol: z.string().min(1),
     interval: z.enum(["1d", "1wk", "1mo"]).optional().default("1d"),
     range: z.enum(["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"]).optional().default("3mo"),
-    provider: z.enum(["yahoo", "custom"]).optional().default("yahoo"),
+    provider: z.enum(["yahoo", "alphavantage", "custom"]).optional().default("yahoo"),
     customUrl: z.string().url().optional(),
   }).passthrough(),
 
@@ -91,8 +91,8 @@ const AGENT_CARD = {
   version: "1.0.0",
   capabilities: { streaming: false },
   skills: [
-    { id: "fetch_quote", name: "Fetch Quote", description: "Fetch real-time stock, crypto, or commodity quote from Yahoo Finance or custom API" },
-    { id: "price_history", name: "Price History", description: "Fetch historical OHLCV price data for technical analysis" },
+    { id: "fetch_quote", name: "Fetch Quote", description: "Fetch real-time stock, crypto, or commodity quote (providers: yahoo, alphavantage, coinbase, custom)" },
+    { id: "price_history", name: "Price History", description: "Fetch historical OHLCV price data (providers: yahoo, alphavantage, custom)" },
     { id: "technical_analysis", name: "Technical Analysis", description: "Compute indicators: SMA, EMA, RSI, MACD, Bollinger Bands, ATR, VWAP" },
     { id: "screen_market", name: "Screen Market", description: "Filter and rank assets by price, volume, change, and market cap thresholds" },
     { id: "detect_anomalies", name: "Detect Anomalies", description: "Detect price and volume anomalies using z-score against rolling baseline" },
@@ -238,6 +238,82 @@ async function fetchCoinbaseQuote(symbol: string): Promise<Record<string, unknow
     exchange: "Coinbase",
     volume: round(volume),
     timestamp: new Date().toISOString(),
+  };
+}
+
+// ── Alpha Vantage Provider ───────────────────────────────────────
+// Official, documented API with free tier (25 requests/day, 5/min).
+// Set ALPHAVANTAGE_API_KEY env var. Docs: https://www.alphavantage.co/documentation/
+
+function getAlphaVantageKey(): string {
+  const key = process.env.ALPHAVANTAGE_API_KEY;
+  if (!key) throw new Error("ALPHAVANTAGE_API_KEY env var is required for the alphavantage provider");
+  return key;
+}
+
+async function fetchAlphaVantageQuote(symbol: string): Promise<Record<string, unknown>> {
+  const apiKey = getAlphaVantageKey();
+  const url = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`;
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    headers: { "User-Agent": UA },
+  });
+  if (!res.ok) throw new Error(`Alpha Vantage HTTP ${res.status}: ${res.statusText}`);
+  const data = await res.json() as any;
+  const gq = data?.["Global Quote"];
+  if (!gq || !gq["05. price"]) throw new Error(`No Alpha Vantage data for symbol: ${symbol}`);
+
+  const price = parseFloat(gq["05. price"]);
+  const prevClose = parseFloat(gq["08. previous close"] ?? price);
+  const change = parseFloat(gq["09. change"] ?? "0");
+  const changePercent = parseFloat((gq["10. change percent"] ?? "0").replace("%", ""));
+
+  return {
+    symbol: gq["01. symbol"] ?? symbol,
+    price: round(price),
+    previousClose: round(prevClose),
+    change: round(change),
+    changePercent: round(changePercent),
+    currency: "USD",
+    exchange: "",
+    volume: parseInt(gq["06. volume"] ?? "0", 10),
+    timestamp: new Date().toISOString(),
+  };
+}
+
+async function fetchAlphaVantageHistory(
+  symbol: string,
+  _interval: string,
+  range: string,
+): Promise<{ timestamps: string[]; open: number[]; high: number[]; low: number[]; close: number[]; volume: number[] }> {
+  const apiKey = getAlphaVantageKey();
+  // Use daily endpoint; for weekly/monthly ranges use TIME_SERIES_WEEKLY/MONTHLY
+  const fn = range === "5y" || range === "2y" ? "TIME_SERIES_WEEKLY" : "TIME_SERIES_DAILY";
+  const outputsize = ["1y", "2y", "5y"].includes(range) ? "full" : "compact";
+  const url = `https://www.alphavantage.co/query?function=${fn}&symbol=${encodeURIComponent(symbol)}&outputsize=${outputsize}&apikey=${apiKey}`;
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    headers: { "User-Agent": UA },
+  });
+  if (!res.ok) throw new Error(`Alpha Vantage HTTP ${res.status}: ${res.statusText}`);
+  const data = await res.json() as any;
+
+  const seriesKey = Object.keys(data).find((k) => k.startsWith("Time Series")) ?? "";
+  const series = data[seriesKey];
+  if (!series) throw new Error(`No Alpha Vantage history for symbol: ${symbol}`);
+
+  // Limit data points based on range
+  const rangeLimits: Record<string, number> = { "5d": 5, "1mo": 22, "3mo": 66, "6mo": 132, "1y": 252, "2y": 104, "5y": 260 };
+  const limit = rangeLimits[range] ?? 66;
+
+  const dates = Object.keys(series).sort().slice(-limit);
+  return {
+    timestamps: dates.map((d) => new Date(d).toISOString()),
+    open: dates.map((d) => parseFloat(series[d]["1. open"])),
+    high: dates.map((d) => parseFloat(series[d]["2. high"])),
+    low: dates.map((d) => parseFloat(series[d]["3. low"])),
+    close: dates.map((d) => parseFloat(series[d]["4. close"])),
+    volume: dates.map((d) => parseInt(series[d]["5. volume"], 10)),
   };
 }
 
@@ -601,13 +677,26 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       let quote: Record<string, unknown>;
       if (provider === "coinbase") {
         quote = await fetchCoinbaseQuote(symbol);
+      } else if (provider === "alphavantage") {
+        quote = await fetchAlphaVantageQuote(symbol);
       } else if (provider === "custom" && customUrl) {
         validateUrlNotInternal(customUrl);
         const res = await fetch(customUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
         if (!res.ok) throw new Error(`Custom API HTTP ${res.status}`);
         quote = await res.json() as Record<string, unknown>;
       } else {
-        quote = await fetchYahooQuote(symbol);
+        // Yahoo Finance (default) — uses undocumented API; falls back to
+        // Alpha Vantage automatically if Yahoo fails and ALPHAVANTAGE_API_KEY is set.
+        try {
+          quote = await fetchYahooQuote(symbol);
+        } catch (yahooErr) {
+          if (process.env.ALPHAVANTAGE_API_KEY) {
+            log(`Yahoo Finance failed (${yahooErr}), falling back to Alpha Vantage`);
+            quote = await fetchAlphaVantageQuote(symbol);
+          } else {
+            throw yahooErr;
+          }
+        }
       }
       return safeStringify(quote, 2);
     }
@@ -621,7 +710,22 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         const data = await res.json();
         return safeStringify(data, 2);
       }
-      const history = await fetchYahooHistory(symbol, interval, range);
+      let history: { timestamps: string[]; open: number[]; high: number[]; low: number[]; close: number[]; volume: number[] };
+      if (provider === "alphavantage") {
+        history = await fetchAlphaVantageHistory(symbol, interval, range);
+      } else {
+        // Yahoo Finance (default) — falls back to Alpha Vantage if available.
+        try {
+          history = await fetchYahooHistory(symbol, interval, range);
+        } catch (yahooErr) {
+          if (process.env.ALPHAVANTAGE_API_KEY) {
+            log(`Yahoo history failed (${yahooErr}), falling back to Alpha Vantage`);
+            history = await fetchAlphaVantageHistory(symbol, interval, range);
+          } else {
+            throw yahooErr;
+          }
+        }
+      }
       return safeStringify({
         symbol,
         interval,
