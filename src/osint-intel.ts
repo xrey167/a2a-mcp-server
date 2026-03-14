@@ -466,7 +466,7 @@ export function getOsintDashboard(): Record<string, unknown> {
     workers: {
       news: { port: 8089, skills: ["fetch_rss", "aggregate_feeds", "classify_news", "cluster_news", "detect_signals"] },
       market: { port: 8090, skills: ["fetch_quote", "price_history", "technical_analysis", "screen_market", "detect_anomalies", "correlation"] },
-      signal: { port: 8091, skills: ["aggregate_signals", "classify_threat", "detect_convergence", "baseline_compare", "instability_index"] },
+      signal: { port: 8091, skills: ["aggregate_signals", "classify_threat", "detect_convergence", "baseline_compare", "instability_index", "correlate_signals"] },
       monitor: { port: 8092, skills: ["track_conflicts", "detect_surge", "theater_posture", "track_vessels", "check_freshness", "watchlist_check"] },
       infra: { port: 8093, skills: ["cascade_analysis", "supply_chain_map", "chokepoint_assess", "redundancy_score", "dependency_graph"] },
       climate: { port: 8094, skills: ["fetch_earthquakes", "fetch_wildfires", "fetch_natural_events", "assess_exposure", "climate_anomalies", "event_correlate"] },

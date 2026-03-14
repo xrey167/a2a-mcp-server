@@ -27,6 +27,60 @@ import { round, haversineKm } from "../worker-utils.js";
 const PORT = 8091;
 const NAME = "signal-agent";
 
+// ── Canonical Signal Types ───────────────────────────────────────
+
+/**
+ * 12 canonical signal domains. The first 8 map directly to instability_index
+ * indicators; the remaining 4 (nuclear, maritime, unrest, logistics) are
+ * tracked for correlation patterns but don't have dedicated instability weights.
+ */
+const CANONICAL_SIGNAL_TYPES = [
+  "conflict", "military", "cyber", "infrastructure", "economic",
+  "climate", "displacement", "news",
+  "nuclear", "maritime", "unrest", "logistics",
+] as const;
+
+type CanonicalSignalType = typeof CANONICAL_SIGNAL_TYPES[number];
+
+/** Maps the 12 signal domains → instability_index indicator names (null = no direct mapping) */
+const SIGNAL_TO_INSTABILITY: Record<CanonicalSignalType, string | null> = {
+  conflict: "conflictEvents",
+  military: "militaryActivity",
+  unrest: "civilUnrest",
+  cyber: "cyberThreats",
+  economic: "economicStress",
+  displacement: "displacement",
+  climate: "naturalDisasters",
+  news: "mediaCoverage",
+  infrastructure: null, // contributes to cascade analysis, not instability index
+  nuclear: null,        // tracked via dual-use correlation pattern
+  maritime: null,       // tracked via supply chain stress pattern
+  logistics: null,      // tracked via military buildup pattern
+};
+
+/** Normalize a free-form signal type string to a canonical domain */
+function normalizeSignalType(type: string): CanonicalSignalType | string {
+  const t = type.toLowerCase().trim();
+  // Direct match
+  if ((CANONICAL_SIGNAL_TYPES as readonly string[]).includes(t)) return t as CanonicalSignalType;
+  // Common aliases
+  const aliases: Record<string, CanonicalSignalType> = {
+    war: "conflict", attack: "conflict", combat: "conflict", strike: "conflict",
+    troops: "military", deployment: "military", exercise: "military", naval: "military",
+    hack: "cyber", breach: "cyber", malware: "cyber", ransomware: "cyber",
+    pipeline: "infrastructure", cable: "infrastructure", port: "infrastructure", power: "infrastructure",
+    market: "economic", trade: "economic", finance: "economic", gdp: "economic",
+    earthquake: "climate", flood: "climate", wildfire: "climate", hurricane: "climate", disaster: "climate",
+    refugee: "displacement", migration: "displacement", asylum: "displacement",
+    media: "news", press: "news", report: "news", coverage: "news",
+    radiation: "nuclear", enrichment: "nuclear", warhead: "nuclear",
+    vessel: "maritime", shipping: "maritime", tanker: "maritime",
+    protest: "unrest", riot: "unrest", demonstration: "unrest", coup: "unrest",
+    supply: "logistics", transport: "logistics", cargo: "logistics",
+  };
+  return aliases[t] ?? t;
+}
+
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const SignalSchemas = {
@@ -284,17 +338,21 @@ function aggregateSignals(signals: Signal[], windowHours: number, dedup: boolean
   // Sort by severity score descending
   clusters.sort((a, b) => b.severityScore - a.severityScore);
 
-  // Global counts
+  // Global counts (raw + normalized)
   const typeCounts: Record<string, number> = {};
+  const normalizedTypeCounts: Record<string, number> = {};
   const severityCounts: Record<string, number> = {};
   for (const s of filtered) {
     typeCounts[s.type] = (typeCounts[s.type] ?? 0) + 1;
+    const norm = normalizeSignalType(s.type);
+    normalizedTypeCounts[norm] = (normalizedTypeCounts[norm] ?? 0) + 1;
     severityCounts[s.severity] = (severityCounts[s.severity] ?? 0) + 1;
   }
 
   return {
     clusters,
     typeCounts,
+    normalizedTypeCounts,
     severityCounts,
     totalSignals: filtered.length,
     uniqueCountries: byCountry.size,
