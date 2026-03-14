@@ -10,7 +10,7 @@ export async function sendTask(agentUrl: string, params: {
   skillId?: string; args?: Record<string, unknown>;
   message: { role: string; parts: Array<{ text: string }> };
   [key: string]: unknown;
-}, opts?: { apiKey?: string }): Promise<string> {
+}, opts?: { apiKey?: string; timeoutMs?: number }): Promise<string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (opts?.apiKey) headers["Authorization"] = `Bearer ${opts.apiKey}`;
   const res = await fetch(agentUrl, {
@@ -19,6 +19,7 @@ export async function sendTask(agentUrl: string, params: {
     body: JSON.stringify({ jsonrpc: "2.0", method: "tasks/send", id: randomUUID(),
       params: { id: randomUUID(), ...params } }),
     redirect: "manual", // Prevent following redirects to bypass SSRF checks
+    signal: opts?.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined,
   });
 
   // Reject redirects

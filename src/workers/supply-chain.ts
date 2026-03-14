@@ -1000,7 +1000,9 @@ async function handleRunMRP(args: Record<string, unknown>): Promise<string> {
   if (lotSizingPolicy === "fixed_order_qty" && fixedOrderQty) {
     policy = { type: "fixed_order_qty", quantity: fixedOrderQty };
   } else if (lotSizingPolicy === "eoq") {
-    policy = { type: "eoq", annualDemand: 0, orderingCost: 50, holdingCostRate: 0.25 };
+    // annualDemand=52 (~1 unit/week) is a safe floor; the MRP engine overrides
+    // per-component with real BOM-derived estimates when available.
+    policy = { type: "eoq", annualDemand: 52, orderingCost: 50, holdingCostRate: 0.25 };
   } else if (lotSizingPolicy === "period_order_qty") {
     policy = { type: "period_order_qty", periods: 4 };
   }

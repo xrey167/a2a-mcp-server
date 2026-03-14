@@ -54,7 +54,7 @@ async function askAI(prompt: string, timeoutMs = 120_000): Promise<string> {
     skillId: "ask_claude",
     args: { prompt },
     message: { role: "user" as const, parts: [{ kind: "text" as const, text: prompt }] },
-  });
+  }, { timeoutMs });
 }
 
 async function fetchWeb(url: string): Promise<string> {
