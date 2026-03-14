@@ -53,8 +53,9 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
     }
     case "read_file": {
       const { path } = ShellSchemas.read_file.parse({ path: args.path ?? text, ...args });
-      if (!existsSync(path)) return `File not found: ${path}`;
-      return readFileSync(path, "utf-8");
+      const safePath = sanitizePath(path);
+      if (!existsSync(safePath)) return `File not found: ${safePath}`;
+      return readFileSync(safePath, "utf-8");
     }
     case "write_file": {
       const { path, content } = ShellSchemas.write_file.parse(args);
@@ -103,10 +104,17 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
 });
 
 // SSE streaming endpoint for run_shell
+const STREAM_TIMEOUT_MS = 60_000; // 60s max for streaming commands
 app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
   const data = request.body;
+
+  const sizeErr = checkRequestSize(data);
+  if (sizeErr) { reply.code(413); return { jsonrpc: "2.0", error: { code: -32000, message: sizeErr } }; }
+
   const { args, message } = data.params ?? data ?? {};
   const cmd = (args?.command as string) ?? message?.parts?.[0]?.text ?? "";
+
+  if (!cmd) { reply.code(400); return { jsonrpc: "2.0", error: { code: -32602, message: "No command provided" } }; }
 
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -115,6 +123,12 @@ app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
   });
 
   const child = spawn(cmd, { shell: true });
+
+  // Kill child after timeout to prevent unbounded processes
+  const timer = setTimeout(() => {
+    child.kill("SIGTERM");
+    reply.raw.write(`data: ${JSON.stringify({ type: "error", text: `Stream timeout after ${STREAM_TIMEOUT_MS}ms` })}\n\n`);
+  }, STREAM_TIMEOUT_MS);
 
   child.stdout.on("data", (chunk: Buffer) => {
     reply.raw.write(`data: ${JSON.stringify({ type: "stdout", text: chunk.toString() })}\n\n`);
@@ -126,6 +140,7 @@ app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
 
   return new Promise<void>((resolve) => {
     child.on("close", (exitCode) => {
+      clearTimeout(timer);
       reply.raw.write(`data: ${JSON.stringify({ type: "done", exitCode: exitCode ?? 0 })}\n\n`);
       reply.raw.end();
       resolve();

@@ -123,6 +123,15 @@ export function removePipeline(idOrName: string): boolean {
 
 // ── Template Resolution ──────────────────────────────────────────
 
+const MAX_SUBSTITUTION_LENGTH = 50_000;
+
+/** Sanitize a substituted value: truncate + strip control chars. */
+function sanitizeSubstitution(value: string): string {
+  return value
+    .slice(0, MAX_SUBSTITUTION_LENGTH)
+    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, "");
+}
+
 function resolveTemplate(
   template: unknown,
   context: { input: Record<string, unknown>; prev: { result?: string }; steps: Record<string, { result?: string }> },
@@ -130,7 +139,7 @@ function resolveTemplate(
   if (typeof template === "string") {
     return template.replace(/\{\{([\w.]+)\}\}/g, (_, path: string) => {
       const value = getNestedValue(context, path);
-      return value !== undefined ? String(value) : `<${path}>`;
+      return value !== undefined ? sanitizeSubstitution(String(value)) : `<${path}>`;
     });
   }
   if (Array.isArray(template)) {

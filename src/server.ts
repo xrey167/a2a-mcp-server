@@ -3124,6 +3124,8 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
           maxRounds: { type: "number", description: "For debate: max refinement rounds (default: 2)" },
           items: { type: "array", description: "For map_reduce: items to distribute" },
           mergePrompt: { type: "string", description: "Custom merge prompt (for custom merge strategy)" },
+          timeoutMs: { type: "number", description: "Timeout per agent call in ms (default: 60000)" },
+          judgeAgent: { type: "string", description: "Agent/skill for scoring/synthesis (default: ask_claude)" },
         },
         required: ["strategy", "query", "agents"],
       },

@@ -100,7 +100,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         body: body ? safeStringify(body) : undefined,
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
-      return `HTTP ${res.status}\n${await res.text()}`;
+      const responseBody = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+      if (responseBody === null) return `HTTP ${res.status}\nResponse too large: exceeded ${MAX_RESPONSE_BYTES} byte limit`;
+      return `HTTP ${res.status}\n${responseBody}`;
     }
     default:
       return `Unknown skill: ${skillId}`;
