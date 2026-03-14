@@ -67,6 +67,8 @@ export interface CollaborationResult {
   /** Number of rounds (for debate) */
   rounds?: number;
   totalDurationMs: number;
+  /** Warning when consensus/scoring degraded (e.g. judge returned invalid JSON) */
+  warning?: string;
 }
 
 export type CollabDispatchFn = (skillId: string, args: Record<string, unknown>, text: string) => Promise<string>;
@@ -200,14 +202,18 @@ Reply with JSON: { "scores": [{"id": 0, "score": 8, "reason": "..."}, ...], "bes
       totalDurationMs: Date.now() - startTime,
     };
   } catch {
-    // Fallback: return the first response; log so callers know consensus scoring failed
-    process.stderr.write(`[collaboration] consensus judge returned invalid JSON — falling back to first response\n`);
+    // Fallback: return the first response with explicit degradation warning.
+    // Callers MUST check for the `warning` field to know consensus was not achieved.
+    const warning = "Consensus scoring failed: judge returned invalid JSON. Falling back to first response (unscored). This result has NOT been validated by consensus — treat with lower confidence.";
+    process.stderr.write(`[collaboration] ${warning}\n`);
     return {
       id,
       strategy: "consensus",
       output: validResponses[0].result,
       responses,
+      agreement: 0,
       totalDurationMs: Date.now() - startTime,
+      warning,
     };
   }
 }

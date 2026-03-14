@@ -305,8 +305,19 @@ function hasMatchingSpan(span: Span, query: string): boolean {
 
 function pruneTraces(): void {
   const cutoff = Date.now() - TRACE_TTL_MS;
-  while (traceOrder.length > MAX_TRACES || (traceOrder.length > 0 && (traces.get(traceOrder[0])?.startTime ?? 0) < cutoff)) {
-    const id = traceOrder.shift();
-    if (id) traces.delete(id);
+  while (traceOrder.length > 0) {
+    // Skip stale IDs that were already deleted
+    const trace = traces.get(traceOrder[0]);
+    if (!trace) {
+      traceOrder.shift();
+      continue;
+    }
+    // Prune if over capacity or expired
+    if (traceOrder.length > MAX_TRACES || trace.startTime < cutoff) {
+      traceOrder.shift();
+      traces.delete(trace.traceId);
+    } else {
+      break; // oldest valid trace is fresh and under capacity
+    }
   }
 }

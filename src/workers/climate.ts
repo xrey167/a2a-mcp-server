@@ -507,12 +507,16 @@ function detectClimateAnomalies(
   const splitIdx = Math.min(baselinePeriod, Math.floor(series.length * 0.75));
 
   for (const metric of metrics) {
-    const allValues = series.map(d => d[metric]).filter((v): v is number => v !== undefined && v !== null);
-    if (allValues.length < 3) continue;
+    // Pair values with their source data points to keep indices aligned
+    const paired = series
+      .map(d => ({ point: d, value: d[metric] }))
+      .filter((p): p is { point: ClimateDataPoint; value: number } => p.value !== undefined && p.value !== null);
+    if (paired.length < 3) continue;
 
-    const baselineValues = allValues.slice(0, splitIdx);
-    const evalValues = allValues.slice(splitIdx);
-    const evalPoints = series.slice(splitIdx);
+    const baselineValues = paired.slice(0, splitIdx).map(p => p.value);
+    const evalPaired = paired.slice(splitIdx);
+    const evalValues = evalPaired.map(p => p.value);
+    const evalPoints = evalPaired.map(p => p.point);
 
     if (baselineValues.length === 0 || evalValues.length === 0) continue;
 

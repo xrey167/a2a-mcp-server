@@ -48,10 +48,11 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 | `src/workers/data.ts` | 8088 | parse_csv, parse_json, transform_data, analyze_data, pivot_table |
 | `src/workers/news.ts` | 8089 | fetch_rss, aggregate_feeds, classify_news, cluster_news, detect_signals |
 | `src/workers/market.ts` | 8090 | fetch_quote, price_history, technical_analysis, screen_market, detect_anomalies, correlation |
-| `src/workers/signal.ts` | 8091 | aggregate_signals, classify_threat, detect_convergence, baseline_compare, instability_index |
+| `src/workers/signal.ts` | 8091 | aggregate_signals, classify_threat, detect_convergence, baseline_compare, instability_index, correlate_signals |
 | `src/workers/monitor.ts` | 8092 | track_conflicts, detect_surge, theater_posture, track_vessels, check_freshness, watchlist_check |
 | `src/workers/infra.ts` | 8093 | cascade_analysis, supply_chain_map, chokepoint_assess, redundancy_score, dependency_graph |
 | `src/workers/climate.ts` | 8094 | fetch_earthquakes, fetch_wildfires, fetch_natural_events, assess_exposure, climate_anomalies, event_correlate |
+| `src/workers/supply-chain.ts` | 8095 | connect_erp, analyze_orders, critical_path, assess_risk, recommend_actions, monitor_dashboard, intelligence_report, predict_bottlenecks, deep_bom_analysis, run_mrp, mrp_impact |
 
 All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 

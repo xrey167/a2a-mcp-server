@@ -304,6 +304,70 @@ const callA2aAgent: Skill = {
   },
 };
 
+// ── OSINT Skill Fallbacks ─────────────────────────────────────────
+// Graceful degradation stubs: when a worker is down, these return a
+// structured error instead of crashing the workflow. The delegate routing
+// in server.ts tries the live worker first; these are last-resort fallbacks.
+
+function osintFallback(skillId: string, workerName: string): Skill {
+  return {
+    id: skillId,
+    name: skillId,
+    description: `Fallback for ${skillId} (${workerName} worker unavailable)`,
+    inputSchema: { type: "object", properties: {}, additionalProperties: true },
+    run: async (args) => JSON.stringify({
+      error: `${workerName} worker is unavailable`,
+      skillId,
+      fallback: true,
+      message: `The ${workerName} worker (skill: ${skillId}) is not reachable. Start it or check its health.`,
+      args: Object.keys(args),
+    }),
+  };
+}
+
+const OSINT_FALLBACK_SKILLS: Array<{ id: string; worker: string }> = [
+  // news-agent (8089)
+  { id: "fetch_rss", worker: "news" },
+  { id: "aggregate_feeds", worker: "news" },
+  { id: "classify_news", worker: "news" },
+  { id: "cluster_news", worker: "news" },
+  { id: "detect_signals", worker: "news" },
+  // market-agent (8090)
+  { id: "fetch_quote", worker: "market" },
+  { id: "price_history", worker: "market" },
+  { id: "technical_analysis", worker: "market" },
+  { id: "screen_market", worker: "market" },
+  { id: "detect_anomalies", worker: "market" },
+  { id: "correlation", worker: "market" },
+  // signal-agent (8091)
+  { id: "aggregate_signals", worker: "signal" },
+  { id: "classify_threat", worker: "signal" },
+  { id: "detect_convergence", worker: "signal" },
+  { id: "baseline_compare", worker: "signal" },
+  { id: "instability_index", worker: "signal" },
+  { id: "correlate_signals", worker: "signal" },
+  // monitor-agent (8092)
+  { id: "track_conflicts", worker: "monitor" },
+  { id: "detect_surge", worker: "monitor" },
+  { id: "theater_posture", worker: "monitor" },
+  { id: "track_vessels", worker: "monitor" },
+  { id: "check_freshness", worker: "monitor" },
+  { id: "watchlist_check", worker: "monitor" },
+  // infra-agent (8093)
+  { id: "cascade_analysis", worker: "infra" },
+  { id: "supply_chain_map", worker: "infra" },
+  { id: "chokepoint_assess", worker: "infra" },
+  { id: "redundancy_score", worker: "infra" },
+  { id: "dependency_graph", worker: "infra" },
+  // climate-agent (8094)
+  { id: "fetch_earthquakes", worker: "climate" },
+  { id: "fetch_wildfires", worker: "climate" },
+  { id: "fetch_natural_events", worker: "climate" },
+  { id: "assess_exposure", worker: "climate" },
+  { id: "climate_anomalies", worker: "climate" },
+  { id: "event_correlate", worker: "climate" },
+];
+
 // ── Registry ──────────────────────────────────────────────────────
 
 export const SKILLS: Skill[] = [
@@ -316,6 +380,7 @@ export const SKILLS: Skill[] = [
   searchFiles,
   querySqlite,
   callA2aAgent,
+  ...OSINT_FALLBACK_SKILLS.map(s => osintFallback(s.id, s.worker)),
 ];
 
 export const SKILL_MAP = new Map(SKILLS.map((s) => [s.id, s]));

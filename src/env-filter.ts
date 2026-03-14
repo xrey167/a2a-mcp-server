@@ -45,6 +45,8 @@ const DANGEROUS_ENV_KEYS = new Set([
   // Debug (could leak info)
   "NODE_DEBUG",
   "DEBUG",
+  // License keys
+  "A2A_LICENSE_KEY",
 ]);
 
 /**

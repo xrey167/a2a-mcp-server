@@ -315,7 +315,7 @@ async function waitForWorker(w: typeof WORKERS[number], maxWaitMs = 10_000): Pro
         workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
         return true;
       }
-    } catch {}
+    } catch { /* worker not yet ready — retry */ }
     await new Promise(r => setTimeout(r, 500));
   }
   workerHealth.set(w.name, { healthy: false, failCount: 0, lastCheck: Date.now() });
@@ -567,11 +567,11 @@ ${sanitizedMessage}`;
 
     const aiUrl = workerCards.find(c => c.name === "ai-agent")?.url;
     if (aiUrl) {
-      const response = await sendTask(aiUrl, {
+      const response = await sendWithResilience(aiUrl, {
         skillId: "ask_claude",
         args: { prompt },
         message: { role: "user" as const, parts: [{ kind: "text" as const, text: prompt }] },
-      });
+      }, { apiKey: getAgentApiKey(aiUrl) });
       try {
         const parsed = JSON.parse(response);
         if (parsed.url && parsed.skillId) {
@@ -629,12 +629,12 @@ function startDesignWorkflow(args: Record<string, unknown>): string {
       const [projectRaw, promptResult] = await Promise.all([
         callMcpTool("create_project", { title }),
         screensOnly
-          ? sendTask(designWorkerUrl, {
+          ? sendWithResilience(designWorkerUrl, {
               skillId: "enhance_ui_prompt",
               args: { description: appConcept, deviceType: deviceType.toLowerCase() },
               message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
             }, { timeoutMs: 60_000 })
-          : sendTask(designWorkerUrl, {
+          : sendWithResilience(designWorkerUrl, {
               skillId: "suggest_screens",
               args: { appConcept, deviceType: deviceType.toLowerCase() },
               message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
@@ -706,7 +706,7 @@ function startFactoryWorkflow(args: Record<string, unknown>): string {
 
       // Step 1: Normalize intent
       emitProgress(task.id, "Normalizing intent — expanding idea into detailed spec…");
-      const specResult = await sendTask(factoryWorkerUrl, {
+      const specResult = await sendWithResilience(factoryWorkerUrl, {
         skillId: "normalize_intent",
         args: { idea, pipeline: pipelineId },
         message: { role: "user" as const, parts: [{ kind: "text" as const, text: idea }] },
@@ -715,7 +715,7 @@ function startFactoryWorkflow(args: Record<string, unknown>): string {
 
       // Step 2: Full project creation (scaffold + generate + QA loop)
       emitProgress(task.id, "Creating project — scaffold, code generation, quality review…");
-      const projectResult = await sendTask(factoryWorkerUrl, {
+      const projectResult = await sendWithResilience(factoryWorkerUrl, {
         skillId: "create_project",
         args: { idea, pipeline: pipelineId, outputDir },
         message: { role: "user" as const, parts: [{ kind: "text" as const, text: idea }] },
@@ -1289,14 +1289,19 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       markWorking(task.id);
 
       (async () => {
+        const wfTrace = startTrace("workflow_execute", { workflowId: workflow.id, workflowName: workflow.name });
         try {
           const result = await executeWorkflow(
             workflow,
             (sid, a, t) => dispatchSkill(sid, a, t),
             (msg) => emitProgress(task.id, msg),
           );
+          wfTrace.end("ok");
+          publish("workflow.completed", { workflowId: workflow.id, taskId: task.id, stepCount: result.steps?.length ?? 0 }).catch(() => {});
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
+          wfTrace.end("error");
+          publish("workflow.failed", { workflowId: workflow.id, taskId: task.id, error: String(err) }).catch(() => {});
           try { markFailed(task.id, { code: "WORKFLOW_ERROR", message: String(err) }); }
           catch (e) { process.stderr.write(`[orchestrator] workflow markFailed error: ${e}\n`); }
         }
@@ -1367,7 +1372,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           updateWorkflowRun(workflowRunId, "completed");
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
           updateWorkflowRun(workflowRunId, "failed", msg);
         }
       })();
@@ -1596,17 +1601,18 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
     case "event_subscribe": {
       const pattern = args.pattern as string;
       if (!pattern) throw new Error("event_subscribe requires pattern");
-      // MCP subscriptions store events for later retrieval — filter out sensitive metadata
+      // MCP subscriptions store events in a bounded ring buffer
+      const MAX_SUB_EVENTS = 1000;
       const events: AgentEvent[] = [];
       const subId = subscribe(pattern, (event) => {
-        // Strip internal metadata before exposing to MCP users
         const { meta: _meta, ...safeEvent } = event;
+        if (events.length >= MAX_SUB_EVENTS) events.shift();
         events.push(safeEvent as AgentEvent);
       }, {
         name: (args.name as string) ?? "mcp-subscriber",
         filter: args.filter as Record<string, unknown> | undefined,
       });
-      return JSON.stringify({ subscriptionId: subId, pattern });
+      return JSON.stringify({ subscriptionId: subId, pattern, maxBuffered: MAX_SUB_EVENTS });
     }
 
     case "event_unsubscribe": {
@@ -1644,11 +1650,16 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       markWorking(task.id);
 
       (async () => {
+        const plTrace = startTrace("execute_pipeline", { pipelineId: typeof pipelineRef === "string" ? pipelineRef : pipelineRef.id });
         try {
           const result = await executePipeline(pipelineRef, input, (sid, a, t) => dispatchSkill(sid, a, t));
+          plTrace.end("ok");
+          publish("pipeline.completed", { pipelineId: result.pipelineId, taskId: task.id, status: result.status }).catch(() => {});
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          try { markFailed(task.id, { code: "PIPELINE_ERROR", message: String(err) }); } catch {}
+          plTrace.end("error");
+          publish("pipeline.failed", { taskId: task.id, error: String(err) }).catch(() => {});
+          try { markFailed(task.id, { code: "PIPELINE_ERROR", message: String(err) }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1679,6 +1690,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       markWorking(task.id);
 
       (async () => {
+        const collabTrace = startTrace("collaborate", { strategy, agentCount: agents.length });
         try {
           const result = await collaborate(
             {
@@ -1694,9 +1706,13 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             },
             (sid, a, t) => dispatchSkill(sid, a, t),
           );
+          collabTrace.end("ok");
+          publish("collaboration.completed", { strategy, taskId: task.id, agentCount: agents.length, agreement: result.agreement }).catch(() => {});
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          try { markFailed(task.id, { code: "COLLABORATION_ERROR", message: String(err) }); } catch {}
+          collabTrace.end("error");
+          publish("collaboration.failed", { strategy, taskId: task.id, error: String(err) }).catch(() => {});
+          try { markFailed(task.id, { code: "COLLABORATION_ERROR", message: String(err) }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1896,16 +1912,21 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       markWorking(task.id);
 
       (async () => {
+        const osintTrace = startTrace("osint_brief", { region: opts.region, workflowId: workflow.id });
         try {
           const result = await executeWorkflow(
             workflow,
             (sid, a, t) => dispatchSkill(sid, a, t),
             (msg) => emitProgress(task.id, msg),
           );
+          osintTrace.end("ok");
+          publish("workflow.osint_brief.completed", { taskId: task.id, region: opts.region }).catch(() => {});
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
+          osintTrace.end("error");
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "OSINT_BRIEF_ERROR", message: msg }); } catch {}
+          publish("workflow.osint_brief.failed", { taskId: task.id, error: msg }).catch(() => {});
+          try { markFailed(task.id, { code: "OSINT_BRIEF_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1919,16 +1940,21 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       markWorking(task.id);
 
       (async () => {
+        const osintTrace = startTrace("osint_alert_scan", { severity: opts.severityThreshold, workflowId: workflow.id });
         try {
           const result = await executeWorkflow(
             workflow,
             (sid, a, t) => dispatchSkill(sid, a, t),
             (msg) => emitProgress(task.id, msg),
           );
+          osintTrace.end("ok");
+          publish("workflow.osint_alert_scan.completed", { taskId: task.id }).catch(() => {});
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
+          osintTrace.end("error");
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "OSINT_ALERT_SCAN_ERROR", message: msg }); } catch {}
+          publish("workflow.osint_alert_scan.failed", { taskId: task.id, error: msg }).catch(() => {});
+          try { markFailed(task.id, { code: "OSINT_ALERT_SCAN_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1942,16 +1968,21 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       markWorking(task.id);
 
       (async () => {
+        const osintTrace = startTrace("osint_threat_assess", { region: opts.region, workflowId: workflow.id });
         try {
           const result = await executeWorkflow(
             workflow,
             (sid, a, t) => dispatchSkill(sid, a, t),
             (msg) => emitProgress(task.id, msg),
           );
+          osintTrace.end("ok");
+          publish("workflow.osint_threat_assess.completed", { taskId: task.id, region: opts.region }).catch(() => {});
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
+          osintTrace.end("error");
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "OSINT_THREAT_ASSESS_ERROR", message: msg }); } catch {}
+          publish("workflow.osint_threat_assess.failed", { taskId: task.id, region: opts.region, error: msg }).catch(() => {});
+          try { markFailed(task.id, { code: "OSINT_THREAT_ASSESS_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1965,16 +1996,21 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       markWorking(task.id);
 
       (async () => {
+        const osintTrace = startTrace("osint_market_snapshot", { symbols: opts.symbols, workflowId: workflow.id });
         try {
           const result = await executeWorkflow(
             workflow,
             (sid, a, t) => dispatchSkill(sid, a, t),
             (msg) => emitProgress(task.id, msg),
           );
+          osintTrace.end("ok");
+          publish("workflow.osint_market_snapshot.completed", { taskId: task.id, symbols: opts.symbols }).catch(() => {});
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
+          osintTrace.end("error");
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "OSINT_MARKET_SNAPSHOT_ERROR", message: msg }); } catch {}
+          publish("workflow.osint_market_snapshot.failed", { taskId: task.id, error: msg }).catch(() => {});
+          try { markFailed(task.id, { code: "OSINT_MARKET_SNAPSHOT_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -2406,7 +2442,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       // Route to a registered worker by skill ID
       const router = buildSkillRouter(workerCards, getExternalCards());
       const url = router.get(skillId);
-      if (url) return sendTask(url, { skillId, args, message: { role: "user" as const, parts: [{ kind: "text" as const, text }] } }, { apiKey: getAgentApiKey(url) });
+      if (url) return sendWithResilience(url, { skillId, args, message: { role: "user" as const, parts: [{ kind: "text" as const, text }] } }, { apiKey: getAgentApiKey(url) });
 
       throw new Error(`Unknown skill: ${skillId}`);
     }
@@ -2431,88 +2467,9 @@ const delegateSkill = {
   },
 };
 
-const delegateAsyncSkill = {
-  id: "delegate_async",
-  name: "Delegate Async",
-  description: "Fire-and-forget delegate — returns a taskId immediately. Poll with get_task_result.",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      agentUrl: { type: "string", description: "Direct URL of the target agent (optional)" },
-      skillId: { type: "string", description: "Skill ID to route to (optional)" },
-      message: { type: "string", description: "Task message" },
-      args: { type: "object", description: "Arguments for the target skill" },
-      sessionId: { type: "string", description: "Session ID for conversation continuity (optional)" },
-    },
-    required: ["message"],
-  },
-};
-
-const getTaskResultSkill = {
-  id: "get_task_result",
-  name: "Get Task Result",
-  description: "Poll the result of a task started with delegate_async",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      taskId: { type: "string", description: "Task ID returned by delegate_async" },
-    },
-    required: ["taskId"],
-  },
-};
-
-const getSessionHistorySkill = {
-  id: "get_session_history",
-  name: "Get Session History",
-  description: "Return the conversation history for a session",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      sessionId: { type: "string", description: "Session ID" },
-    },
-    required: ["sessionId"],
-  },
-};
-
-const clearSessionSkill = {
-  id: "clear_session",
-  name: "Clear Session",
-  description: "Clear the conversation history for a session",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      sessionId: { type: "string", description: "Session ID to clear" },
-    },
-    required: ["sessionId"],
-  },
-};
-
-const registerAgentSkill = {
-  id: "register_agent",
-  name: "Register Agent",
-  description: "Register an external A2A agent by URL — discovers its card and persists it. Optionally store an API key for authenticated routing.",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      url: { type: "string", description: "Base URL of the agent (e.g. http://host:8080)" },
-      apiKey: { type: "string", description: "Bearer token to include when routing tasks to this agent (optional)" },
-    },
-    required: ["url"],
-  },
-};
-
-const unregisterAgentSkill = {
-  id: "unregister_agent",
-  name: "Unregister Agent",
-  description: "Remove an external agent from the registry",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      url: { type: "string", description: "Base URL of the agent to remove" },
-    },
-    required: ["url"],
-  },
-};
+// Dead skill definitions removed (delegateAsyncSkill, getTaskResultSkill,
+// getSessionHistorySkill, clearSessionSkill, registerAgentSkill, unregisterAgentSkill).
+// These skills are accessible via delegate(skillId: "...") but had no references.
 
 const runShellStreamSkill = {
   id: "run_shell_stream",
@@ -2576,48 +2533,9 @@ const memoryCleanupSkill = {
   },
 };
 
-const listMcpServersSkill = {
-  id: "list_mcp_servers",
-  name: "List MCP Servers",
-  description: "Return all external MCP servers registered in ~/.claude.json and their tool counts",
-  inputSchema: { type: "object" as const, properties: {} },
-};
-
-const useMcpToolSkill = {
-  id: "use_mcp_tool",
-  name: "Use MCP Tool",
-  description: "Call a tool on an external MCP server (lazy-connected on first use)",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      toolName: { type: "string", description: "Name of the MCP tool to call" },
-      args: { type: "object", description: "Arguments to pass to the tool" },
-    },
-    required: ["toolName"],
-  },
-};
-
-const getProjectContextSkill = {
-  id: "get_project_context",
-  name: "Get Project Context",
-  description: "Return the current project context (summary, goals, stack, notes)",
-  inputSchema: { type: "object" as const, properties: {} },
-};
-
-const setProjectContextSkill = {
-  id: "set_project_context",
-  name: "Set Project Context",
-  description: "Set or update the project context injected into all agent delegate calls",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      summary: { type: "string", description: "1-3 sentence project summary" },
-      goals: { type: "array", items: { type: "string" }, description: "Current sprint goals" },
-      stack: { type: "array", items: { type: "string" }, description: "Tech stack tags" },
-      notes: { type: "string", description: "Freeform context notes" },
-    },
-  },
-};
+// Dead skill definitions removed (listMcpServersSkill, useMcpToolSkill,
+// getProjectContextSkill, setProjectContextSkill).
+// These skills are accessible via delegate(skillId: "...") but had no references.
 
 const designWorkflowSkill = {
   id: "design_workflow",
@@ -2666,20 +2584,7 @@ const sandboxExecuteSkill = {
   },
 };
 
-const sandboxVarsSkill = {
-  id: "sandbox_vars",
-  name: "Sandbox Variables",
-  description: "List, inspect, or delete persisted sandbox variables for a session",
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      sessionId: { type: "string", description: "Session ID" },
-      action: { type: "string", description: "list (default), get, or delete", enum: ["list", "get", "delete"] },
-      varName: { type: "string", description: "Variable name (required for get/delete)" },
-    },
-    required: ["sessionId"],
-  },
-};
+// Dead sandboxVarsSkill definition removed — accessible via delegate(skillId: "sandbox_vars")
 
 // ── MCP Server ──────────────────────────────────────────────────
 const server = new Server(
@@ -3556,6 +3461,8 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
           maxRounds: { type: "number", description: "For debate: max refinement rounds (default: 2)" },
           items: { type: "array", description: "For map_reduce: items to distribute" },
           mergePrompt: { type: "string", description: "Custom merge prompt (for custom merge strategy)" },
+          timeoutMs: { type: "number", description: "Timeout per agent call in ms (default: 60000)" },
+          judgeAgent: { type: "string", description: "Agent/skill for scoring/synthesis (default: ask_claude)" },
         },
         required: ["strategy", "query", "agents"],
       },
@@ -4183,7 +4090,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 });
               }
             }
-          } catch {}
+          } catch { /* SSE chunk parse error — skip */ }
         }
       }
     } finally {
@@ -4740,7 +4647,7 @@ function pruneSnapshotExports(dir: string, retentionDays: number): void {
       const stats = statSync(fullPath);
       if (!stats.isFile()) continue;
       if (stats.mtimeMs < cutoff) unlinkSync(fullPath);
-    } catch {}
+    } catch { /* file already removed or inaccessible */ }
   }
 }
 
@@ -4962,7 +4869,7 @@ async function buildConnectorTrustReport(input: {
   let manifest: Record<string, unknown> = {};
   try {
     manifest = JSON.parse(await Bun.file(manifestPath).text()) as Record<string, unknown>;
-  } catch {}
+  } catch { /* manifest not parseable — use empty default */ }
 
   const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts as Array<Record<string, unknown>> : [];
   const jsonArtifactPath = artifacts.find(a => a.type === "json" && typeof a.path === "string")?.path as string | undefined;
@@ -5062,7 +4969,7 @@ async function buildConnectorSalesPacket(input: {
       if (Array.isArray(manifest.artifacts)) {
         artifacts = manifest.artifacts as Array<Record<string, unknown>>;
       }
-    } catch {}
+    } catch { /* manifest not parseable */ }
   }
 
   const fullPacket = {
@@ -5684,7 +5591,7 @@ async function startHttpServer() {
         dispatchSkill(webhook.skillId, args, JSON.stringify(request.body), undefined, request.ip)
           .then(result => markCompleted(task.id, result))
           .catch(err => {
-            try { markFailed(task.id, { code: "WEBHOOK_ERROR", message: String(err) }); } catch {}
+            try { markFailed(task.id, { code: "WEBHOOK_ERROR", message: String(err) }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
           });
         logWebhookCall(webhookId, "success", task.id, undefined, payloadSize);
         return { status: "accepted", taskId: task.id };
@@ -7270,7 +7177,7 @@ async function startHttpServer() {
           updateWorkflowRun(workflowRunId, "completed");
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
           updateWorkflowRun(workflowRunId, "failed", msg);
         }
       })();
