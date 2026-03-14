@@ -13,7 +13,7 @@
  *   - Webhook registration/unregistration via orchestrator skills
  */
 
-import { randomUUID, createHmac } from "crypto";
+import { randomUUID, createHmac, timingSafeEqual } from "crypto";
 import { Database } from "bun:sqlite";
 import { join } from "path";
 import { homedir } from "os";
@@ -156,13 +156,11 @@ export function toggleWebhook(id: string, enabled: boolean): boolean {
 
 export function verifySignature(payload: string, signature: string, secret: string): boolean {
   const expected = "sha256=" + createHmac("sha256", secret).update(payload).digest("hex");
-  // Constant-time comparison
-  if (expected.length !== signature.length) return false;
-  let diff = 0;
-  for (let i = 0; i < expected.length; i++) {
-    diff |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
-  }
-  return diff === 0;
+  // Use crypto.timingSafeEqual for proper constant-time comparison
+  const expectedBuf = Buffer.from(expected, "utf-8");
+  const signatureBuf = Buffer.from(signature, "utf-8");
+  if (expectedBuf.length !== signatureBuf.length) return false;
+  return timingSafeEqual(expectedBuf, signatureBuf);
 }
 
 // ── Payload Transformation ───────────────────────────────────────

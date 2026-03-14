@@ -173,13 +173,37 @@ function resolveTemplates(
     // argument value — for shell skills this is the "run whatever the previous
     // step returned" pattern — so only basic cleaning is applied.
     const isEmbedded = !/^\s*\{\{[-\w]+\.result\}\}\s*$/.test(value);
+
+    // Non-embedded single reference: try to return parsed JSON so downstream
+    // skills receive arrays/objects instead of JSON strings.  This is critical
+    // for workflow chaining where step A produces `[{...}]` and step B's Zod
+    // schema expects an array, not a string.
+    if (!isEmbedded) {
+      const match = value.match(/^\s*\{\{([-\w]+)\.result\}\}\s*$/);
+      if (match) {
+        const stepId = match[1];
+        const result = stepResults.get(stepId);
+        if (!result) {
+          process.stderr.write(`[workflow] template ref {{${stepId}.result}} not found — substituting placeholder\n`);
+        }
+        const rawValue = result?.result ?? `<step ${stepId} not found>`;
+        try {
+          return JSON.parse(rawValue);
+        } catch {
+          // Not valid JSON — return as sanitized string
+          return sanitizeTemplateValue(rawValue, targetSkillId, false);
+        }
+      }
+    }
+
+    // Embedded: substitute as sanitized string within the larger text
     return value.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
       const result = stepResults.get(stepId);
       if (!result) {
         process.stderr.write(`[workflow] template ref {{${stepId}.result}} not found — substituting placeholder\n`);
       }
       const rawValue = result?.result ?? `<step ${stepId} not found>`;
-      return sanitizeTemplateValue(rawValue, targetSkillId, isEmbedded);
+      return sanitizeTemplateValue(rawValue, targetSkillId, true);
     });
   }
   if (Array.isArray(value)) {
@@ -347,58 +371,58 @@ export async function executeWorkflow(
     return { stepId: step.id, status: "failed", error: lastError, durationMs: duration };
   }
 
-  // Execute steps in topological order with max concurrency
-  while (completed.size + failed.size < workflow.steps.length) {
-    // Find ready steps (all deps completed, not already done or running)
-    const ready = workflow.steps.filter(step => {
-      if (completed.has(step.id) || running.has(step.id) || failed.has(step.id)) return false;
-      const deps = step.dependsOn ?? [];
-      return deps.every(d => completed.has(d) || failed.has(d));
-    });
+  // Execute steps with true concurrent scheduling (promise pool pattern).
+  // Steps are launched as soon as their dependencies are met, up to maxConcurrency.
+  // Unlike batch-based Promise.all, steps from different "waves" can overlap.
+  const inFlight = new Map<string, Promise<void>>();
 
-    if (ready.length === 0 && running.size === 0) {
-      // Deadlock — some steps can't run because their deps failed
+  function scheduleReady(): void {
+    for (const step of workflow.steps) {
+      if (completed.has(step.id) || running.has(step.id) || failed.has(step.id)) continue;
+      if (running.size >= maxConcurrency) break;
+      const deps = step.dependsOn ?? [];
+      if (!deps.every(d => completed.has(d) || failed.has(d))) continue;
+
+      running.add(step.id);
+      const promise = executeStep(step).then((result) => {
+        running.delete(step.id);
+        inFlight.delete(step.id);
+        stepResults.set(step.id, result);
+
+        if (result.status === "failed") {
+          failed.add(step.id);
+          if (step.onError !== "skip") {
+            const downstream = findDownstream(step.id, workflow.steps);
+            for (const dsId of downstream) {
+              if (!completed.has(dsId) && !failed.has(dsId)) {
+                failed.add(dsId);
+                stepResults.set(dsId, {
+                  stepId: dsId,
+                  status: "failed",
+                  error: `Upstream step "${step.id}" failed`,
+                  durationMs: 0,
+                });
+              }
+            }
+          }
+        } else {
+          completed.add(step.id);
+        }
+      });
+      inFlight.set(step.id, promise);
+    }
+  }
+
+  while (completed.size + failed.size < workflow.steps.length) {
+    scheduleReady();
+
+    if (inFlight.size === 0) {
+      // No steps running and no more can be scheduled — deadlock
       break;
     }
 
-    // Execute up to maxConcurrency steps in parallel
-    const batch = ready.slice(0, maxConcurrency - running.size);
-    if (batch.length === 0) {
-      // Wait for a running step to complete
-      await new Promise(r => setTimeout(r, 100));
-      continue;
-    }
-
-    const promises = batch.map(async (step) => {
-      running.add(step.id);
-      const result = await executeStep(step);
-      running.delete(step.id);
-      stepResults.set(step.id, result);
-
-      if (result.status === "failed") {
-        failed.add(step.id);
-        // If this step has onError: "fail" (default), abort dependent steps
-        if (step.onError !== "skip") {
-          // Mark all downstream steps as failed
-          const downstream = findDownstream(step.id, workflow.steps);
-          for (const dsId of downstream) {
-            if (!completed.has(dsId) && !failed.has(dsId)) {
-              failed.add(dsId);
-              stepResults.set(dsId, {
-                stepId: dsId,
-                status: "failed",
-                error: `Upstream step "${step.id}" failed`,
-                durationMs: 0,
-              });
-            }
-          }
-        }
-      } else {
-        completed.add(step.id);
-      }
-    });
-
-    await Promise.all(promises);
+    // Wait for at least one in-flight step to complete, then re-schedule
+    await Promise.race(inFlight.values());
   }
 
   const totalDurationMs = Date.now() - startTime;

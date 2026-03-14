@@ -149,6 +149,74 @@ const AGENT_CARD = {
 
 // round() imported from ../worker-utils.js
 
+// ── Infrastructure Node Type Constants ───────────────────────────
+
+/** The 5 canonical infrastructure node types with type-specific cascade behavior */
+const INFRA_NODE_TYPES = ["cable", "pipeline", "port", "chokepoint", "country"] as const;
+
+/**
+ * Type-specific propagation factors: how strongly failure propagates through each node type.
+ * - cable: high propagation (digital/comms cascades quickly)
+ * - pipeline: medium-high (energy supply disruption)
+ * - port: medium (trade rerouting possible but slow)
+ * - chokepoint: high (geopolitical bottleneck, wide impact)
+ * - country: low-medium (coarse entity, absorbs some impact)
+ */
+const TYPE_PROPAGATION_FACTOR: Record<string, number> = {
+  cable: 0.95,
+  pipeline: 0.80,
+  port: 0.65,
+  chokepoint: 0.90,
+  country: 0.50,
+};
+
+/**
+ * Type-specific significance floor: minimum impact below which cascade stops.
+ * More critical types keep propagating at lower impact levels.
+ */
+const TYPE_SIGNIFICANCE_FLOOR: Record<string, number> = {
+  cable: 0.02,
+  pipeline: 0.03,
+  port: 0.04,
+  chokepoint: 0.02,
+  country: 0.05,
+};
+
+/**
+ * Cross-type coupling modifiers: how strongly failure propagates between specific type pairs.
+ * e.g. cable→port has a strong coupling (ports depend on comms), pipeline→country is weaker.
+ */
+const CROSS_TYPE_COUPLING: Record<string, number> = {
+  "cable→port": 0.85,
+  "cable→chokepoint": 0.70,
+  "cable→country": 0.40,
+  "pipeline→port": 0.75,
+  "pipeline→chokepoint": 0.80,
+  "pipeline→country": 0.60,
+  "port→pipeline": 0.50,
+  "port→chokepoint": 0.65,
+  "port→country": 0.55,
+  "chokepoint→port": 0.80,
+  "chokepoint→pipeline": 0.75,
+  "chokepoint→country": 0.70,
+  "chokepoint→cable": 0.60,
+  "country→port": 0.45,
+  "country→pipeline": 0.40,
+  "country→cable": 0.35,
+  "country→chokepoint": 0.50,
+};
+
+/** Normalize user-supplied node type to canonical form */
+function normalizeNodeType(type: string): string {
+  const t = type.toLowerCase().replace(/s$/, "").replace(/[-_\s]/g, "");
+  if (t === "cable" || t === "submarinecable" || t.includes("kabel")) return "cable";
+  if (t === "pipeline" || t === "pipe") return "pipeline";
+  if (t === "port" || t === "hafen" || t === "harbor" || t === "harbour") return "port";
+  if (t === "chokepoint" || t === "strait" || t === "canal" || t === "bottleneck") return "chokepoint";
+  if (t === "country" || t === "land" || t === "nation" || t === "state") return "country";
+  return type; // non-canonical type: no special handling
+}
+
 // ── Cascade Failure Analysis (BFS) ───────────────────────────────
 
 interface InfraNode {
@@ -183,8 +251,12 @@ function simulateCascade(
   failedNodes: string[],
   maxDepth: number,
   significanceThreshold: number,
-): { impactedNodes: CascadeImpact[]; totalImpact: number; maxDepthReached: number; cascadeChain: string[][] } {
+): { impactedNodes: CascadeImpact[]; totalImpact: number; maxDepthReached: number; cascadeChain: string[][]; typeBreakdown: Record<string, number> } {
   const nodeMap = new Map(nodes.map(n => [n.id, n]));
+
+  // Normalize node types for type-specific behavior
+  const normalizedTypes = new Map<string, string>();
+  for (const n of nodes) normalizedTypes.set(n.id, normalizeNodeType(n.type));
 
   // Build adjacency list (from → to[])
   const adj = new Map<string, Array<{ to: string; strength: number; redundancy: number }>>();
@@ -193,7 +265,7 @@ function simulateCascade(
     adj.get(e.from)!.push({ to: e.to, strength: e.strength, redundancy: e.redundancy });
   }
 
-  // BFS cascade
+  // BFS cascade with type-specific propagation
   const visited = new Set<string>(failedNodes);
   const impacts: CascadeImpact[] = [];
   const cascadeChain: string[][] = [failedNodes];
@@ -207,6 +279,7 @@ function simulateCascade(
 
     for (const current of frontier) {
       const neighbors = adj.get(current.id) ?? [];
+      const sourceType = normalizedTypes.get(current.id) ?? "";
 
       for (const edge of neighbors) {
         if (visited.has(edge.to)) continue;
@@ -214,10 +287,24 @@ function simulateCascade(
         const targetNode = nodeMap.get(edge.to);
         if (!targetNode) continue;
 
-        // Impact attenuated by edge strength, target redundancy
-        const propagatedImpact = current.score * edge.strength * (1 - edge.redundancy) * (1 - targetNode.redundancy);
+        const targetType = normalizedTypes.get(edge.to) ?? "";
 
-        if (propagatedImpact < significanceThreshold) continue;
+        // Type-specific propagation factor (how well this node type conducts failure)
+        const typePropFactor = TYPE_PROPAGATION_FACTOR[targetType] ?? 1;
+
+        // Cross-type coupling modifier (how strongly these two types are coupled)
+        const couplingKey = `${sourceType}→${targetType}`;
+        const crossTypeCoupling = CROSS_TYPE_COUPLING[couplingKey] ?? 1;
+
+        // Type-specific significance floor
+        const typeFloor = TYPE_SIGNIFICANCE_FLOOR[targetType] ?? significanceThreshold;
+        const effectiveThreshold = Math.min(significanceThreshold, typeFloor);
+
+        // Impact attenuated by edge strength, redundancy, AND type-specific factors
+        const propagatedImpact = current.score * edge.strength * (1 - edge.redundancy)
+          * (1 - targetNode.redundancy) * typePropFactor * crossTypeCoupling;
+
+        if (propagatedImpact < effectiveThreshold) continue;
 
         visited.add(edge.to);
         const path = [...current.path, edge.to];
@@ -245,7 +332,14 @@ function simulateCascade(
   impacts.sort((a, b) => b.impactScore - a.impactScore);
   const totalImpact = round(impacts.reduce((s, i) => s + i.impactScore, 0), 2);
 
-  return { impactedNodes: impacts, totalImpact, maxDepthReached, cascadeChain };
+  // Type breakdown: count impacted nodes per node type
+  const typeBreakdown: Record<string, number> = {};
+  for (const imp of impacts) {
+    const nt = normalizeNodeType(imp.nodeType);
+    typeBreakdown[nt] = (typeBreakdown[nt] ?? 0) + 1;
+  }
+
+  return { impactedNodes: impacts, totalImpact, maxDepthReached, cascadeChain, typeBreakdown };
 }
 
 // ── Supply Chain Mapping ─────────────────────────────────────────

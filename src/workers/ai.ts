@@ -114,8 +114,13 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const { skillId, args, message, id: taskId } = data.params ?? {};
   const text: string = message?.parts?.[0]?.text ?? "";
   const sid = skillId ?? "ask_claude";
-  const result = await handleSkill(sid, args ?? { prompt: text }, text);
-  const resultText = typeof result === "string" ? result : safeStringify(result, 2);
+  let resultText: string;
+  try {
+    const result = await handleSkill(sid, args ?? { prompt: text }, text);
+    resultText = typeof result === "string" ? result : safeStringify(result, 2);
+  } catch (err) {
+    resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+  }
   return buildA2AResponse(data.id, taskId, resultText);
 });
 

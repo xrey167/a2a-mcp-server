@@ -84,16 +84,19 @@ export class CircuitBreaker {
       }
     }
 
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
         fn(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Circuit breaker timeout (${this.options.callTimeoutMs}ms)`)), this.options.callTimeoutMs)
-        ),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Circuit breaker timeout (${this.options.callTimeoutMs}ms)`)), this.options.callTimeoutMs);
+        }),
       ]);
+      clearTimeout(timer);
       this.onSuccess();
       return result;
     } catch (err) {
+      clearTimeout(timer);
       this.onFailure();
       throw err;
     }
