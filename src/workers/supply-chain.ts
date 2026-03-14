@@ -1302,7 +1302,7 @@ async function handleExecuteInterventions(args: Record<string, unknown>): Promis
         : new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
 
       const plannedOrder: PlannedOrder = {
-        id: `EXEC-${intervention.id.toUpperCase()}`,
+        id: `EXEC-${intervention.id}`,
         itemNo: comp,
         itemName: compName,
         quantity: targetQty,
