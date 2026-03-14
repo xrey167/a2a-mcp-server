@@ -154,7 +154,7 @@ const ConfigSchema = z.object({
   timeouts: TimeoutsConfigSchema.optional(),
   web: WebConfigSchema.optional(),
   /** Worker profile preset: "full" (all), "lite" (shell+web+ai), "data" (shell+web+ai+data) */
-  profile: z.enum(["full", "lite", "data"]).optional(),
+  profile: z.enum(["full", "lite", "data", "osint"]).optional(),
   /** A2A federation — connect to external A2A agents */
   federation: FederationConfigSchema.optional(),
   /** Output filter settings (RTK-style token reduction) */
@@ -205,8 +205,8 @@ function applyDefaults(raw: z.infer<typeof ConfigSchema>): Config {
 
 /** Map profile names to worker enabled/disabled configs */
 function applyProfile(profile: string): z.infer<typeof WorkerConfigSchema>[] {
-  const all = ["shell", "web", "ai", "code", "knowledge", "design", "factory", "data"];
-  const ports: Record<string, number> = { shell: 8081, web: 8082, ai: 8083, code: 8084, knowledge: 8085, design: 8086, factory: 8087, data: 8088 };
+  const all = ["shell", "web", "ai", "code", "knowledge", "design", "factory", "data", "news", "market", "signal", "monitor", "infra", "climate"];
+  const ports: Record<string, number> = { shell: 8081, web: 8082, ai: 8083, code: 8084, knowledge: 8085, design: 8086, factory: 8087, data: 8088, news: 8089, market: 8090, signal: 8091, monitor: 8092, infra: 8093, climate: 8094 };
 
   let enabled: Set<string>;
   switch (profile) {
@@ -215,6 +215,9 @@ function applyProfile(profile: string): z.infer<typeof WorkerConfigSchema>[] {
       break;
     case "data":
       enabled = new Set(["shell", "web", "ai", "data"]);
+      break;
+    case "osint":
+      enabled = new Set(["shell", "web", "ai", "news", "market", "signal", "monitor", "infra", "climate"]);
       break;
     case "full":
     default:

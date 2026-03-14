@@ -17,7 +17,7 @@ ENV OBSIDIAN_VAULT=/data/knowledge
 USER bun
 
 # Expose orchestrator + all worker ports
-EXPOSE 8080 8081 8082 8083 8084 8085 8086 8087 8088
+EXPOSE 8080 8081 8082 8083 8084 8085 8086 8087 8088 8089 8090 8091 8092 8093 8094
 
 # Start the orchestrator (spawns all workers)
 CMD ["bun", "src/server.ts"]

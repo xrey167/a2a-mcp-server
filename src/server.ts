@@ -52,6 +52,20 @@ import { recordTokenSaving, getTokenStats } from "./token-tracker.js";
 import { teeOutput, readTee, pruneTeeFiles, listTeeFiles } from "./tee.js";
 import { getAgencyProductSummary, getAgencyRoiSnapshot, getAgencyWorkflowTemplates } from "./agency-product.js";
 import {
+  OsintBriefInputSchema,
+  OsintAlertScanInputSchema,
+  OsintThreatAssessInputSchema,
+  OsintMarketSnapshotInputSchema,
+  OsintFreshnessInputSchema,
+  buildOsintBriefWorkflow,
+  buildAlertScanWorkflow,
+  buildThreatAssessWorkflow,
+  buildMarketSnapshotWorkflow,
+  buildFreshnessReport,
+  getOsintDashboard,
+  getOsintWorkflowTemplates,
+} from "./osint-intel.js";
+import {
   buildOnboardingReport,
   buildConnectorRenewalSnapshot,
   captureOnboardingSnapshot,
@@ -176,6 +190,9 @@ const WEBHOOK_BLOCKED_SKILLS = new Set([
   "search_files",
   "query_sqlite",
   "workflow_execute",
+  // OSINT skills that accept user-supplied URLs (SSRF prevention)
+  "fetch_rss",
+  "aggregate_feeds",
 ]);
 
 function sanitizeUrlForLog(url: string): string {
@@ -203,6 +220,13 @@ const ALL_WORKERS = [
   { name: "design",    path: join(__dirname, "workers/design.ts"),    port: 8086 },
   { name: "factory",   path: join(__dirname, "workers/factory.ts"),   port: 8087 },
   { name: "data",      path: join(__dirname, "workers/data.ts"),      port: 8088 },
+  { name: "news",      path: join(__dirname, "workers/news.ts"),      port: 8089 },
+  { name: "market",    path: join(__dirname, "workers/market.ts"),    port: 8090 },
+  { name: "signal",    path: join(__dirname, "workers/signal.ts"),    port: 8091 },
+  { name: "monitor",   path: join(__dirname, "workers/monitor.ts"),   port: 8092 },
+  { name: "infra",     path: join(__dirname, "workers/infra.ts"),     port: 8093 },
+  { name: "climate",   path: join(__dirname, "workers/climate.ts"),   port: 8094 },
+  { name: "supply-chain", path: join(__dirname, "workers/supply-chain.ts"), port: 8095 },
 ];
 
 // Apply config: filter by enabled workers and override ports
@@ -950,6 +974,12 @@ const OrchestratorSchemas = {
   erp_customer360_timeline: Customer360TimelineInputSchema,
   erp_customer360_segments: Customer360SegmentsInputSchema,
   erp_customer360_churn_risk: Customer360ChurnRiskInputSchema,
+  // ── OSINT orchestrator schemas ───────────────────────────────
+  osint_brief: OsintBriefInputSchema,
+  osint_alert_scan: OsintAlertScanInputSchema,
+  osint_threat_assess: OsintThreatAssessInputSchema,
+  osint_market_snapshot: OsintMarketSnapshotInputSchema,
+  osint_freshness: OsintFreshnessInputSchema,
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -1828,6 +1858,107 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           throw new Error(`Unknown workspace action: ${action}`);
       }
     }
+
+    // ── OSINT orchestrator tools ────────────────────────────────
+    case "osint_brief": {
+      const opts = validateOrchestrator("osint_brief", args);
+      const workflow = buildOsintBriefWorkflow(opts);
+      const task = createTask({ skillId: "osint_brief" });
+      markWorking(task.id);
+
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "OSINT_BRIEF_ERROR", message: msg }); } catch {}
+        }
+      })();
+
+      return JSON.stringify({ status: "accepted", taskId: task.id, workflow: workflow.name }, null, 2);
+    }
+
+    case "osint_alert_scan": {
+      const opts = validateOrchestrator("osint_alert_scan", args);
+      const workflow = buildAlertScanWorkflow(opts);
+      const task = createTask({ skillId: "osint_alert_scan" });
+      markWorking(task.id);
+
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "OSINT_ALERT_SCAN_ERROR", message: msg }); } catch {}
+        }
+      })();
+
+      return JSON.stringify({ status: "accepted", taskId: task.id, severityThreshold: opts.severityThreshold }, null, 2);
+    }
+
+    case "osint_threat_assess": {
+      const opts = validateOrchestrator("osint_threat_assess", args);
+      const workflow = buildThreatAssessWorkflow(opts);
+      const task = createTask({ skillId: "osint_threat_assess" });
+      markWorking(task.id);
+
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "OSINT_THREAT_ASSESS_ERROR", message: msg }); } catch {}
+        }
+      })();
+
+      return JSON.stringify({ status: "accepted", taskId: task.id, region: opts.region }, null, 2);
+    }
+
+    case "osint_market_snapshot": {
+      const opts = validateOrchestrator("osint_market_snapshot", args);
+      const workflow = buildMarketSnapshotWorkflow(opts);
+      const task = createTask({ skillId: "osint_market_snapshot" });
+      markWorking(task.id);
+
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "OSINT_MARKET_SNAPSHOT_ERROR", message: msg }); } catch {}
+        }
+      })();
+
+      return JSON.stringify({ status: "accepted", taskId: task.id, symbols: opts.symbols }, null, 2);
+    }
+
+    case "osint_freshness": {
+      const opts = validateOrchestrator("osint_freshness", args);
+      return JSON.stringify(buildFreshnessReport(opts), null, 2);
+    }
+
+    case "osint_workflow_templates":
+      return JSON.stringify(getOsintWorkflowTemplates(), null, 2);
 
     default: {
       // Plugin skills (hot-loaded from src/plugins/)
@@ -3097,6 +3228,72 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         },
       },
     },
+    // ── OSINT Orchestrator Tools ──────────────────────────────────
+    {
+      name: "osint_brief",
+      description: "Generate a multi-source OSINT intelligence brief by orchestrating news, market, signal, monitor, infra, and climate workers. Returns taskId (async).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          region: { type: "string", description: "ISO country code or region name to focus on" },
+          since: { type: "string", description: "ISO timestamp lower bound for data window" },
+          sources: { type: "array", items: { type: "string", enum: ["news", "market", "signal", "monitor", "infra", "climate"] }, description: "Which OSINT sources to include (default: all)" },
+        },
+      },
+    },
+    {
+      name: "osint_alert_scan",
+      description: "Scan all OSINT sources for alerts exceeding a severity threshold. Aggregates signals, classifies threats, checks data freshness, and tracks conflicts. Returns taskId (async).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          severityThreshold: { type: "string", enum: ["critical", "high", "medium", "low"], description: "Minimum severity to alert on (default: high)" },
+          region: { type: "string", description: "ISO country code or region filter" },
+          since: { type: "string", description: "ISO timestamp lower bound" },
+        },
+      },
+    },
+    {
+      name: "osint_threat_assess",
+      description: "Regional threat assessment combining signal convergence, conflict tracking, instability index, military surges, infrastructure cascades, and climate hazards. Returns taskId (async).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          region: { type: "string", description: "ISO country code or region name (required)" },
+          includeClimate: { type: "boolean", description: "Include climate hazards (default: true)" },
+          includeInfra: { type: "boolean", description: "Include infrastructure risk (default: true)" },
+        },
+        required: ["region"],
+      },
+    },
+    {
+      name: "osint_market_snapshot",
+      description: "Market intelligence snapshot: fetch quotes, detect anomalies, and compute correlation matrix for a list of symbols. Returns taskId (async).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          symbols: { type: "array", items: { type: "string" }, description: "List of ticker symbols to analyze (required)" },
+          detectAnomalies: { type: "boolean", description: "Run anomaly detection (default: true)" },
+        },
+        required: ["symbols"],
+      },
+    },
+    {
+      name: "osint_freshness",
+      description: "Check OSINT data source freshness across all feeds. Returns fresh/stale/very_stale status per source with essential-source alerts.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          sources: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, lastUpdated: { type: "string" }, essential: { type: "boolean" } }, required: ["id", "name", "lastUpdated"] }, description: "Custom data sources to check (default: all OSINT sources)" },
+          maxStaleMinutes: { type: "number", description: "Minutes before a source is considered stale (default: 60)" },
+        },
+      },
+    },
+    {
+      name: "osint_workflow_templates",
+      description: "Return OSINT workflow templates (intelligence-gather, regional-monitor, supply-chain-risk) with ready-to-adapt workflow_execute definitions.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
     // ── License / Tier Info ───────────────────────────────────────
     {
       name: "license_info",
@@ -3152,6 +3349,8 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
     { uri: "a2a://workspaces", name: "Workspaces", description: "Team workspaces and members", mimeType: "application/json" },
     { uri: "a2a://agency-workflows", name: "Agency Workflows", description: "Packaged agency templates for reporting, approval, and handoff", mimeType: "application/json" },
     { uri: "a2a://agency-roi", name: "Agency ROI", description: "Agency KPI snapshot for pilot performance and ROI", mimeType: "application/json" },
+    { uri: "a2a://osint/dashboard", name: "OSINT Dashboard", description: "OSINT KPI snapshot: data freshness, worker status, available tools", mimeType: "application/json" },
+    { uri: "a2a://osint/workflows", name: "OSINT Workflows", description: "OSINT workflow templates for intelligence gathering, regional monitoring, and supply chain risk", mimeType: "application/json" },
     { uri: "a2a://connectors", name: "ERP Connectors", description: "Connector health and auth status for Odoo, Business Central, and Dynamics", mimeType: "application/json" },
     { uri: "a2a://connectors-kpis", name: "ERP Connector KPIs", description: "Connector reliability and renewal KPI snapshot", mimeType: "application/json" },
     { uri: "a2a://connector-renewals", name: "ERP Connector Renewals", description: "Recent connector renewal incidents (success/failure feed)", mimeType: "application/json" },
@@ -3253,6 +3452,26 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     };
   }
 
+  if (uri === "a2a://osint/dashboard") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(getOsintDashboard(), null, 2),
+      }],
+    };
+  }
+
+  if (uri === "a2a://osint/workflows") {
+    return {
+      contents: [{
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(getOsintWorkflowTemplates(), null, 2),
+      }],
+    };
+  }
+
   if (uri === "a2a://connectors") {
     return {
       contents: [{
@@ -3296,7 +3515,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 // ── MCP Prompts ─────────────────────────────────────────────────
 
-const ALLOWED_PERSONAS = new Set(["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent", "factory-agent"]);
+const ALLOWED_PERSONAS = new Set(["orchestrator", "shell-agent", "web-agent", "ai-agent", "code-agent", "knowledge-agent", "design-agent", "factory-agent", "data-agent", "news-agent", "market-agent", "signal-agent", "monitor-agent", "infra-agent", "climate-agent"]);
 
 server.setRequestHandler(ListPromptsRequestSchema, async () => {
   const prompts: Array<{ name: string; description: string; arguments?: Array<{ name: string; description: string; required?: boolean }> }> = [];

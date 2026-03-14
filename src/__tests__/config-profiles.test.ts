@@ -44,7 +44,7 @@ describe("Config profiles and remote workers", () => {
     const disabled = config.workers!.filter(w => !w.enabled);
     expect(enabled.length).toBe(3);
     expect(enabled.map(w => w.name).sort()).toEqual(["ai", "shell", "web"]);
-    expect(disabled.length).toBe(5);
+    expect(disabled.length).toBe(11);
   });
 
   test("data profile produces 4 enabled workers", () => {
@@ -58,14 +58,27 @@ describe("Config profiles and remote workers", () => {
     expect(enabled.map(w => w.name).sort()).toEqual(["ai", "data", "shell", "web"]);
   });
 
-  test("full profile enables all 8 workers", () => {
+  test("osint profile produces 9 enabled workers", () => {
+    const configDir = join(testHome, ".a2a-mcp");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "config.json"), JSON.stringify({ profile: "osint" }));
+
+    const config = loadConfig();
+    const enabled = config.workers!.filter(w => w.enabled);
+    const disabled = config.workers!.filter(w => !w.enabled);
+    expect(enabled.length).toBe(9);
+    expect(enabled.map(w => w.name).sort()).toEqual(["ai", "climate", "infra", "market", "monitor", "news", "shell", "signal", "web"]);
+    expect(disabled.length).toBe(5);
+  });
+
+  test("full profile enables all 14 workers", () => {
     const configDir = join(testHome, ".a2a-mcp");
     mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, "config.json"), JSON.stringify({ profile: "full" }));
 
     const config = loadConfig();
     const enabled = config.workers!.filter(w => w.enabled);
-    expect(enabled.length).toBe(8);
+    expect(enabled.length).toBe(14);
   });
 
   test("explicit workers config takes priority over profile", () => {

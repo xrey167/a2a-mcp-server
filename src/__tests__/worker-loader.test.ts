@@ -43,7 +43,7 @@ describe("worker-loader", () => {
     expect(workers.length).toBe(1);
     expect(workers[0].name).toBe("my-tool");
     expect(workers[0].path).toContain("my-tool/index.ts");
-    expect(workers[0].port).toBeGreaterThanOrEqual(8090);
+    expect(workers[0].port).toBeGreaterThanOrEqual(8095);
   });
 
   test("discoverUserWorkers respects worker.json port", () => {

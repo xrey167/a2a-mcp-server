@@ -12,8 +12,8 @@ export interface UserWorker {
   port: number;
 }
 
-// User workers start at port 8090 to avoid clashing with built-in workers (8081-8088)
-const USER_PORT_BASE = 8090;
+// User workers start at port 8095 to avoid clashing with built-in workers (8081-8094)
+const USER_PORT_BASE = 8095;
 
 function getWorkersDirectory(): string {
   return join(process.env.HOME ?? homedir(), ".a2a-mcp", "workers");
@@ -22,7 +22,7 @@ function getWorkersDirectory(): string {
 /**
  * Scan ~/.a2a-mcp/workers/ for user-defined worker directories.
  * Each directory must contain an index.ts that exports a Fastify server.
- * Port is assigned automatically starting from 8090 (or read from worker.json).
+ * Port is assigned automatically starting from 8095 (or read from worker.json).
  */
 export function discoverUserWorkers(): UserWorker[] {
   if (!existsSync(getWorkersDirectory())) return [];

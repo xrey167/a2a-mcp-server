@@ -69,6 +69,13 @@ const config: CacheConfig = {
     ["ask_claude", 15 * 60_000],     // 15 min for LLM responses
     ["search_files", 2 * 60_000],    // 2 min for file search
     ["list_notes", 1 * 60_000],      // 1 min for note listing
+    // OSINT workers — short TTLs for live external data
+    ["fetch_rss", 3 * 60_000],            // 3 min for RSS feeds
+    ["fetch_quote", 1 * 60_000],          // 1 min for market quotes
+    ["price_history", 5 * 60_000],        // 5 min for historical prices
+    ["fetch_earthquakes", 2 * 60_000],    // 2 min for USGS data
+    ["fetch_wildfires", 3 * 60_000],      // 3 min for FIRMS data
+    ["fetch_natural_events", 5 * 60_000], // 5 min for EONET
   ]),
   noCacheSkills: new Set([
     "run_shell",       // side effects
