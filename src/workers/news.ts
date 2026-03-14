@@ -69,7 +69,85 @@ const NewsSchemas = {
     baselineHours: z.number().positive().optional().default(24),
     spikeMultiplier: z.number().positive().optional().default(3),
   }).passthrough(),
+
+  regulatory_scan: z.object({
+    categories: z.array(z.enum(["supply_chain", "sustainability", "data", "automotive", "trade"])).optional(),
+    maxResults: z.number().int().positive().optional().default(50),
+  }).passthrough(),
 };
+
+// ── Regulatory Monitoring ───────────────────────────────────────
+
+const REGULATORY_FEEDS = [
+  "https://eur-lex.europa.eu/EN/display-feed.rss",
+  ...(process.env.REGULATORY_RSS_FEEDS?.split(",").filter(Boolean) ?? []),
+];
+
+const REGULATORY_KEYWORDS: Record<string, string[]> = {
+  supply_chain: ["Lieferkettengesetz", "LkSG", "supply chain due diligence", "CSDDD", "forced labor", "conflict minerals"],
+  sustainability: ["CSRD", "ESG", "carbon border", "CBAM", "taxonomy", "green deal", "sustainability reporting", "climate disclosure"],
+  data: ["DSGVO", "GDPR", "AI Act", "Data Act", "data governance", "digital services act"],
+  automotive: ["Euro 7", "battery regulation", "ELV", "type approval", "UNECE", "autonomous driving", "vehicle safety"],
+  trade: ["sanctions", "export control", "tariff", "customs", "trade agreement", "trade war", "embargo"],
+};
+
+interface RegulatoryAlert {
+  title: string;
+  source: string;
+  publishDate: string;
+  category: string;
+  keywords: string[];
+  impactLevel: "critical" | "high" | "medium" | "low";
+  summary: string;
+  url: string;
+  affectedAreas: string[];
+}
+
+function classifyRegulatoryArticle(article: Article, categories?: string[]): RegulatoryAlert | null {
+  const text = `${article.title} ${article.description}`.toLowerCase();
+  const matchedKeywords: string[] = [];
+  let matchedCategory = "";
+
+  const categoriesToCheck = categories ?? Object.keys(REGULATORY_KEYWORDS);
+
+  for (const cat of categoriesToCheck) {
+    const keywords = REGULATORY_KEYWORDS[cat] ?? [];
+    for (const kw of keywords) {
+      if (text.includes(kw.toLowerCase())) {
+        matchedKeywords.push(kw);
+        if (!matchedCategory) matchedCategory = cat;
+      }
+    }
+  }
+
+  if (matchedKeywords.length === 0) return null;
+
+  // Impact level based on keyword density
+  const impactLevel: RegulatoryAlert["impactLevel"] =
+    matchedKeywords.length >= 3 ? "critical"
+      : matchedKeywords.length >= 2 ? "high"
+        : text.includes("regulation") || text.includes("directive") || text.includes("verordnung")
+          ? "medium" : "low";
+
+  const affectedAreas: string[] = [];
+  if (matchedCategory === "supply_chain") affectedAreas.push("procurement", "compliance");
+  if (matchedCategory === "sustainability") affectedAreas.push("compliance", "reporting", "production");
+  if (matchedCategory === "data") affectedAreas.push("IT", "compliance", "legal");
+  if (matchedCategory === "automotive") affectedAreas.push("engineering", "production", "compliance");
+  if (matchedCategory === "trade") affectedAreas.push("procurement", "logistics", "legal");
+
+  return {
+    title: article.title,
+    source: article.source,
+    publishDate: article.pubDate,
+    category: matchedCategory,
+    keywords: matchedKeywords,
+    impactLevel,
+    summary: article.description.slice(0, 300),
+    url: article.link,
+    affectedAreas,
+  };
+}
 
 // ── Agent Card ───────────────────────────────────────────────────
 
@@ -85,6 +163,7 @@ const AGENT_CARD = {
     { id: "classify_news", name: "Classify News", description: "Classify articles by category (conflict, economic, tech, etc.) and importance level" },
     { id: "cluster_news", name: "Cluster News", description: "Group similar articles into clusters using Jaccard text similarity" },
     { id: "detect_signals", name: "Detect Signals", description: "Detect anomalous patterns: topic velocity spikes, emerging stories, source concentration" },
+    { id: "regulatory_scan", name: "Regulatory Scan", description: "Scan regulatory RSS feeds for changes in supply chain, ESG, automotive, data, and trade regulations. Returns classified alerts with impact levels." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -560,6 +639,45 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         totalArticles: articles.length,
         signalCount: result.signals.length,
         ...result,
+      }, 2);
+    }
+
+    case "regulatory_scan": {
+      const { categories, maxResults } = NewsSchemas.regulatory_scan.parse(args);
+      // Fetch all regulatory feeds
+      const allArticles: Article[] = [];
+      for (const feedUrl of REGULATORY_FEEDS) {
+        try {
+          const resp = await fetch(feedUrl, { signal: AbortSignal.timeout(10000) });
+          if (resp.ok) {
+            const xml = await resp.text();
+            const articles = parseRSS(xml, feedUrl);
+            allArticles.push(...articles);
+          }
+        } catch {
+          // Feed unavailable — skip silently
+        }
+      }
+      // Also classify any articles passed via args
+      if (args.articles && Array.isArray(args.articles)) {
+        for (const a of args.articles as Article[]) {
+          allArticles.push(a);
+        }
+      }
+      // Classify all articles for regulatory relevance
+      const alerts: RegulatoryAlert[] = [];
+      for (const article of allArticles) {
+        const alert = classifyRegulatoryArticle(article, categories);
+        if (alert) alerts.push(alert);
+      }
+      // Sort by impact level
+      const impactOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+      alerts.sort((a, b) => impactOrder[a.impactLevel] - impactOrder[b.impactLevel]);
+      return safeStringify({
+        totalScanned: allArticles.length,
+        alertCount: alerts.length,
+        alerts: alerts.slice(0, maxResults),
+        categories: categories ?? Object.keys(REGULATORY_KEYWORDS),
       }, 2);
     }
 

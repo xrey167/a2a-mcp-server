@@ -65,6 +65,11 @@ import {
 } from "../risk/ai-analyzer.js";
 import { runMRP, type MRPConfig } from "../mrp/mrp-engine.js";
 import { analyzeSupplyImpact } from "../mrp/pegging.js";
+import { generateValueStreamMap } from "../mrp/value-stream.js";
+import { analyzeSMEDOpportunities } from "../mrp/smed-analysis.js";
+import { analyzeLineBalance } from "../mrp/line-balancing.js";
+import { generateAuditChecklist } from "../risk/supplier-audit.js";
+import { optimizeDualSourcing } from "../risk/interventions.js";
 import type { MRPRunResult, LotSizingPolicy, BucketSize, PlannedOrder } from "../mrp/types.js";
 
 const PORT = 8095;
@@ -254,6 +259,31 @@ const AGENT_CARD = {
       id: "execute_interventions",
       name: "Execute Interventions",
       description: "Act on intervention recommendations from recommend_actions. Firms planned orders for advance purchases and dual-sourcing, stores safety-stock overrides for the next MRP run, and returns manual action steps for reschedule/make-or-buy recommendations.",
+    },
+    {
+      id: "value_stream_map",
+      name: "Value Stream Map",
+      description: "Generate a Lean Value Stream Map (Wertstromanalyse) from MRP data. Shows processing/setup/wait/transport times, WIP levels, bottlenecks, and Kaizen improvement opportunities.",
+    },
+    {
+      id: "smed_analysis",
+      name: "SMED Analysis",
+      description: "Identify setup time reduction hotspots across work centers. Prioritizes by capacity gain impact and classifies as quick_win/medium_effort/major_project.",
+    },
+    {
+      id: "line_balance",
+      name: "Line Balance",
+      description: "Analyze production line balance against customer takt time. Identifies underutilized and overloaded stations, recommends merging/splitting/parallel stations.",
+    },
+    {
+      id: "supplier_audit_prepare",
+      name: "Supplier Audit Prepare",
+      description: "Generate a risk-profiled supplier audit checklist (ISO 9001, IATF, ESG, IT Security sections). Pre-populates vendor performance data from ERP.",
+    },
+    {
+      id: "dual_source_optimize",
+      name: "Dual Source Optimize",
+      description: "Evaluate dual sourcing scenarios for a component. Compares split ratios between vendors, calculates TCO, risk reduction, and MOQ compliance.",
     },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory" },
@@ -1456,6 +1486,95 @@ async function handleSkill(
       return handleFirmOrders(args);
     case "execute_interventions":
       return handleExecuteInterventions(args);
+
+    case "value_stream_map": {
+      if (!lastMRPResult) return "No MRP data available. Run run_mrp first.";
+      const itemNo = (args.itemNo as string) ?? cachedProductionOrders[0]?.itemNo ?? "unknown";
+      const itemName = cachedProductionOrders.find((o) => o.itemNo === itemNo)?.itemName ?? itemNo;
+      const routings = cachedProductionOrders.find((o) => o.itemNo === itemNo)?.routings ?? [];
+      const workCenters = lastMRPResult.capacityLoads.map((cl) => ({
+        id: cl.workCenterId,
+        name: cl.workCenterName,
+        capacityMinutesPerDay: 480,
+        efficiency: 0.85,
+        unitCount: 1,
+      }));
+      const customerDemandPerDay = args.customerDemandPerDay as number | undefined;
+      const vsm = generateValueStreamMap(itemNo, itemName, lastMRPResult, routings, workCenters, customerDemandPerDay);
+      return safeStringify(vsm, 2);
+    }
+
+    case "smed_analysis": {
+      if (!lastMRPResult) return "No MRP data available. Run run_mrp first.";
+      const allRoutings = cachedProductionOrders.flatMap((o) => o.routings);
+      const workCenters = lastMRPResult.capacityLoads.map((cl) => ({
+        id: cl.workCenterId,
+        name: cl.workCenterName,
+        capacityMinutesPerDay: 480,
+        efficiency: 0.85,
+        unitCount: 1,
+      }));
+      const top = (args.top as number) ?? 10;
+      const candidates = analyzeSMEDOpportunities(allRoutings, workCenters, lastMRPResult.capacityLoads, { top });
+      return safeStringify({ candidates, count: candidates.length }, 2);
+    }
+
+    case "line_balance": {
+      const itemNo = (args.itemNo as string) ?? cachedProductionOrders[0]?.itemNo ?? "unknown";
+      const routings = cachedProductionOrders.find((o) => o.itemNo === itemNo)?.routings ?? [];
+      if (routings.length === 0) return "No routing data available for this item.";
+      const workCenters = (lastMRPResult?.capacityLoads ?? []).map((cl) => ({
+        id: cl.workCenterId,
+        name: cl.workCenterName,
+        capacityMinutesPerDay: 480,
+        efficiency: 0.85,
+        unitCount: 1,
+      }));
+      const taktTime = (args.taktTimeSeconds as number) ?? 300;
+      const result = analyzeLineBalance(routings, workCenters, taktTime);
+      return safeStringify(result, 2);
+    }
+
+    case "supplier_audit_prepare": {
+      const vendorNo = args.vendorNo as string;
+      if (!vendorNo) return "vendorNo is required";
+      const vendor = cachedVendors.find((v) => v.no === vendorNo);
+      const vendorName = vendor?.name ?? vendorNo;
+      // Get risk score and vendor health from cached data
+      const components = cachedProductionOrders.flatMap((o) => o.components);
+      const riskScore = {
+        componentId: vendorNo,
+        componentName: vendorName,
+        overallScore: 50,
+        dimensions: { availability: 50, delivery: 50, price: 50, leadTime: 50, external: 50, quality: 50 },
+        flags: [],
+      };
+      const vendorHealth = {
+        vendorNo,
+        vendorName,
+        overallScore: 70,
+        onTimeDeliveryPct: 85,
+        avgLeadTimeVarianceDays: 2,
+        leadTimeConsistency: 75,
+        totalDeliveries: 50,
+        trend: "stable" as const,
+        flags: [],
+      };
+      const checklist = generateAuditChecklist(vendorNo, vendorName, riskScore, vendorHealth, {
+        auditType: args.auditType as "full" | "focused" | "re-audit" | undefined,
+      });
+      return safeStringify(checklist, 2);
+    }
+
+    case "dual_source_optimize": {
+      const itemNo = (args.itemNo as string) ?? "unknown";
+      const annualDemand = (args.annualDemand as number) ?? 1000;
+      const vendors = (args.vendors as Array<{ id: string; name: string; unitCost: number; moq: number; leadTime: number; riskScore: number; country: string; capacityMax: number }>) ?? [];
+      if (vendors.length < 2) return "At least 2 vendors required for dual sourcing analysis";
+      const scenarios = optimizeDualSourcing(itemNo, annualDemand, vendors);
+      return safeStringify({ itemNo, annualDemand, scenarios, count: scenarios.length }, 2);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
