@@ -168,7 +168,7 @@ env -u CLAUDECODE claude -p \
 curl http://localhost:8080/healthz
 ```
 
-Returns `{"status":"ok"}` if the server is alive.
+Returns `{"status":"alive","timestamp":"2024-01-01T00:00:00.000Z"}` if the server is alive.
 
 ### Check Readiness
 ```bash
@@ -335,7 +335,7 @@ This creates `~/.a2a-mcp/workers/my-tool/` containing:
 User-space workers are auto-discovered on server startup — no changes to `src/server.ts` needed. The worker must:
 - Export an `AGENT_CARD` with `skills[]` at `GET /.well-known/agent.json`
 - Serve a health check at `GET /healthz`
-- Handle A2A tasks at `POST /a2a` (JSON-RPC 2.0 format)
+- Handle A2A tasks at `POST /` (JSON-RPC 2.0 `tasks/send` method)
 - Send all logs to **stderr only** (stdout must be silent)
 
 To add a **built-in** worker instead (checked into the repo):
@@ -431,9 +431,10 @@ Variables persist per session in SQLite (`~/.a2a-sandbox.db`). Larger results (>
    lsof -i :8081
    ```
 
-2. Check stderr for retry messages:
+2. Check stderr for retry messages (the server logs exclusively to stderr — no log file is written by default). Redirect stderr when starting, then tail the file:
    ```bash
-   tail -f ~/.a2a-mcp/logs/server.log
+   bun src/server.ts 2>~/.a2a-mcp/server.log
+   tail -f ~/.a2a-mcp/server.log
    ```
 
 3. Verify the worker is enabled in config:
@@ -615,9 +616,8 @@ services:
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
-      A2A_PROFILE: lite
     volumes:
-      - ~/.a2a-mcp:/root/.a2a-mcp
+      - ~/.a2a-mcp:/root/.a2a-mcp   # set "profile": "lite" in ~/.a2a-mcp/config.json to restrict workers
       - ~/.a2a-sandbox.db:/root/.a2a-sandbox.db
 ```
 
