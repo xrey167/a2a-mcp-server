@@ -171,6 +171,11 @@ declare module "fastify" {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 
+/** Fire-and-forget publish — logs errors to stderr instead of propagating. */
+function safePublish(topic: string, data: Record<string, unknown>, opts?: Parameters<typeof publish>[2]): void {
+  publish(topic, data, opts).catch((e) => process.stderr.write(`[event-bus] publish failed (${topic}): ${e}\n`));
+}
+
 // Single source of truth for the orchestrator version, used in the MCP server
 // identity, the /.well-known/agent.json card, and the cloud health routes.
 const ORCHESTRATOR_VERSION = "3.0.0";
@@ -513,13 +518,13 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
       // Cache the (filtered) result
       putInCache(params.skillId ?? "", cacheArgs as Record<string, unknown>, res);
       // Publish event
-      publish(`agent.${workerName}.completed`, { skillId: params.skillId, resultLength: res.length }, { source: workerName, correlationId: trace.traceId }).catch(e => process.stderr.write(`[event-bus] publish error: ${e}\n`));
+      safePublish(`agent.${workerName}.completed`, { skillId: params.skillId, resultLength: res.length }, { source: workerName, correlationId: trace.traceId });
       return res;
     } catch (err) {
       decrementActive(params.skillId ?? "unknown", workerName);
       endTimer(err instanceof Error ? err.message : String(err));
       span.setTag("error", String(err)).end("error");
-      publish(`agent.${workerName}.failed`, { skillId: params.skillId, error: String(err) }, { source: workerName, correlationId: trace.traceId }).catch(e => process.stderr.write(`[event-bus] publish error: ${e}\n`));
+      safePublish(`agent.${workerName}.failed`, { skillId: params.skillId, error: String(err) }, { source: workerName, correlationId: trace.traceId });
       throw err;
     }
   }
@@ -1324,11 +1329,11 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             (msg) => emitProgress(task.id, msg),
           );
           wfTrace.end("ok");
-          publish("workflow.completed", { workflowId: workflow.id, taskId: task.id, stepCount: result.steps?.length ?? 0 }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.completed", { workflowId: workflow.id, taskId: task.id, stepCount: result.steps?.length ?? 0 });
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           wfTrace.end("error");
-          publish("workflow.failed", { workflowId: workflow.id, taskId: task.id, error: String(err) }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.failed", { workflowId: workflow.id, taskId: task.id, error: String(err) });
           try { markFailed(task.id, { code: "WORKFLOW_ERROR", message: String(err) }); }
           catch (e) { process.stderr.write(`[orchestrator] workflow markFailed error: ${e}\n`); }
         }
@@ -1689,11 +1694,11 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
         try {
           const result = await executePipeline(pipelineRef, input, (sid, a, t) => dispatchSkill(sid, a, t));
           plTrace.end("ok");
-          publish("pipeline.completed", { pipelineId: result.pipelineId, taskId: task.id, status: result.status }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("pipeline.completed", { pipelineId: result.pipelineId, taskId: task.id, status: result.status });
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           plTrace.end("error");
-          publish("pipeline.failed", { taskId: task.id, error: String(err) }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("pipeline.failed", { taskId: task.id, error: String(err) });
           try { markFailed(task.id, { code: "PIPELINE_ERROR", message: String(err) }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
@@ -1742,11 +1747,11 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             (sid, a, t) => dispatchSkill(sid, a, t),
           );
           collabTrace.end("ok");
-          publish("collaboration.completed", { strategy, taskId: task.id, agentCount: agents.length, agreement: result.agreement }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("collaboration.completed", { strategy, taskId: task.id, agentCount: agents.length, agreement: result.agreement });
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           collabTrace.end("error");
-          publish("collaboration.failed", { strategy, taskId: task.id, error: String(err) }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("collaboration.failed", { strategy, taskId: task.id, error: String(err) });
           try { markFailed(task.id, { code: "COLLABORATION_ERROR", message: String(err) }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
@@ -1955,12 +1960,12 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             (msg) => emitProgress(task.id, msg),
           );
           osintTrace.end("ok");
-          publish("workflow.osint_brief.completed", { taskId: task.id, region: opts.region }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.osint_brief.completed", { taskId: task.id, region: opts.region });
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           osintTrace.end("error");
           const msg = err instanceof Error ? err.message : String(err);
-          publish("workflow.osint_brief.failed", { taskId: task.id, error: msg }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.osint_brief.failed", { taskId: task.id, error: msg });
           try { markFailed(task.id, { code: "OSINT_BRIEF_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
@@ -1983,12 +1988,12 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             (msg) => emitProgress(task.id, msg),
           );
           osintTrace.end("ok");
-          publish("workflow.osint_alert_scan.completed", { taskId: task.id }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.osint_alert_scan.completed", { taskId: task.id });
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           osintTrace.end("error");
           const msg = err instanceof Error ? err.message : String(err);
-          publish("workflow.osint_alert_scan.failed", { taskId: task.id, error: msg }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.osint_alert_scan.failed", { taskId: task.id, error: msg });
           try { markFailed(task.id, { code: "OSINT_ALERT_SCAN_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
@@ -2011,12 +2016,12 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             (msg) => emitProgress(task.id, msg),
           );
           osintTrace.end("ok");
-          publish("workflow.osint_threat_assess.completed", { taskId: task.id, region: opts.region }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.osint_threat_assess.completed", { taskId: task.id, region: opts.region });
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           osintTrace.end("error");
           const msg = err instanceof Error ? err.message : String(err);
-          publish("workflow.osint_threat_assess.failed", { taskId: task.id, region: opts.region, error: msg }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.osint_threat_assess.failed", { taskId: task.id, region: opts.region, error: msg });
           try { markFailed(task.id, { code: "OSINT_THREAT_ASSESS_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
@@ -2039,12 +2044,12 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             (msg) => emitProgress(task.id, msg),
           );
           osintTrace.end("ok");
-          publish("workflow.osint_market_snapshot.completed", { taskId: task.id, symbols: opts.symbols }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.osint_market_snapshot.completed", { taskId: task.id, symbols: opts.symbols });
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           osintTrace.end("error");
           const msg = err instanceof Error ? err.message : String(err);
-          publish("workflow.osint_market_snapshot.failed", { taskId: task.id, error: msg }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+          safePublish("workflow.osint_market_snapshot.failed", { taskId: task.id, error: msg });
           try { markFailed(task.id, { code: "OSINT_MARKET_SNAPSHOT_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
@@ -8798,12 +8803,12 @@ async function main() {
       if (!infraResult) return;
 
       // Publish proximity alert if critical infrastructure is near climate events
-      publish("alert.proximity.detected", {
+      safePublish("alert.proximity.detected", {
         source: "proximity-detector",
         climateEvent: event.data,
         infrastructure: "auto-assessed",
         severity: "medium",
-      }, { source: "orchestrator" }).catch((e) => process.stderr.write(`[event-bus] publish failed: ${e}\n`));
+      }, { source: "orchestrator" });
     } catch (err) {
       process.stderr.write(`[proximity-detector] error: ${err}\n`);
     }
@@ -8812,8 +8817,9 @@ async function main() {
   onShutdown(async () => { stopRenewalScheduler(); stopFollowupWritebackScheduler(); stopSnapshotScheduler(); stopScheduler(); stopAlertRules(); closeAlertRulesDb(); closeNotificationsDb(); flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
 
   // Start periodic health checks (every 30s)
-  pollWorkerHealth().catch((e) => process.stderr.write(`[orchestrator] health poll failed: ${e}\n`));
-  setInterval(() => pollWorkerHealth().catch((e) => process.stderr.write(`[orchestrator] health poll failed: ${e}\n`)), CONFIG.server.healthPollInterval);
+  const pollHealthSafe = () => pollWorkerHealth().catch((e) => process.stderr.write(`[orchestrator] health poll failed: ${e}\n`));
+  pollHealthSafe();
+  setInterval(pollHealthSafe, CONFIG.server.healthPollInterval);
 
   // Prune stale tee files at startup and every hour
   const teeMaxAgeMs = (CONFIG.outputFilter?.teeMaxAgeMins ?? 1440) * 60 * 1000;
