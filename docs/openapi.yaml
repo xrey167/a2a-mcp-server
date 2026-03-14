@@ -1,0 +1,550 @@
+openapi: 3.1.0
+
+info:
+  title: a2a-mcp-server
+  version: 3.0.0
+  description: |
+    A2A MCP Server — MCP + A2A orchestrator that spawns local worker agents and routes
+    skills between them. Two protocol surfaces are exposed:
+
+    1. **MCP (stdio)** — consumed by Claude Code via `claude mcp add`. All tool calls use
+       JSON-RPC over stdin/stdout.
+    2. **A2A HTTP (port 8080)** — JSON-RPC 2.0 over HTTP. Workers expose the same protocol
+       on their own ports (8081–8095).
+
+    ## Authentication
+
+    **Remote callers (non-loopback):** Send `Authorization: Bearer <A2A_API_KEY>` or a
+    key generated with `createApiKey` (prefix `a2a_k_`).
+
+    **Loopback:** Always trusted; no header required.
+
+    **RBAC roles:** `admin` (all), `operator` (most), `viewer` (read-only).
+
+  contact:
+    name: a2a-mcp-server
+    url: https://github.com/xrey167/a2a-mcp-server
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Orchestrator (MCP + A2A)
+  - url: http://localhost:8081
+    description: Shell worker
+  - url: http://localhost:8082
+    description: Web worker
+  - url: http://localhost:8083
+    description: AI worker
+  - url: http://localhost:8084
+    description: Code worker
+  - url: http://localhost:8085
+    description: Knowledge worker
+  - url: http://localhost:8086
+    description: Design worker
+
+tags:
+  - name: agent-discovery
+    description: Agent card discovery and registry management
+  - name: task-lifecycle
+    description: A2A task creation, polling, cancellation, and streaming
+  - name: webhooks
+    description: Webhook ingestion from external services
+  - name: health
+    description: Health checks and readiness probes
+  - name: metrics
+    description: Skill execution metrics
+
+paths:
+  # ── Agent Discovery ──────────────────────────────────────────────
+  /.well-known/agent.json:
+    get:
+      tags: [agent-discovery]
+      summary: Get agent card
+      description: |
+        Returns the orchestrator's A2A agent card listing all skills across all
+        registered workers. Workers expose the same endpoint on their own ports.
+      operationId: getAgentCard
+      security: []
+      responses:
+        '200':
+          description: Agent card
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentCard'
+              example:
+                name: "Local A2A Orchestrator"
+                description: "MCP + A2A orchestrator with multi-agent workers"
+                url: "http://localhost:8080"
+                version: "3.0.0"
+                capabilities:
+                  streaming: false
+                skills:
+                  - id: "delegate"
+                    name: "Delegate"
+                    description: "Route a task to the best worker agent."
+                  - id: "run_shell"
+                    name: "Run Shell"
+                    description: "Execute a shell command and return its output"
+
+  # ── A2A JSON-RPC endpoint ─────────────────────────────────────────
+  /:
+    post:
+      tags: [task-lifecycle]
+      summary: A2A JSON-RPC endpoint (tasks/send, tasks/get, tasks/cancel)
+      description: |
+        Single JSON-RPC 2.0 endpoint. Supports three methods:
+
+        - **tasks/send** — create and execute a task synchronously (or asynchronously)
+        - **tasks/get** — poll an existing task by ID
+        - **tasks/cancel** — cancel an in-progress task
+
+        All methods share the same path and are distinguished by `method`.
+      operationId: a2aJsonRpc
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/TasksSendRequest'
+                - $ref: '#/components/schemas/TasksGetRequest'
+                - $ref: '#/components/schemas/TasksCancelRequest'
+      responses:
+        '200':
+          description: JSON-RPC response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Task SSE streaming ────────────────────────────────────────────
+  /tasks/{taskId}/events:
+    get:
+      tags: [task-lifecycle]
+      summary: Stream task events (SSE)
+      description: |
+        Server-Sent Events stream for a running task. Sends `state` events as the
+        task progresses, plus a terminal `completed` or `failed` event.
+
+        ```
+        event: state
+        data: {"taskId":"...","state":"working","progress":"Step 1 of 3"}
+
+        event: completed
+        data: {"taskId":"...","result":"..."}
+        ```
+      operationId: streamTaskEvents
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Task ID returned by tasks/send or delegate_async
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Webhook ingestion ─────────────────────────────────────────────
+  /webhooks/{webhookId}:
+    post:
+      tags: [webhooks]
+      summary: Receive an incoming webhook
+      description: |
+        Accepts a JSON payload from an external service (GitHub, Stripe, etc.).
+        Validates HMAC-SHA256 signature via the `X-Hub-Signature-256` header,
+        transforms the payload using field mappings, then asynchronously dispatches
+        the configured skill.
+
+        Rate limited at 60 requests/minute per IP.
+
+        **Blocked skills (defense-in-depth):** run_shell, write_file, read_file,
+        codex_exec, sandbox_execute, workflow_execute, fetch_rss, aggregate_feeds.
+      operationId: receiveWebhook
+      security: []
+      parameters:
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Webhook ID (8-char UUID prefix) from register_webhook
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          schema:
+            type: string
+          description: HMAC-SHA256 of the raw request body using the webhook secret
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Arbitrary JSON payload from the external service
+      responses:
+        '200':
+          description: Webhook accepted (async) or completed (sync)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        enum: [accepted]
+                      taskId:
+                        type: string
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        enum: [completed]
+                      result:
+                        type: string
+        '401':
+          description: Missing or invalid signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Webhook disabled or blocked skill
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Health ─────────────────────────────────────────────────────────
+  /healthz:
+    get:
+      tags: [health]
+      summary: Basic health check
+      description: Returns HTTP 200 with `{"status":"ok"}` if the service is running.
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+
+  /healthz/details:
+    get:
+      tags: [health]
+      summary: Detailed health snapshot
+      description: |
+        Returns uptime, per-worker health, active task counts, and ERP connector KPIs.
+      operationId: healthDetails
+      security: []
+      responses:
+        '200':
+          description: Detailed health snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthDetails'
+
+  /metrics:
+    get:
+      tags: [metrics]
+      summary: Skill execution metrics
+      description: |
+        Returns per-skill call counts, p50/p95/p99 latencies, and error rates.
+        Also accessible as MCP resource `a2a://metrics`.
+      operationId: getMetrics
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsSnapshot'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Pass `Authorization: Bearer <token>` where `<token>` is either:
+        - `A2A_API_KEY` env var value (for server-level access)
+        - An `a2a_k_...` key created via `createApiKey` (RBAC-gated)
+
+        Loopback (127.0.0.1 / ::1) is always trusted.
+
+  schemas:
+    AgentCard:
+      type: object
+      description: A2A agent discovery card (served at /.well-known/agent.json)
+      properties:
+        name:
+          type: string
+          example: "Local A2A Orchestrator"
+        description:
+          type: string
+        url:
+          type: string
+          format: uri
+          example: "http://localhost:8080"
+        version:
+          type: string
+          example: "3.0.0"
+        capabilities:
+          type: object
+          properties:
+            streaming:
+              type: boolean
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkillDescriptor'
+      required: [name, description, url, version, capabilities, skills]
+
+    SkillDescriptor:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "run_shell"
+        name:
+          type: string
+          example: "Run Shell"
+        description:
+          type: string
+      required: [id, name, description]
+
+    TasksSendRequest:
+      type: object
+      description: JSON-RPC 2.0 request for tasks/send
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        method:
+          type: string
+          enum: ["tasks/send"]
+        id:
+          type: string
+          description: Caller-provided request ID
+        params:
+          type: object
+          properties:
+            id:
+              type: string
+              description: Caller-assigned task ID (UUID recommended)
+            skillId:
+              type: string
+              description: Skill to invoke on the target worker
+            args:
+              type: object
+              description: Arguments for the skill
+            message:
+              type: object
+              description: A2A message envelope
+              properties:
+                role:
+                  type: string
+                  enum: [user]
+                parts:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      kind:
+                        type: string
+                        enum: [text]
+                      text:
+                        type: string
+            contextId:
+              type: string
+              description: Session ID for conversation continuity
+          required: [message]
+      required: [jsonrpc, method, params]
+
+    TasksGetRequest:
+      type: object
+      description: JSON-RPC 2.0 request for tasks/get
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        method:
+          type: string
+          enum: ["tasks/get"]
+        id:
+          type: string
+        params:
+          type: object
+          properties:
+            id:
+              type: string
+              description: Task ID to poll
+          required: [id]
+      required: [jsonrpc, method, params]
+
+    TasksCancelRequest:
+      type: object
+      description: JSON-RPC 2.0 request for tasks/cancel
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        method:
+          type: string
+          enum: ["tasks/cancel"]
+        id:
+          type: string
+        params:
+          type: object
+          properties:
+            id:
+              type: string
+              description: Task ID to cancel
+          required: [id]
+      required: [jsonrpc, method, params]
+
+    JsonRpcResponse:
+      type: object
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          type: string
+        result:
+          type: object
+          properties:
+            id:
+              type: string
+            status:
+              type: object
+              properties:
+                state:
+                  type: string
+                  enum: [submitted, working, completed, failed, canceled]
+            artifacts:
+              type: array
+              items:
+                type: object
+                properties:
+                  parts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kind:
+                          type: string
+                          enum: [text, data]
+                        text:
+                          type: string
+        error:
+          type: object
+          properties:
+            code:
+              type: integer
+            message:
+              type: string
+            data:
+              type: object
+
+    HealthDetails:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        uptime:
+          type: number
+          description: Process uptime in seconds
+        workers:
+          type: object
+          additionalProperties:
+            type: boolean
+          description: Map of worker name → healthy boolean
+        tasks:
+          type: object
+          properties:
+            total:
+              type: integer
+            active:
+              type: integer
+        connectors:
+          type: object
+          description: ERP connector KPI snapshot
+
+    MetricsSnapshot:
+      type: object
+      description: Per-skill execution metrics
+      additionalProperties:
+        type: object
+        properties:
+          calls:
+            type: integer
+          errors:
+            type: integer
+          p50Ms:
+            type: number
+          p95Ms:
+            type: number
+          p99Ms:
+            type: number
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid Authorization header
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "Unauthorized — set Authorization: Bearer <A2A_API_KEY>"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "Not found"
