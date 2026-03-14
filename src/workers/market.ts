@@ -659,7 +659,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       } else {
         // Yahoo Finance fallback — uses undocumented API; set ALPHAVANTAGE_API_KEY
         // to use an official provider instead.
-        log("Warning: using unofficial Yahoo Finance API. Set ALPHAVANTAGE_API_KEY for a reliable official provider.");
+        console.warn("Warning: using unofficial Yahoo Finance API. Set ALPHAVANTAGE_API_KEY for a reliable official provider.");
         quote = await fetchYahooQuote(symbol);
       }
       return safeStringify(quote, 2);
