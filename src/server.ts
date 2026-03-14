@@ -35,7 +35,7 @@ import { getBreaker, getAllBreakerStats, resetAllBreakers, CircuitOpenError } fr
 import { startSkillTimer, recordSkillCall, registerWorkerMetric, getMetricsSnapshot } from "./metrics.js";
 import { executeWorkflow, validateWorkflow, type WorkflowDefinition } from "./workflow-engine.js";
 import { registerWebhook, unregisterWebhook, getWebhook, listWebhooks, toggleWebhook, verifySignature, transformPayload, logWebhookCall, getWebhookLog } from "./webhooks.js";
-import { publish, subscribe, unsubscribe, replay, listSubscriptions, getDeadLetters, getEventBusStats, type AgentEvent } from "./event-bus.js";
+import { publish, subscribe, unsubscribe, replay, listSubscriptions, getDeadLetters, getEventBusStats, replayDeadLetters, type AgentEvent } from "./event-bus.js";
 import { compose, getPipeline, listPipelines as listComposerPipelines, removePipeline, executePipeline, type Pipeline } from "./skill-composer.js";
 import { collaborate, type CollaborationRequest } from "./agent-collaboration.js";
 import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracingStats } from "./tracing.js";
@@ -43,7 +43,7 @@ import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats
 import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
 import { auditLog, auditQuery, auditStats, closeAuditDb } from "./audit.js";
 import { validateApiKey, lookupApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed, type ApiKeyEntry } from "./auth.js";
-import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace } from "./workspace.js";
+import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace, isMember } from "./workspace.js";
 import { isSkillLicensed, getSkillTier, getSkillsByTier, getLicenseInfo } from "./skill-tier.js";
 import { registerHealthRoutes, markReady, updateWorkerHealth as updateCloudWorkerHealth, installShutdownHandlers, onShutdown } from "./cloud.js";
 import { isAllowedUrl, configureAllowedUrls } from "./url-validation.js";
@@ -522,10 +522,16 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
     }
     result = await sendWithResilience(agentUrl, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(agentUrl) });
   }
-  // 2. Route by skillId
+  // 2. Route by skillId (capability negotiation → fallback to simple map)
   else if (skillId) {
-    const router = buildSkillRouter(workerCards, getExternalCards());
-    const url = router.get(skillId);
+    let url: string | undefined;
+    const negotiated = negotiate(skillId, { healthAware: true, loadAware: true });
+    if (negotiated.best) {
+      url = negotiated.best.agentUrl;
+    } else {
+      const router = buildSkillRouter(workerCards, getExternalCards());
+      url = router.get(skillId);
+    }
     if (url) {
       result = await sendWithResilience(url, { skillId, args: skillArgs, message: msgPayload, contextId: sessionId }, { apiKey: getAgentApiKey(url) });
     } else {
@@ -1027,6 +1033,24 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
     const rbacErr = new Error(`Caller '${caller.name}' (role: ${caller.role}) is not authorized to invoke '${skillId}'`);
     auditLog({ ...auditBase, success: false, error: rbacErr.message });
     throw rbacErr;
+  }
+  // ── Workspace membership gate ────────────────────────────────
+  if (caller?.workspace) {
+    const ws = getWorkspace(caller.workspace);
+    if (ws) {
+      const member = isMember(caller.workspace, caller.prefix);
+      if (!member) {
+        const wsErr = new Error(`Caller '${caller.name}' is not a member of workspace '${caller.workspace}'`);
+        auditLog({ ...auditBase, success: false, error: wsErr.message });
+        throw wsErr;
+      }
+      // Enforce workspace allowedSkills if configured
+      if (ws.allowedSkills && ws.allowedSkills.length > 0 && !ws.allowedSkills.includes(skillId)) {
+        const wsSkillErr = new Error(`Skill '${skillId}' is not allowed in workspace '${ws.name}'`);
+        auditLog({ ...auditBase, success: false, error: wsSkillErr.message });
+        throw wsSkillErr;
+      }
+    }
   }
 
   // ── Audit: record invocation (success + failure) ───────────────
@@ -1603,6 +1627,14 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
 
     case "event_bus_stats":
       return JSON.stringify({ ...getEventBusStats(), subscriptions_list: listSubscriptions() }, null, 2);
+
+    case "dead_letter_replay": {
+      const result = await replayDeadLetters({
+        limit: (args.limit as number) ?? 50,
+        olderThanMs: args.olderThanMs as number | undefined,
+      });
+      return JSON.stringify(result, null, 2);
+    }
 
     // ── Skill Composition ────────────────────────────────────────
     case "compose_pipeline": {
@@ -3229,6 +3261,229 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         required: ["action"],
       },
     },
+    // ── Previously hidden skills (now exposed) ──────────────────
+    {
+      name: "get_session_history",
+      description: "Get conversation/session history for a given session ID.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          sessionId: { type: "string", description: "Session ID to retrieve history for" },
+        },
+        required: ["sessionId"],
+      },
+    },
+    {
+      name: "clear_session",
+      description: "Clear conversation history for a session.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          sessionId: { type: "string", description: "Session ID to clear" },
+        },
+        required: ["sessionId"],
+      },
+    },
+    {
+      name: "register_agent",
+      description: "Register an external A2A agent by URL for discovery and routing.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          url: { type: "string", description: "Agent URL (e.g. http://host:port)" },
+          apiKey: { type: "string", description: "Optional API key for the agent" },
+        },
+        required: ["url"],
+      },
+    },
+    {
+      name: "unregister_agent",
+      description: "Unregister a previously registered external agent.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          url: { type: "string", description: "Agent URL to unregister" },
+        },
+        required: ["url"],
+      },
+    },
+    {
+      name: "memory_search",
+      description: "Search agent memory (notes/knowledge) by query string.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          query: { type: "string", description: "Search query" },
+          limit: { type: "number", description: "Max results (default 10)" },
+        },
+        required: ["query"],
+      },
+    },
+    {
+      name: "memory_list",
+      description: "List all memory entries with optional tag filter.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          tag: { type: "string", description: "Optional tag to filter by" },
+          limit: { type: "number", description: "Max results (default 50)" },
+        },
+      },
+    },
+    {
+      name: "memory_cleanup",
+      description: "Clean up stale or orphaned memory entries.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "list_mcp_servers",
+      description: "List registered MCP servers and their available tools.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "use_mcp_tool",
+      description: "Call a tool on a registered MCP server.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          server: { type: "string", description: "MCP server name" },
+          tool: { type: "string", description: "Tool name to call" },
+          args: { type: "object", description: "Tool arguments" },
+        },
+        required: ["server", "tool"],
+      },
+    },
+    {
+      name: "get_project_context",
+      description: "Get current project context (summary, goals, stack, notes).",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "set_project_context",
+      description: "Update project context fields.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          summary: { type: "string" },
+          goals: { type: "array", items: { type: "string" } },
+          stack: { type: "array", items: { type: "string" } },
+          notes: { type: "string" },
+        },
+      },
+    },
+    {
+      name: "sandbox_vars",
+      description: "Manage sandbox persisted variables: list, get, or delete.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          action: { type: "string", enum: ["list", "get", "delete"], description: "Action to perform" },
+          sessionId: { type: "string", description: "Session ID" },
+          name: { type: "string", description: "Variable name (for get/delete)" },
+        },
+        required: ["action", "sessionId"],
+      },
+    },
+    {
+      name: "get_circuit_breakers",
+      description: "Get circuit breaker states for all workers (closed/open/half_open).",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "reset_circuit_breakers",
+      description: "Reset all circuit breakers to closed state.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "event_unsubscribe",
+      description: "Remove an event bus subscription by ID.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          subscriptionId: { type: "string", description: "Subscription ID to remove" },
+        },
+        required: ["subscriptionId"],
+      },
+    },
+    {
+      name: "event_bus_stats",
+      description: "Get event bus statistics: subscription count, history size, dead letters, topic counts.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "dead_letter_replay",
+      description: "Retry failed event deliveries from the dead letter queue.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          limit: { type: "number", description: "Max dead letters to retry (default 50)" },
+          olderThanMs: { type: "number", description: "Only retry dead letters older than this many ms" },
+        },
+      },
+    },
+    {
+      name: "list_pipelines",
+      description: "List all registered skill composition pipelines.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "list_capabilities",
+      description: "List all registered agent capabilities in the negotiation registry.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "capability_stats",
+      description: "Get capability negotiation statistics: total capabilities, agents, health summary.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "unregister_webhook",
+      description: "Remove a registered webhook by ID.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          id: { type: "string", description: "Webhook ID to remove" },
+        },
+        required: ["id"],
+      },
+    },
+    {
+      name: "webhook_log",
+      description: "Get delivery log for a specific webhook.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          webhookId: { type: "string", description: "Webhook ID" },
+          limit: { type: "number", description: "Max entries (default 20)" },
+        },
+        required: ["webhookId"],
+      },
+    },
+    {
+      name: "cache_configure",
+      description: "Configure per-skill cache TTL settings.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          skillId: { type: "string", description: "Skill to configure" },
+          ttlMs: { type: "number", description: "Cache TTL in milliseconds (0 to disable)" },
+        },
+        required: ["skillId", "ttlMs"],
+      },
+    },
+    {
+      name: "search_traces",
+      description: "Search distributed traces by skill ID, status, or time range.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          skillId: { type: "string", description: "Filter by skill ID" },
+          status: { type: "string", enum: ["ok", "error"], description: "Filter by status" },
+          since: { type: "string", description: "ISO timestamp start" },
+          limit: { type: "number", description: "Max results (default 20)" },
+        },
+      },
+    },
   ];
 
   return tools;
@@ -3561,7 +3816,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: "text", text: capResponse(accumulated || "(no output)", CHAR_LIMIT) }] };
   }
 
-  const raw = await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, String(text));
+  // MCP runs over stdio — create a local admin caller for RBAC/audit traceability
+  const mcpCaller: ApiKeyEntry = {
+    name: "mcp-local",
+    keyHash: "",
+    prefix: "mcp_local",
+    role: "admin",
+    createdAt: Date.now(),
+  };
+  const raw = await dispatchSkill(name, (args ?? {}) as Record<string, unknown>, String(text), mcpCaller);
   // Apply smart truncation to reduce token usage on large responses
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { parsed = raw; }
