@@ -89,6 +89,7 @@ paths:
                     description: "Execute a shell command and return its output"
 
   # ── A2A JSON-RPC endpoint ─────────────────────────────────────────
+  # POST / — orchestrator handles tasks/send, tasks/get, tasks/cancel at root path
   /:
     post:
       tags: [task-lifecycle]
@@ -130,14 +131,20 @@ paths:
       summary: Stream task events (SSE)
       description: |
         Server-Sent Events stream for a running task. Sends `state` events as the
-        task progresses, plus a terminal `completed` or `failed` event.
+        task progresses, plus a terminal `result` or `error` event.
 
         ```
         event: state
         data: {"taskId":"...","state":"working","progress":"Step 1 of 3"}
 
-        event: completed
+        event: progress
+        data: {"taskId":"...","message":"Step 2 of 3"}
+
+        event: result
         data: {"taskId":"...","result":"..."}
+
+        event: error
+        data: {"taskId":"...","error":"..."}
         ```
       operationId: streamTaskEvents
       security:
@@ -174,8 +181,9 @@ paths:
 
         Rate limited at 60 requests/minute per IP.
 
-        **Blocked skills (defense-in-depth):** run_shell, write_file, read_file,
-        codex_exec, sandbox_execute, workflow_execute, fetch_rss, aggregate_feeds.
+        **Blocked skills (defense-in-depth):** run_shell, run_shell_stream, write_file,
+        read_file, codex_exec, sandbox_execute, sandbox_vars, search_files, query_sqlite,
+        workflow_execute, fetch_rss, aggregate_feeds, regulatory_scan.
       operationId: receiveWebhook
       security: []
       parameters:
@@ -245,7 +253,7 @@ paths:
     get:
       tags: [health]
       summary: Basic health check
-      description: Returns HTTP 200 with `{"status":"ok"}` if the service is running.
+      description: Returns HTTP 200 with `{"status":"alive","timestamp":"<ISO8601>"}` if the service is running.
       operationId: healthCheck
       security: []
       responses:
@@ -258,7 +266,15 @@ paths:
                 properties:
                   status:
                     type: string
-                    enum: [ok]
+                    enum: [alive]
+                  timestamp:
+                    type: string
+                    format: date-time
+                    description: ISO 8601 timestamp of the health check response
+                required: [status, timestamp]
+              example:
+                status: "alive"
+                timestamp: "2026-03-14T12:00:00.000Z"
 
   /healthz/details:
     get:
@@ -284,8 +300,7 @@ paths:
         Returns per-skill call counts, p50/p95/p99 latencies, and error rates.
         Also accessible as MCP resource `a2a://metrics`.
       operationId: getMetrics
-      security:
-        - BearerAuth: []
+      security: []
       responses:
         '200':
           description: Metrics snapshot
@@ -363,18 +378,15 @@ components:
         params:
           type: object
           properties:
-            id:
-              type: string
-              description: Caller-assigned task ID (UUID recommended)
             skillId:
               type: string
               description: Skill to invoke on the target worker
             args:
               type: object
-              description: Arguments for the skill
+              description: Arguments for the skill (used with skillId; mutually exclusive with message)
             message:
               type: object
-              description: A2A message envelope
+              description: A2A message envelope (optional; use skillId+args for direct skill invocation)
               properties:
                 role:
                   type: string
@@ -392,7 +404,6 @@ components:
             contextId:
               type: string
               description: Session ID for conversation continuity
-          required: [message]
       required: [jsonrpc, method, params]
 
     TasksGetRequest:
@@ -438,48 +449,66 @@ components:
       required: [jsonrpc, method, params]
 
     JsonRpcResponse:
-      type: object
-      properties:
-        jsonrpc:
-          type: string
-          enum: ["2.0"]
-        id:
-          type: string
-        result:
+      description: |
+        JSON-RPC 2.0 response. Per spec, exactly ONE of `result` or `error` is present —
+        never both, never neither.
+      oneOf:
+        - title: Success
           type: object
+          description: Successful response — contains `result`, no `error` field.
           properties:
+            jsonrpc:
+              type: string
+              enum: ["2.0"]
             id:
               type: string
-            status:
+            result:
               type: object
               properties:
-                state:
+                id:
                   type: string
-                  enum: [submitted, working, completed, failed, canceled]
-            artifacts:
-              type: array
-              items:
-                type: object
-                properties:
-                  parts:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        kind:
-                          type: string
-                          enum: [text, data]
-                        text:
-                          type: string
-        error:
+                status:
+                  type: object
+                  properties:
+                    state:
+                      type: string
+                      enum: [submitted, working, completed, failed, canceled, unknown]
+                artifacts:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      parts:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            kind:
+                              type: string
+                              enum: [text, data]
+                            text:
+                              type: string
+          required: [jsonrpc, id, result]
+        - title: Error
           type: object
+          description: Error response — contains `error`, no `result` field.
           properties:
-            code:
-              type: integer
-            message:
+            jsonrpc:
               type: string
-            data:
+              enum: ["2.0"]
+            id:
+              type: string
+            error:
               type: object
+              properties:
+                code:
+                  type: integer
+                message:
+                  type: string
+                data:
+                  type: object
+              required: [code, message]
+          required: [jsonrpc, id, error]
 
     HealthDetails:
       type: object

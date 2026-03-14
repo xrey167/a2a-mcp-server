@@ -16,7 +16,11 @@ export interface RegistryEntry {
 let registry: Map<string, RegistryEntry> = new Map();
 
 function loadFromFile(): RegistryEntry[] {
-  try { return JSON.parse(readFileSync(REGISTRY_FILE, "utf-8")) as RegistryEntry[]; } catch { return []; }
+  try { return JSON.parse(readFileSync(REGISTRY_FILE, "utf-8")) as RegistryEntry[]; }
+  catch (err: any) {
+    if (err?.code !== "ENOENT") process.stderr.write(`[agent-registry] failed to parse registry: ${err}\n`);
+    return [];
+  }
 }
 
 function saveToFile(): void {

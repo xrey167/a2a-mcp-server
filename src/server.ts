@@ -1827,7 +1827,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
         fieldMappings: args.fieldMappings as Record<string, string> | undefined,
         async: args.async !== false,
       });
-      return JSON.stringify({ ...config, secret: "***", endpoint: `POST http://localhost:8080/webhooks/${config.id}` }, null, 2);
+      return JSON.stringify({ ...config, secret: "***", endpoint: `POST http://localhost:${CONFIG.server.port}/webhooks/${config.id}` }, null, 2);
     }
 
     case "unregister_webhook": {
@@ -1840,7 +1840,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       return JSON.stringify(listWebhooks().map(w => ({
         ...w,
         secret: w.secret ? "***" : undefined,
-        endpoint: `POST http://localhost:8080/webhooks/${w.id}`,
+        endpoint: `POST http://localhost:${CONFIG.server.port}/webhooks/${w.id}`,
       })), null, 2);
 
     case "webhook_log": {
@@ -8775,7 +8775,7 @@ async function main() {
   const schedulerDispatch = async (skillId: string, args: Record<string, unknown>, text: string) => {
     const card = workerCards.find(c => c.skills.some(s => s.id === skillId));
     if (!card) return `No worker found for skill: ${skillId}`;
-    const result = await sendTask(card.url, { skillId, args, message: { parts: [{ text }] } });
+    const result = await sendTask(card.url, { skillId, args, message: { role: "user", parts: [{ kind: "text" as const, text }] } });
     return typeof result === "string" ? result : safeStringify(result, 2);
   };
   const schedulerWorkflow = async (workflowId: string, args: Record<string, unknown>) => {
@@ -8794,7 +8794,7 @@ async function main() {
       if (!climateCard || !infraCard) return;
 
       // Load infrastructure and assess exposure
-      const infraResult = await sendTask(infraCard.url, { skillId: "load_infrastructure", args: { filter: {} }, message: { parts: [{ text: "" }] } });
+      const infraResult = await sendTask(infraCard.url, { skillId: "load_infrastructure", args: { filter: {} }, message: { role: "user", parts: [{ kind: "text" as const, text: "" }] } });
       if (!infraResult) return;
 
       // Publish proximity alert if critical infrastructure is near climate events

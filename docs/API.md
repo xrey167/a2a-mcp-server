@@ -1255,7 +1255,7 @@ Main task dispatch endpoint (tasks/send, JSON-RPC format).
   "params": {
     "skillId": "run_shell",
     "args": {
-      "cmd": "ls -la"
+      "command": "ls -la"
     },
     "message": "List directory"
   },
@@ -1285,12 +1285,13 @@ Retrieve orchestrator agent card (A2A AgentCard format).
 **Response:**
 ```json
 {
-  "name": "a2a-orchestrator",
-  "version": "1.0.0",
+  "name": "Local A2A Orchestrator",
+  "version": "3.0.0",
   "description": "Multi-protocol automation orchestrator",
   "skills": [
     {
       "id": "delegate",
+      "name": "Delegate",
       "description": "Route skill to worker",
       "inputs": {
         "type": "object",
@@ -1313,8 +1314,8 @@ Retrieve orchestrator agent card (A2A AgentCard format).
 Liveness probe (always returns 200 if server is up).
 
 **Response:**
-```
-OK
+```json
+{ "status": "alive", "timestamp": "2024-01-01T00:00:00.000Z" }
 ```
 
 ---
@@ -1322,13 +1323,14 @@ OK
 #### `GET /readyz`
 Readiness probe (503 if workers not fully healthy).
 
-**Response:**
+**Response (200 OK):**
 ```json
-{
-  "ready": true,
-  "workersHealthy": 14,
-  "workersTotal": 14
-}
+{ "status": "ready", "timestamp": "2024-01-01T00:00:00.000Z" }
+```
+
+**Response (503 Service Unavailable):**
+```json
+{ "status": "not_ready", "timestamp": "2024-01-01T00:00:00.000Z" }
 ```
 
 ---
@@ -1375,7 +1377,7 @@ Incoming webhook handler (HMAC-SHA256 verified).
 
 **Request Headers:**
 ```
-X-Webhook-Signature: sha256=<HMAC-SHA256 hex>
+X-Hub-Signature-256: sha256=<HMAC-SHA256 hex>
 Content-Type: application/json
 ```
 
@@ -1391,7 +1393,7 @@ Content-Type: application/json
 **Verification:**
 ```
 signature = hex(HMAC-SHA256(secret, body))
-X-Webhook-Signature == "sha256=" + signature
+X-Hub-Signature-256 == "sha256=" + signature
 ```
 
 **Response:**
@@ -1406,19 +1408,28 @@ X-Webhook-Signature == "sha256=" + signature
 ---
 
 #### `GET /metrics`
-Prometheus-style metrics export.
+JSON metrics snapshot. No authentication required.
 
-**Response (text/plain):**
-```
-# HELP a2a_skill_calls_total Total skill invocations
-# TYPE a2a_skill_calls_total counter
-a2a_skill_calls_total{skill="run_shell"} 152
-a2a_skill_calls_total{skill="read_file"} 487
-
-# HELP a2a_skill_duration_ms Skill execution duration
-# TYPE a2a_skill_duration_ms histogram
-a2a_skill_duration_ms_bucket{skill="run_shell",le="100"} 95
-a2a_skill_duration_ms_bucket{skill="run_shell",le="1000"} 148
+**Response (application/json):**
+```json
+{
+  "skills": {
+    "run_shell": {
+      "calls": 152,
+      "errors": 3,
+      "p50": 85,
+      "p95": 420,
+      "p99": 980
+    },
+    "read_file": {
+      "calls": 487,
+      "errors": 0,
+      "p50": 12,
+      "p95": 55,
+      "p99": 110
+    }
+  }
+}
 ```
 
 ---
@@ -1570,17 +1581,11 @@ data: {"exitCode": 0, "totalTime": 5000}
 No authentication required. Claude Code passes tasks via stdin/stdout.
 
 ### A2A HTTP Endpoints
-Bearer token via `Authorization` header or `AUTHORIZATION` query param.
+Bearer token via `Authorization` header only.
 
 **Request:**
 ```
 Authorization: Bearer sk_live_abc123...
-```
-
-or
-
-```
-GET /health?authorization=sk_live_abc123...
 ```
 
 ### API Key Management
@@ -2059,28 +2064,31 @@ GET /traces → [
     "spans": [
       {
         "spanId": "span_1",
+        "parentSpanId": null,
         "name": "delegate:process_order",
         "duration": 1200,
-        "spans": [
-          {
-            "spanId": "span_1a",
-            "name": "worker:data.fetch_order",
-            "duration": 150,
-            "status": "OK"
-          },
-          {
-            "spanId": "span_1b",
-            "name": "worker:shell.audit_log",
-            "duration": 80,
-            "status": "OK"
-          },
-          {
-            "spanId": "span_1c",
-            "name": "worker:ai.validate",
-            "duration": 900,
-            "status": "OK"
-          }
-        ]
+        "status": "OK"
+      },
+      {
+        "spanId": "span_1a",
+        "parentSpanId": "span_1",
+        "name": "worker:data.fetch_order",
+        "duration": 150,
+        "status": "OK"
+      },
+      {
+        "spanId": "span_1b",
+        "parentSpanId": "span_1",
+        "name": "worker:shell.audit_log",
+        "duration": 80,
+        "status": "OK"
+      },
+      {
+        "spanId": "span_1c",
+        "parentSpanId": "span_1",
+        "name": "worker:ai.validate",
+        "duration": 900,
+        "status": "OK"
       }
     ]
   }

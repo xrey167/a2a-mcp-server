@@ -2,7 +2,7 @@
 // Declarative configuration for the A2A MCP server.
 // Loads from ~/.a2a-mcp/config.json (or YAML if found), with env overrides.
 
-import { readFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { z } from "zod";
@@ -425,7 +425,6 @@ export function initConfigDir(): void {
   }
   if (!existsSync(getConfigFile())) {
     const defaults = JSON.stringify(applyDefaults(ConfigSchema.parse({})), null, 2);
-    const { writeFileSync } = require("fs");
     writeFileSync(getConfigFile(), defaults, "utf-8");
     process.stderr.write(`[config] created default config at ${getConfigFile()}\n`);
   }
