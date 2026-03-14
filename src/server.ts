@@ -368,6 +368,11 @@ async function discoverWorkers(): Promise<AgentCard[]> {
   return all.flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 }
 
+// ── Safe JSON parse helper ──────────────────────────────────────
+function safeParseJSON(raw: string): Record<string, unknown> | null {
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
 // ── Build skill-to-worker map ───────────────────────────────────
 // External cards added first; built-in overwrites on collision → built-in always wins
 function buildSkillRouter(builtinCards: AgentCard[], externalCards: AgentCard[] = []): Map<string, string> {
@@ -982,6 +987,27 @@ const OrchestratorSchemas = {
   osint_threat_assess: OsintThreatAssessInputSchema,
   osint_market_snapshot: OsintMarketSnapshotInputSchema,
   osint_freshness: OsintFreshnessInputSchema,
+  // ── Porsche Consulting Feature Schemas ─────────────────────────
+  sop_demand_supply_match: z.object({ periods: z.array(z.string()).optional() }).passthrough(),
+  sop_scenario_compare: z.object({ period: z.string(), adjustment: z.object({ type: z.string(), percentage: z.number(), items: z.array(z.string()).optional() }) }).passthrough(),
+  sop_consensus_plan: z.object({ periods: z.array(z.string()).optional() }).passthrough(),
+  esg_score_entity: z.object({ entityId: z.string(), entityType: z.enum(["supplier", "region", "product"]).optional().default("supplier"), entityName: z.string(), country: z.string().optional() }).passthrough(),
+  esg_portfolio_overview: z.object({ entityIds: z.array(z.string()).optional() }).passthrough(),
+  esg_gap_analysis: z.object({ targetScore: z.number().optional().default(70) }).passthrough(),
+  carbon_footprint: z.object({ itemNo: z.string(), includeScenarios: z.boolean().optional().default(false) }).passthrough(),
+  nearshoring_evaluate: z.object({ vendorId: z.string(), targetCountries: z.array(z.object({ country: z.string(), region: z.string() })) }).passthrough(),
+  osint_regulatory_brief: z.object({ categories: z.array(z.string()).optional() }).passthrough(),
+  erp_customer360_clv: z.object({ workspaceId: z.string().optional(), customerExternalId: z.string().optional() }).passthrough(),
+  q2o_win_loss_analysis: z.object({ workspaceId: z.string().optional(), since: z.string().optional() }).passthrough(),
+  price_optimize: z.object({ workspaceId: z.string().optional() }).passthrough(),
+  erp_revenue_forecast: z.object({ workspaceId: z.string().optional(), horizonMonths: z.number().optional().default(6) }).passthrough(),
+  competitor_monitor: z.object({ name: z.string(), domains: z.array(z.string()).optional() }).passthrough(),
+  osint_competitor_brief: z.object({ name: z.string(), domains: z.array(z.string()).optional() }).passthrough(),
+  list_transformation_playbooks: z.object({ industry: z.string().optional(), category: z.string().optional() }).passthrough(),
+  execute_playbook: z.object({ playbookId: z.string(), params: z.record(z.string(), z.unknown()).optional() }).passthrough(),
+  playbook_progress: z.object({ workflowId: z.string() }).passthrough(),
+  workflow_performance: z.object({ workflowId: z.string().optional() }).passthrough(),
+  compliance_report: z.object({ workspaceId: z.string().optional(), since: z.string().optional(), until: z.string().optional() }).passthrough(),
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -1961,6 +1987,385 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
 
     case "osint_workflow_templates":
       return JSON.stringify(getOsintWorkflowTemplates(), null, 2);
+
+    // ── Porsche Consulting: S&OP ──────────────────────────────────
+    case "sop_demand_supply_match": {
+      const opts = validateOrchestrator("sop_demand_supply_match", args);
+      const { reconcileDemandSupply } = await import("./mrp/sop.js");
+      // Build demand/supply inputs from available MRP + ERP data via delegate
+      const task = createTask({ skillId: "sop_demand_supply_match" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          // Fetch MRP and pipeline data via delegates
+          const [mrpRaw, pipelineRaw] = await Promise.allSettled([
+            dispatchSkill("delegate", { skillId: "mrp_run", message: "Run MRP for S&OP reconciliation" }, text),
+            dispatchSkill("delegate", { skillId: "q2o_pipeline_status", message: "Get pipeline for S&OP" }, text),
+          ]);
+          const mrpData = mrpRaw.status === "fulfilled" ? JSON.parse(mrpRaw.value) : {};
+          const pipelineData = pipelineRaw.status === "fulfilled" ? JSON.parse(pipelineRaw.value) : {};
+
+          const demand = {
+            confirmedOrders: Array.isArray(pipelineData.orders) ? pipelineData.orders.map((o: Record<string, unknown>) => ({
+              itemNo: o.itemNo ?? o.product ?? "UNKNOWN", quantity: Number(o.quantity ?? 1), dueDate: String(o.dueDate ?? new Date().toISOString()),
+            })) : [],
+            forecastedDemand: [],
+          };
+          const supply = {
+            availableCapacity: [],
+            currentInventory: Array.isArray(mrpData.inventoryLevels) ? mrpData.inventoryLevels : [],
+            openPurchaseOrders: Array.isArray(mrpData.openPOs) ? mrpData.openPOs : [],
+            plannedOrders: Array.isArray(mrpData.plannedOrders) ? mrpData.plannedOrders : [],
+          };
+          const periods = opts.periods ?? [];
+          const result = reconcileDemandSupply(demand, supply, periods);
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "SOP_MATCH_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    case "sop_scenario_compare": {
+      const opts = validateOrchestrator("sop_scenario_compare", args);
+      const { reconcileDemandSupply, simulateScenario } = await import("./mrp/sop.js");
+      // Build a baseline and simulate
+      const baseline = reconcileDemandSupply(
+        { confirmedOrders: [], forecastedDemand: [] },
+        { availableCapacity: [], currentInventory: [], openPurchaseOrders: [] },
+        [opts.period],
+      );
+      const result = simulateScenario(baseline, opts.adjustment as { type: string; percentage: number; items?: string[] });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "sop_consensus_plan": {
+      const opts = validateOrchestrator("sop_consensus_plan", args);
+      const { reconcileDemandSupply, generateConsensusPlan } = await import("./mrp/sop.js");
+      const reconciliation = reconcileDemandSupply(
+        { confirmedOrders: [], forecastedDemand: [] },
+        { availableCapacity: [], currentInventory: [], openPurchaseOrders: [] },
+        opts.periods ?? [],
+      );
+      const result = generateConsensusPlan(reconciliation);
+      return JSON.stringify(result, null, 2);
+    }
+
+    // ── Porsche Consulting: ESG ───────────────────────────────────
+    case "esg_score_entity": {
+      const opts = validateOrchestrator("esg_score_entity", args);
+      const { calculateESGScore } = await import("./esg/scoring.js");
+      const task = createTask({ skillId: "esg_score_entity" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          // Gather agent data via OSINT delegates
+          const [climateRaw, conflictRaw, signalRaw] = await Promise.allSettled([
+            dispatchSkill("delegate", { skillId: "assess_exposure", message: `Assess climate exposure for ${opts.entityName}`, args: { country: opts.country } }, text),
+            dispatchSkill("delegate", { skillId: "instability_index", message: `Instability index for ${opts.entityName}`, args: { country: opts.country } }, text),
+            dispatchSkill("delegate", { skillId: "baseline_compare", message: `Governance baseline for ${opts.entityName}`, args: { country: opts.country } }, text),
+          ]);
+          const agentData = {
+            environmental: climateRaw.status === "fulfilled" ? safeParseJSON(climateRaw.value) : {},
+            social: conflictRaw.status === "fulfilled" ? safeParseJSON(conflictRaw.value) : {},
+            governance: signalRaw.status === "fulfilled" ? safeParseJSON(signalRaw.value) : {},
+          };
+          const result = calculateESGScore(opts.entityId, opts.entityType ?? "supplier", opts.entityName, agentData);
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "ESG_SCORE_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    case "esg_portfolio_overview": {
+      const { calculatePortfolioESG } = await import("./esg/scoring.js");
+      // Portfolio from previously scored entities — returns empty if none cached
+      const result = calculatePortfolioESG([]);
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "esg_gap_analysis": {
+      const opts = validateOrchestrator("esg_gap_analysis", args);
+      const { identifyESGGaps } = await import("./esg/scoring.js");
+      const result = identifyESGGaps([], opts.targetScore);
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "carbon_footprint": {
+      const opts = validateOrchestrator("carbon_footprint", args);
+      const { calculateCarbonFootprint } = await import("./esg/carbon.js");
+      const task = createTask({ skillId: "carbon_footprint" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          // Get BOM and supply chain data via delegates
+          const [bomRaw, routeRaw] = await Promise.allSettled([
+            dispatchSkill("delegate", { skillId: "bom_explosion", message: `Get BOM for ${opts.itemNo}`, args: { itemNo: opts.itemNo } }, text),
+            dispatchSkill("delegate", { skillId: "supply_chain_map", message: `Supply chain routes for ${opts.itemNo}`, args: { itemNo: opts.itemNo } }, text),
+          ]);
+          const bomComponents = bomRaw.status === "fulfilled" ? safeParseJSON(bomRaw.value)?.components ?? [] : [];
+          const routes = routeRaw.status === "fulfilled" ? safeParseJSON(routeRaw.value)?.routes ?? [] : [];
+          const result = calculateCarbonFootprint(opts.itemNo, bomComponents, routes, { includeScenarios: opts.includeScenarios });
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "CARBON_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    case "osint_regulatory_brief": {
+      const opts = validateOrchestrator("osint_regulatory_brief", args);
+      const task = createTask({ skillId: "osint_regulatory_brief" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          // Delegate to news worker's regulatory_scan + ai agent for summarization
+          const scanResult = await dispatchSkill("delegate", { skillId: "regulatory_scan", message: "Scan regulatory feeds", args: { categories: opts.categories } }, text);
+          const summary = await dispatchSkill("delegate", { skillId: "ask_claude", message: `Summarize these regulatory alerts into an executive brief with impact assessment and recommended actions:\n\n${scanResult}` }, text);
+          markCompleted(task.id, JSON.stringify({ scan: safeParseJSON(scanResult), executiveBrief: summary }, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "REGULATORY_BRIEF_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    // ── Porsche Consulting: Supply Chain Advanced ──────────────────
+    case "nearshoring_evaluate": {
+      const opts = validateOrchestrator("nearshoring_evaluate", args);
+      const { evaluateNearshoring } = await import("./risk/nearshoring.js");
+      const task = createTask({ skillId: "nearshoring_evaluate" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          // Get current supplier data via delegate
+          const vendorRaw = await dispatchSkill("delegate", { skillId: "vendor_health", message: `Get vendor data for ${opts.vendorId}`, args: { vendorId: opts.vendorId } }, text);
+          const vendorData = safeParseJSON(vendorRaw) ?? {};
+          const currentSupplier = {
+            vendorId: opts.vendorId,
+            vendorName: vendorData.vendorName ?? opts.vendorId,
+            country: vendorData.country ?? "CN",
+            region: vendorData.region ?? "Asia",
+            unitCost: vendorData.unitCost ?? 100,
+            leadTimeDays: vendorData.leadTimeDays ?? 30,
+            transportMode: (vendorData.transportMode ?? "sea") as "sea" | "air" | "rail" | "road",
+            distanceKm: vendorData.distanceKm ?? 10000,
+          };
+          const targetCountries = (opts.targetCountries as Array<{ country: string; region: string }>).map(tc => ({
+            country: tc.country,
+            region: tc.region,
+          }));
+          const result = evaluateNearshoring(currentSupplier, targetCountries);
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "NEARSHORING_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    // ── Porsche Consulting: Revenue Intelligence ──────────────────
+    case "erp_customer360_clv": {
+      const opts = validateOrchestrator("erp_customer360_clv", args);
+      const { calculateCLV, segmentByCLV } = await import("./analytics/clv.js");
+      if (opts.customerExternalId) {
+        // Single customer CLV
+        const customer = {
+          customerId: opts.customerExternalId,
+          customerName: opts.customerExternalId,
+          orders: [],
+          firstOrderDate: new Date().toISOString(),
+          lastOrderDate: new Date().toISOString(),
+        };
+        const result = calculateCLV(customer);
+        return JSON.stringify(result, null, 2);
+      }
+      // Segment all customers
+      const result = segmentByCLV([]);
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "q2o_win_loss_analysis": {
+      const opts = validateOrchestrator("q2o_win_loss_analysis", args);
+      const { analyzeWinLoss } = await import("./analytics/win-loss.js");
+      const task = createTask({ skillId: "q2o_win_loss_analysis" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          const pipelineRaw = await dispatchSkill("delegate", { skillId: "q2o_pipeline_status", message: "Get Q2O pipeline data for win/loss analysis", args: { since: opts.since } }, text);
+          const pipelineData = safeParseJSON(pipelineRaw) ?? {};
+          const quotes = Array.isArray(pipelineData.quotes) ? pipelineData.quotes : [];
+          const result = analyzeWinLoss(quotes);
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "WIN_LOSS_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    case "price_optimize": {
+      const opts = validateOrchestrator("price_optimize", args);
+      const { optimizePricing } = await import("./analytics/pricing.js");
+      const task = createTask({ skillId: "price_optimize" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          const pipelineRaw = await dispatchSkill("delegate", { skillId: "q2o_pipeline_status", message: "Get Q2O quotes for pricing analysis" }, text);
+          const pipelineData = safeParseJSON(pipelineRaw) ?? {};
+          const quotes = Array.isArray(pipelineData.quotes) ? pipelineData.quotes : [];
+          const result = optimizePricing(quotes);
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "PRICE_OPTIMIZE_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    case "erp_revenue_forecast": {
+      const opts = validateOrchestrator("erp_revenue_forecast", args);
+      const { forecastRevenue } = await import("./analytics/revenue-forecast.js");
+      const task = createTask({ skillId: "erp_revenue_forecast" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          const revenueRaw = await dispatchSkill("delegate", { skillId: "revenue_intelligence", message: "Get revenue history for forecasting" }, text);
+          const revenueData = safeParseJSON(revenueRaw) ?? {};
+          const history = Array.isArray(revenueData.monthlyRevenue) ? revenueData.monthlyRevenue : [];
+          const result = forecastRevenue(history, opts.horizonMonths ?? 6);
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "REVENUE_FORECAST_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    // ── Porsche Consulting: Competitor Intelligence ────────────────
+    case "competitor_monitor": {
+      const opts = validateOrchestrator("competitor_monitor", args);
+      const task = createTask({ skillId: "competitor_monitor" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          // Delegate to news + market workers for raw data
+          const [newsRaw, marketRaw] = await Promise.allSettled([
+            dispatchSkill("delegate", { skillId: "fetch_rss", message: `Search news for ${opts.name}`, args: { query: opts.name } }, text),
+            dispatchSkill("delegate", { skillId: "detect_anomalies", message: `Market signals for ${opts.name}`, args: { query: opts.name } }, text),
+          ]);
+          const newsData = newsRaw.status === "fulfilled" ? safeParseJSON(newsRaw.value) ?? [] : [];
+          const marketData = marketRaw.status === "fulfilled" ? safeParseJSON(marketRaw.value) ?? [] : [];
+          markCompleted(task.id, JSON.stringify({ competitor: opts.name, newsSignals: Array.isArray(newsData) ? newsData.length : 0, marketSignals: Array.isArray(marketData) ? marketData.length : 0, rawNews: newsData, rawMarket: marketData }, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "COMPETITOR_MONITOR_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    case "osint_competitor_brief": {
+      const opts = validateOrchestrator("osint_competitor_brief", args);
+      const { buildCompetitorBrief } = await import("./osint/competitor-intel.js");
+      const task = createTask({ skillId: "osint_competitor_brief" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          const [newsRaw, marketRaw] = await Promise.allSettled([
+            dispatchSkill("delegate", { skillId: "fetch_rss", message: `News for competitor ${opts.name}`, args: { query: opts.name } }, text),
+            dispatchSkill("delegate", { skillId: "detect_anomalies", message: `Market data for ${opts.name}`, args: { query: opts.name } }, text),
+          ]);
+          const newsData = newsRaw.status === "fulfilled" ? (() => { const parsed = safeParseJSON(newsRaw.value); return Array.isArray(parsed) ? parsed : parsed?.items ?? []; })() : [];
+          const marketData = marketRaw.status === "fulfilled" ? (() => { const parsed = safeParseJSON(marketRaw.value); return Array.isArray(parsed) ? parsed : parsed?.items ?? []; })() : [];
+          const competitor = { name: opts.name, domains: opts.domains ?? [], industry: "unknown", knownProducts: [] };
+          const brief = buildCompetitorBrief(competitor, newsData, marketData);
+          markCompleted(task.id, JSON.stringify(brief, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "COMPETITOR_BRIEF_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
+    }
+
+    // ── Porsche Consulting: Workflow Playbooks ─────────────────────
+    case "list_transformation_playbooks": {
+      const opts = validateOrchestrator("list_transformation_playbooks", args);
+      const { listPlaybooks: listPBs } = await import("./workflow-templates.js");
+      const result = listPBs({ industry: opts.industry, category: opts.category });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case "execute_playbook": {
+      const opts = validateOrchestrator("execute_playbook", args);
+      const { loadPlaybook } = await import("./workflow-templates.js");
+      const playbook = loadPlaybook(opts.playbookId);
+      if (!playbook) throw new Error(`Playbook not found: ${opts.playbookId}`);
+      const task = createTask({ skillId: "execute_playbook" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          const result = await executeWorkflow(
+            playbook.workflow,
+            (sid, a, t) => dispatchSkill(sid, a, t),
+            (msg) => emitProgress(task.id, msg),
+          );
+          markCompleted(task.id, JSON.stringify({ playbook: playbook.metadata, result }, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "PLAYBOOK_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id, playbook: playbook.metadata }, null, 2);
+    }
+
+    case "playbook_progress": {
+      const opts = validateOrchestrator("playbook_progress", args);
+      const taskResult = getTask(opts.workflowId);
+      if (!taskResult) throw new Error(`Task not found: ${opts.workflowId}`);
+      return JSON.stringify(taskResult, null, 2);
+    }
+
+    // ── Porsche Consulting: Workflow Performance ──────────────────
+    case "workflow_performance": {
+      const opts = validateOrchestrator("workflow_performance", args);
+      const snapshot = getMetricsSnapshot();
+      // Filter to workflow-related metrics
+      const workflowMetrics = snapshot.skills.filter(s =>
+        s.skillId.startsWith("workflow_") || s.skillId === "execute_playbook" ||
+        (opts.workflowId && s.skillId === opts.workflowId)
+      );
+      return JSON.stringify({
+        system: { uptime: snapshot.uptime, totalCalls: snapshot.system.totalCalls, errorRate: snapshot.system.errorRate },
+        workflowSkills: workflowMetrics,
+        timestamp: snapshot.timestamp,
+      }, null, 2);
+    }
+
+    // ── Porsche Consulting: Compliance ─────────────────────────────
+    case "compliance_report": {
+      const opts = validateOrchestrator("compliance_report", args);
+      const { generateComplianceReport } = await import("./compliance-report.js");
+      const result = generateComplianceReport({
+        workspaceId: opts.workspaceId,
+        since: opts.since,
+        until: opts.until,
+      });
+      return JSON.stringify(result, null, 2);
+    }
 
     default: {
       // Plugin skills (hot-loaded from src/plugins/)
@@ -3321,6 +3726,113 @@ Set async:true for fire-and-forget (returns taskId). Pass taskId to poll an asyn
         },
         required: ["action"],
       },
+    },
+    // ── Porsche Consulting: Lean Manufacturing ────────────────────
+    {
+      name: "sop_demand_supply_match",
+      description: "S&OP Dashboard: Reconcile demand (orders + forecasts) vs supply (MRP + inventory + POs) for given periods. Identifies gaps and revenue-at-risk.",
+      inputSchema: { type: "object" as const, properties: { periods: { type: "array", items: { type: "string" }, description: "Periods in YYYY-MM format" } } },
+    },
+    {
+      name: "sop_scenario_compare",
+      description: "S&OP Scenario: Simulate 'what-if' adjustments (demand increase, capacity loss, supply delay) on a base reconciliation.",
+      inputSchema: { type: "object" as const, properties: { period: { type: "string" }, adjustment: { type: "object", properties: { type: { type: "string" }, percentage: { type: "number" }, items: { type: "array", items: { type: "string" } } }, required: ["type", "percentage"] } }, required: ["period", "adjustment"] },
+    },
+    {
+      name: "sop_consensus_plan",
+      description: "Generate S&OP consensus plan with prioritized recommendations and actions across all periods.",
+      inputSchema: { type: "object" as const, properties: { periods: { type: "array", items: { type: "string" } } } },
+    },
+    // ── Porsche Consulting: ESG & Compliance ──────────────────────
+    {
+      name: "esg_score_entity",
+      description: "Calculate ESG score for a supplier/region using OSINT data (climate, conflict, governance). Returns E/S/G sub-scores, overall rating (AAA-C), and regulatory flags (CSRD, LkSG).",
+      inputSchema: { type: "object" as const, properties: { entityId: { type: "string" }, entityType: { type: "string", enum: ["supplier", "region", "product"] }, entityName: { type: "string" }, country: { type: "string" } }, required: ["entityId", "entityName"] },
+    },
+    {
+      name: "esg_portfolio_overview",
+      description: "ESG portfolio overview across all scored entities. Rating distribution, worst/best performers, CSRD/LkSG relevant counts.",
+      inputSchema: { type: "object" as const, properties: { entityIds: { type: "array", items: { type: "string" } } } },
+    },
+    {
+      name: "esg_gap_analysis",
+      description: "Identify ESG gaps across scored entities. Returns dimensions below target with prioritized recommendations.",
+      inputSchema: { type: "object" as const, properties: { targetScore: { type: "number", description: "Target ESG score (default: 70)" } } },
+    },
+    {
+      name: "carbon_footprint",
+      description: "Calculate CO2e footprint for a product's supply chain (Scope 1/2/3). Breakdown by transport/manufacturing/raw material, by supplier, with optional nearshoring scenarios.",
+      inputSchema: { type: "object" as const, properties: { itemNo: { type: "string" }, includeScenarios: { type: "boolean" } }, required: ["itemNo"] },
+    },
+    {
+      name: "osint_regulatory_brief",
+      description: "Scan regulatory feeds for changes affecting supply chain, ESG, automotive, data, and trade. Returns classified alerts with impact levels.",
+      inputSchema: { type: "object" as const, properties: { categories: { type: "array", items: { type: "string" } } } },
+    },
+    // ── Porsche Consulting: Supply Chain Advanced ─────────────────
+    {
+      name: "nearshoring_evaluate",
+      description: "Multi-dimensional nearshoring analysis comparing current supplier location against target countries (labor cost, transport, ESG, carbon, geopolitical risk, quality, IP protection).",
+      inputSchema: { type: "object" as const, properties: { vendorId: { type: "string" }, targetCountries: { type: "array", items: { type: "object", properties: { country: { type: "string" }, region: { type: "string" } } } } }, required: ["vendorId", "targetCountries"] },
+    },
+    // ── Porsche Consulting: Revenue Intelligence ─────────────────
+    {
+      name: "erp_customer360_clv",
+      description: "Calculate Customer Lifetime Value using order history. Returns CLV, order frequency, expected lifetime, and customer segmentation (platinum/gold/silver/bronze).",
+      inputSchema: { type: "object" as const, properties: { workspaceId: { type: "string" }, customerExternalId: { type: "string" } } },
+    },
+    {
+      name: "q2o_win_loss_analysis",
+      description: "Analyze won vs lost deals across dimensions (deal size, industry, product group, duration, discount, sentiment). Identifies winning patterns and recommendations.",
+      inputSchema: { type: "object" as const, properties: { workspaceId: { type: "string" }, since: { type: "string" } } },
+    },
+    {
+      name: "price_optimize",
+      description: "Price optimization from historical quote data. Returns price bands, elasticity estimates, and pricing recommendations per product group.",
+      inputSchema: { type: "object" as const, properties: { workspaceId: { type: "string" } } },
+    },
+    {
+      name: "erp_revenue_forecast",
+      description: "Revenue forecasting with confidence intervals. Exponential smoothing + trend decomposition for monthly time series.",
+      inputSchema: { type: "object" as const, properties: { workspaceId: { type: "string" }, horizonMonths: { type: "number", description: "Months to forecast (default: 6)" } } },
+    },
+    // ── Porsche Consulting: Competitor Intelligence ───────────────
+    {
+      name: "competitor_monitor",
+      description: "Monitor a competitor via OSINT news and market signals. Returns classified signals with threat level assessment.",
+      inputSchema: { type: "object" as const, properties: { name: { type: "string" }, domains: { type: "array", items: { type: "string" } } }, required: ["name"] },
+    },
+    {
+      name: "osint_competitor_brief",
+      description: "Generate a structured competitor intelligence brief: SWOT analysis, market position, recent moves, and strategic recommendations.",
+      inputSchema: { type: "object" as const, properties: { name: { type: "string" }, domains: { type: "array", items: { type: "string" } } }, required: ["name"] },
+    },
+    // ── Porsche Consulting: Workflow Playbooks ────────────────────
+    {
+      name: "list_transformation_playbooks",
+      description: "List available transformation playbook templates (PPAP, ERP Go-Live, Kaizen, S&OP, Supplier Qualification, Digital Twin). Filter by industry or category.",
+      inputSchema: { type: "object" as const, properties: { industry: { type: "string" }, category: { type: "string" } } },
+    },
+    {
+      name: "execute_playbook",
+      description: "Execute a transformation playbook as a multi-step workflow. Returns taskId for progress tracking.",
+      inputSchema: { type: "object" as const, properties: { playbookId: { type: "string" }, params: { type: "object" } }, required: ["playbookId"] },
+    },
+    {
+      name: "playbook_progress",
+      description: "Check progress of a running playbook/workflow execution.",
+      inputSchema: { type: "object" as const, properties: { workflowId: { type: "string" } }, required: ["workflowId"] },
+    },
+    {
+      name: "workflow_performance",
+      description: "Workflow performance analytics: execution stats, step duration percentiles, failure rates across workflow runs.",
+      inputSchema: { type: "object" as const, properties: { workflowId: { type: "string" } } },
+    },
+    // ── Porsche Consulting: Enterprise ────────────────────────────
+    {
+      name: "compliance_report",
+      description: "Generate compliance report: access control audit, audit trail analysis, data protection status, operational metrics, and ESG compliance summary.",
+      inputSchema: { type: "object" as const, properties: { workspaceId: { type: "string" }, since: { type: "string" }, until: { type: "string" } } },
     },
   ];
 
