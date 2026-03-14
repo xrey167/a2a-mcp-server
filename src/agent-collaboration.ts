@@ -264,12 +264,13 @@ Provide your refined answer.`;
       const agentStart = Date.now();
       const timeoutMs = request.timeoutMs ?? 60_000;
       try {
+        let timerId: ReturnType<typeof setTimeout> | undefined;
         const result = await Promise.race([
           dispatch(agent, { prompt }, prompt),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Timeout")), timeoutMs),
-          ),
-        ]);
+          new Promise<never>((_, reject) => {
+            timerId = setTimeout(() => reject(new Error("Timeout")), timeoutMs);
+          }),
+        ]).finally(() => clearTimeout(timerId));
         return { agent, result, durationMs: Date.now() - agentStart, round: round + 1 } as AgentResponse;
       } catch (err) {
         return { agent, result: "", error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - agentStart, round: round + 1 } as AgentResponse;
@@ -383,12 +384,13 @@ async function queryAgents(
     agents.map(async (agent) => {
       const agentStart = Date.now();
       try {
+        let timerId: ReturnType<typeof setTimeout> | undefined;
         const result = await Promise.race([
           dispatch(agent, { prompt: query, message: query }, query),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Timeout")), timeoutMs),
-          ),
-        ]);
+          new Promise<never>((_, reject) => {
+            timerId = setTimeout(() => reject(new Error("Timeout")), timeoutMs);
+          }),
+        ]).finally(() => clearTimeout(timerId));
         return { agent, result, durationMs: Date.now() - agentStart };
       } catch (err) {
         return { agent, result: "", error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - agentStart };
