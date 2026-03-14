@@ -54,7 +54,7 @@ export interface CLVSegmentation {
  */
 export function calculateCLV(
   customer: CustomerOrderHistory,
-  options?: { marginPercent?: number; discountRate?: number },
+  options?: { marginPercent?: number },
 ): CLVResult {
   const margin = (options?.marginPercent ?? 30) / 100;
   const orders = customer.orders;

@@ -173,6 +173,13 @@ export function calculateCarbonFootprint(
 
 // ── Scenario Generation ─────────────────────────────────────────
 
+const EU_COUNTRY_CODES = new Set(["DE", "FR", "PL", "CZ", "AT", "NL", "SE", "IT", "ES", "DK", "FI", "HU", "RO", "BG"]);
+
+function calcReduction(currentTotal: number, scenarioTotal: number): number {
+  if (currentTotal <= 0) return 0;
+  return Math.round(((currentTotal - scenarioTotal) / currentTotal) * 100);
+}
+
 function generateScenarios(
   routes: SupplyChainRoute[],
   bom: BOMComponent[],
@@ -190,16 +197,16 @@ function generateScenarios(
     scenarios.push({
       name: "Switch air freight to sea",
       totalKgCO2e: result.totalKgCO2e,
-      reduction: Math.round(((currentTotal - result.totalKgCO2e) / currentTotal) * 100),
+      reduction: calcReduction(currentTotal, result.totalKgCO2e),
       costDelta: -5, // Sea is cheaper
     });
   }
 
   // Scenario 2: Nearshoring to Poland (EU, moderate cost)
-  const nonEU = routes.filter((r) => !["DE", "FR", "PL", "CZ", "AT", "NL", "SE", "IT", "ES", "DK", "FI", "HU", "RO", "BG"].includes(r.country));
+  const nonEU = routes.filter((r) => !EU_COUNTRY_CODES.has(r.country));
   if (nonEU.length > 0) {
     const adjusted = routes.map((r) =>
-      !["DE", "FR", "PL", "CZ", "AT", "NL", "SE", "IT", "ES", "DK", "FI", "HU", "RO", "BG"].includes(r.country)
+      !EU_COUNTRY_CODES.has(r.country)
         ? { ...r, country: "PL", distanceKm: 800, transportMode: "road" as const }
         : r,
     );
@@ -207,7 +214,7 @@ function generateScenarios(
     scenarios.push({
       name: "Nearshoring to Poland",
       totalKgCO2e: result.totalKgCO2e,
-      reduction: Math.round(((currentTotal - result.totalKgCO2e) / currentTotal) * 100),
+      reduction: calcReduction(currentTotal, result.totalKgCO2e),
       costDelta: 15, // Higher labor cost
     });
   }
@@ -222,7 +229,7 @@ function generateScenarios(
     scenarios.push({
       name: "Switch road to rail",
       totalKgCO2e: result.totalKgCO2e,
-      reduction: Math.round(((currentTotal - result.totalKgCO2e) / currentTotal) * 100),
+      reduction: calcReduction(currentTotal, result.totalKgCO2e),
       costDelta: 2,
     });
   }

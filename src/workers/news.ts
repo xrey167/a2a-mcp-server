@@ -648,14 +648,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const allArticles: Article[] = [];
       for (const feedUrl of REGULATORY_FEEDS) {
         try {
-          const resp = await fetch(feedUrl, { signal: AbortSignal.timeout(10000) });
-          if (resp.ok) {
-            const xml = await resp.text();
-            const articles = parseRSS(xml, feedUrl);
-            allArticles.push(...articles);
-          }
+          validateUrlNotInternal(feedUrl);
+          const articles = await fetchRss(feedUrl, 50, 10000);
+          allArticles.push(...articles);
         } catch {
-          // Feed unavailable — skip silently
+          // Feed unavailable or blocked — skip silently
         }
       }
       // Also classify any articles passed via args

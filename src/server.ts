@@ -193,6 +193,7 @@ const WEBHOOK_BLOCKED_SKILLS = new Set([
   // OSINT skills that accept user-supplied URLs (SSRF prevention)
   "fetch_rss",
   "aggregate_feeds",
+  "regulatory_scan",
 ]);
 
 function sanitizeUrlForLog(url: string): string {
@@ -1999,11 +2000,11 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
         try {
           // Fetch MRP and pipeline data via delegates
           const [mrpRaw, pipelineRaw] = await Promise.allSettled([
-            dispatchSkill("delegate", { skillId: "mrp_run", message: "Run MRP for S&OP reconciliation" }, text),
+            dispatchSkill("delegate", { skillId: "run_mrp", message: "Run MRP for S&OP reconciliation" }, text),
             dispatchSkill("delegate", { skillId: "q2o_pipeline_status", message: "Get pipeline for S&OP" }, text),
           ]);
-          const mrpData = mrpRaw.status === "fulfilled" ? JSON.parse(mrpRaw.value) : {};
-          const pipelineData = pipelineRaw.status === "fulfilled" ? JSON.parse(pipelineRaw.value) : {};
+          const mrpData = mrpRaw.status === "fulfilled" ? (safeParseJSON(mrpRaw.value) ?? {}) : {};
+          const pipelineData = pipelineRaw.status === "fulfilled" ? (safeParseJSON(pipelineRaw.value) ?? {}) : {};
 
           const demand = {
             confirmedOrders: Array.isArray(pipelineData.orders) ? pipelineData.orders.map((o: Record<string, unknown>) => ({
@@ -2031,14 +2032,40 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
     case "sop_scenario_compare": {
       const opts = validateOrchestrator("sop_scenario_compare", args);
       const { reconcileDemandSupply, simulateScenario } = await import("./mrp/sop.js");
-      // Build a baseline and simulate
-      const baseline = reconcileDemandSupply(
-        { confirmedOrders: [], forecastedDemand: [] },
-        { availableCapacity: [], currentInventory: [], openPurchaseOrders: [] },
-        [opts.period],
-      );
-      const result = simulateScenario(baseline, opts.adjustment as { type: string; percentage: number; items?: string[] });
-      return JSON.stringify(result, null, 2);
+      const task = createTask({ skillId: "sop_scenario_compare" });
+      markWorking(task.id);
+      (async () => {
+        try {
+          // Fetch MRP and pipeline data to build a real baseline (same as sop_demand_supply_match)
+          const [mrpRaw, pipelineRaw] = await Promise.allSettled([
+            dispatchSkill("delegate", { skillId: "run_mrp", message: "Run MRP for S&OP scenario baseline" }, text),
+            dispatchSkill("delegate", { skillId: "q2o_pipeline_status", message: "Get pipeline for S&OP scenario" }, text),
+          ]);
+          const mrpData = mrpRaw.status === "fulfilled" ? (safeParseJSON(mrpRaw.value) ?? {}) : {};
+          const pipelineData = pipelineRaw.status === "fulfilled" ? (safeParseJSON(pipelineRaw.value) ?? {}) : {};
+          const demand = {
+            confirmedOrders: Array.isArray((pipelineData as Record<string, unknown>).orders)
+              ? (pipelineData as Record<string, unknown[]>).orders.map((o: Record<string, unknown>) => ({
+                  itemNo: o.itemNo ?? o.product ?? "UNKNOWN", quantity: Number(o.quantity ?? 1), dueDate: String(o.dueDate ?? new Date().toISOString()),
+                }))
+              : [],
+            forecastedDemand: [],
+          };
+          const supply = {
+            availableCapacity: [],
+            currentInventory: Array.isArray((mrpData as Record<string, unknown>).inventoryLevels) ? (mrpData as Record<string, unknown[]>).inventoryLevels : [],
+            openPurchaseOrders: Array.isArray((mrpData as Record<string, unknown>).openPOs) ? (mrpData as Record<string, unknown[]>).openPOs : [],
+            plannedOrders: Array.isArray((mrpData as Record<string, unknown>).plannedOrders) ? (mrpData as Record<string, unknown[]>).plannedOrders : [],
+          };
+          const baseline = reconcileDemandSupply(demand, supply, [opts.period]);
+          const result = simulateScenario(baseline, opts.adjustment as { type: string; percentage: number; items?: string[] });
+          markCompleted(task.id, JSON.stringify(result, null, 2));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { markFailed(task.id, { code: "SOP_SCENARIO_ERROR", message: msg }); } catch {}
+        }
+      })();
+      return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
     }
 
     case "sop_consensus_plan": {
@@ -2266,9 +2293,9 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             dispatchSkill("delegate", { skillId: "fetch_rss", message: `Search news for ${opts.name}`, args: { query: opts.name } }, text),
             dispatchSkill("delegate", { skillId: "detect_anomalies", message: `Market signals for ${opts.name}`, args: { query: opts.name } }, text),
           ]);
-          const newsData = newsRaw.status === "fulfilled" ? safeParseJSON(newsRaw.value) ?? [] : [];
-          const marketData = marketRaw.status === "fulfilled" ? safeParseJSON(marketRaw.value) ?? [] : [];
-          markCompleted(task.id, JSON.stringify({ competitor: opts.name, newsSignals: Array.isArray(newsData) ? newsData.length : 0, marketSignals: Array.isArray(marketData) ? marketData.length : 0, rawNews: newsData, rawMarket: marketData }, null, 2));
+          const rawNews = newsRaw.status === "fulfilled" ? (() => { const p = safeParseJSON(newsRaw.value); return Array.isArray(p) ? p : (p as Record<string, unknown>)?.items ?? []; })() : [];
+          const rawMarket = marketRaw.status === "fulfilled" ? (() => { const p = safeParseJSON(marketRaw.value); return Array.isArray(p) ? p : (p as Record<string, unknown>)?.items ?? []; })() : [];
+          markCompleted(task.id, JSON.stringify({ competitor: opts.name, newsSignals: (rawNews as unknown[]).length, marketSignals: (rawMarket as unknown[]).length, rawNews, rawMarket }, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           try { markFailed(task.id, { code: "COMPETITOR_MONITOR_ERROR", message: msg }); } catch {}
