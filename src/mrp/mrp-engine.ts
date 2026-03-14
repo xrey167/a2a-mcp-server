@@ -22,6 +22,7 @@ import type {
   ItemAvailability,
   WorkCenterData,
   RoutingStep,
+  TransferOrder,
 } from "../erp/types.js";
 import type {
   BucketSize,
@@ -35,6 +36,8 @@ import type {
   MRPException,
   MRPSummary,
   WorkCenter,
+  PeggingTree,
+  PeggingRecord,
 } from "./types.js";
 import { buildPlanningHorizon, buildDemandPlanWithExceptions, type DemandForecast } from "./demand-plan.js";
 import { buildSupplyPlan, calculateGrossToNet } from "./gross-to-net.js";
@@ -102,6 +105,8 @@ export interface MRPInput {
   erpRoutings?: Map<string, RoutingStep[]>;
   /** Previously firmed planned orders — treated as fixed supply, not regenerated */
   firmedOrders?: PlannedOrder[];
+  /** Transfer orders (in-transit stock) — included as scheduled receipts in supply plan */
+  transferOrders?: TransferOrder[];
   config: MRPConfig;
 }
 
@@ -111,7 +116,7 @@ export interface MRPInput {
  * Execute a full MRP run.
  */
 export function runMRP(input: MRPInput): MRPRunResult {
-  const { productionOrders, salesOrders, purchaseOrders, components, availability, erpWorkCenters, erpRoutings, config } = input;
+  const { productionOrders, salesOrders, purchaseOrders, components, availability, erpWorkCenters, erpRoutings, transferOrders, config } = input;
   const startTime = Date.now();
 
   log("starting MRP run");
@@ -137,9 +142,9 @@ export function runMRP(input: MRPInput): MRPRunResult {
 
   log(`demand plan: ${demandPlan.size} items with demand`);
 
-  // 3. Build supply plan (on-hand + POs + production)
+  // 3. Build supply plan (on-hand + POs + production + transfer orders)
   const itemNos = Array.from(demandPlan.keys());
-  const supplyPlan = buildSupplyPlan(itemNos, purchaseOrders, productionOrders, availability, horizon);
+  const supplyPlan = buildSupplyPlan(itemNos, purchaseOrders, productionOrders, availability, horizon, transferOrders);
 
   // 4. Lot sizing config — merge ERP policies with user overrides
   const itemPolicies = new Map<string, LotSizingPolicy>();
@@ -216,6 +221,8 @@ export function runMRP(input: MRPInput): MRPRunResult {
       pegging = buildPeggingTrees(peggingInput);
     }
     log(`pegging: ${pegging.length} trees built`);
+    // Back-populate peggedDemand on planned orders from pegging tree data
+    backLinkPeggedDemand(plannedOrders, pegging);
   }
 
   // 8. Capacity planning — merge ERP work centers with discovered/override data
@@ -340,6 +347,28 @@ function determineAction(
   const today = new Date().toISOString().slice(0, 10);
   if (releaseBucket.startDate <= today) return "expedite";
   return "create";
+}
+
+// ── Pegging Back-Link ────────────────────────────────────────────
+
+/**
+ * Back-populate peggedDemand on planned orders using built pegging trees.
+ * Each planned order references the sales order / demand that caused it.
+ */
+function backLinkPeggedDemand(plannedOrders: PlannedOrder[], pegging: PeggingTree[]): void {
+  const orderMap = new Map<string, PlannedOrder>(plannedOrders.map((o) => [o.id, o]));
+  for (const tree of pegging) {
+    for (const peg of tree.pegs) {
+      if (peg.supplySourceType === "planned_order") {
+        const order = orderMap.get(peg.supplySourceId);
+        if (order && !order.peggedDemand.some(
+          (p: PeggingRecord) => p.demandSourceType === peg.demandSourceType && p.demandSourceId === peg.demandSourceId && p.demandItemNo === peg.demandItemNo,
+        )) {
+          order.peggedDemand.push(peg);
+        }
+      }
+    }
+  }
 }
 
 // ── Exception Detection ──────────────────────────────────────────
