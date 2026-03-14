@@ -415,7 +415,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
       const { sessionId, prompt } = p;
 
       const session = sessions.get(sessionId);
-      if (!session) throw { code: -32602, message: `Unknown session: ${sessionId}` };
+      if (!session) throw Object.assign(new Error(`Unknown session: ${sessionId}`), { code: -32602 });
 
       // Extract text from content blocks
       const userText = prompt
@@ -479,7 +479,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
     }
 
     default:
-      throw { code: -32601, message: `Method not found: ${method}` };
+      throw Object.assign(new Error(`Method not found: ${method}`), { code: -32601 });
   }
 }
 
