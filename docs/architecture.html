@@ -1,0 +1,1125 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>A2A-MCP Server — Architekturdokumentation</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+  <style>
+    :root {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --surface2:  #22263a;
+      --border:    #2e3452;
+      --accent:    #6366f1;
+      --accent2:   #10b981;
+      --accent3:   #f59e0b;
+      --accent4:   #ef4444;
+      --text:      #e2e8f0;
+      --muted:     #8892b0;
+      --code-bg:   #161b2e;
+      --nav-w:     260px;
+      --radius:    10px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      display: flex;
+    }
+
+    /* ─── SIDEBAR ─── */
+    nav {
+      position: fixed;
+      top: 0; left: 0;
+      width: var(--nav-w);
+      height: 100vh;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      z-index: 100;
+    }
+    .nav-logo {
+      padding: 24px 20px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo h1 { font-size: 1rem; font-weight: 700; color: var(--text); }
+    .nav-logo .badge {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 2px 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 0.7rem;
+      border-radius: 99px;
+      font-weight: 600;
+      letter-spacing: .04em;
+    }
+    .nav-section { padding: 12px 20px 4px; font-size: 0.68rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); font-weight: 700; }
+    nav a {
+      display: block;
+      padding: 7px 20px;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.875rem;
+      border-left: 3px solid transparent;
+      transition: all .15s;
+    }
+    nav a:hover { color: var(--text); background: var(--surface2); }
+    nav a.active { color: var(--accent); border-left-color: var(--accent); background: rgba(99,102,241,.08); }
+    .nav-footer { margin-top: auto; padding: 16px 20px; font-size: 0.75rem; color: var(--muted); border-top: 1px solid var(--border); }
+
+    /* ─── MAIN ─── */
+    main {
+      margin-left: var(--nav-w);
+      max-width: 900px;
+      padding: 48px 56px 96px;
+      flex: 1;
+    }
+
+    /* ─── TYPOGRAPHY ─── */
+    h1 { font-size: 2.2rem; font-weight: 800; line-height: 1.2; margin-bottom: 12px; color: #fff; }
+    h2 { font-size: 1.5rem; font-weight: 700; margin: 56px 0 16px; padding-top: 56px; border-top: 1px solid var(--border); color: #fff; }
+    h3 { font-size: 1.1rem; font-weight: 600; margin: 28px 0 10px; color: #e0e6ff; }
+    h4 { font-size: 0.95rem; font-weight: 600; margin: 20px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    p { margin-bottom: 14px; color: var(--text); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    ul, ol { padding-left: 1.5em; margin-bottom: 14px; }
+    li { margin-bottom: 5px; }
+    strong { color: #fff; font-weight: 600; }
+    code:not(pre code) {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 0.85em;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      color: #93c5fd;
+    }
+    pre {
+      background: var(--code-bg) !important;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      overflow-x: auto;
+      margin: 16px 0 24px;
+      font-size: 0.875rem;
+      line-height: 1.6;
+    }
+    pre code { background: none !important; border: none !important; padding: 0 !important; }
+
+    /* ─── HERO ─── */
+    .hero {
+      background: linear-gradient(135deg, #1a1d27 0%, #16192b 100%);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 36px 40px;
+      margin-bottom: 48px;
+    }
+    .hero .subtitle { color: var(--muted); font-size: 1.05rem; max-width: 620px; margin-top: 10px; }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+    .badge-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 12px;
+      border-radius: 99px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      border: 1px solid;
+    }
+    .pill-purple { background: rgba(99,102,241,.12); color: #a5b4fc; border-color: rgba(99,102,241,.3); }
+    .pill-green  { background: rgba(16,185,129,.12); color: #6ee7b7; border-color: rgba(16,185,129,.3); }
+    .pill-amber  { background: rgba(245,158,11,.12);  color: #fcd34d; border-color: rgba(245,158,11,.3); }
+    .pill-red    { background: rgba(239,68,68,.12);   color: #fca5a5; border-color: rgba(239,68,68,.3); }
+    .pill-blue   { background: rgba(59,130,246,.12);  color: #93c5fd; border-color: rgba(59,130,246,.3); }
+
+    /* ─── CALLOUT ─── */
+    .callout {
+      border-left: 4px solid;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      padding: 14px 18px;
+      margin: 20px 0;
+      font-size: 0.9rem;
+    }
+    .callout-info   { border-color: var(--accent);  background: rgba(99,102,241,.08); }
+    .callout-tip    { border-color: var(--accent2); background: rgba(16,185,129,.08); }
+    .callout-warn   { border-color: var(--accent3); background: rgba(245,158,11,.08); }
+    .callout-danger { border-color: var(--accent4); background: rgba(239,68,68,.08); }
+    .callout strong { display: block; margin-bottom: 4px; }
+
+    /* ─── ARCH DIAGRAM ─── */
+    .arch-diagram {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.78rem;
+      line-height: 1.5;
+      color: #a8c7f8;
+      overflow-x: auto;
+      margin: 20px 0 28px;
+      white-space: pre;
+    }
+
+    /* ─── WORKER GRID ─── */
+    .worker-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 14px;
+      margin: 20px 0;
+    }
+    .worker-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      transition: border-color .2s;
+    }
+    .worker-card:hover { border-color: var(--accent); }
+    .worker-card .port {
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: .05em;
+      margin-bottom: 4px;
+      font-family: monospace;
+    }
+    .worker-card h4 { margin: 0 0 6px; font-size: 0.95rem; color: #fff; text-transform: none; letter-spacing: 0; }
+    .worker-card .skills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+    .skill-tag {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 7px;
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-family: monospace;
+    }
+
+    /* ─── FEATURE TABLE ─── */
+    table { width: 100%; border-collapse: collapse; margin: 16px 0 24px; font-size: 0.875rem; }
+    th { text-align: left; padding: 10px 14px; background: var(--surface2); color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--border); }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,.02); }
+    td code { font-size: 0.8rem; }
+
+    /* ─── ROUTING STEPS ─── */
+    .steps { counter-reset: step; list-style: none; padding: 0; }
+    .steps li {
+      counter-increment: step;
+      display: flex; align-items: flex-start; gap: 14px;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .steps li:last-child { border-bottom: none; }
+    .step-num {
+      min-width: 30px; height: 30px;
+      background: var(--accent);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.8rem; font-weight: 700; color: #fff;
+      flex-shrink: 0; margin-top: 2px;
+    }
+    .step-body strong { display: block; margin-bottom: 3px; color: #fff; }
+    .step-body p { margin: 0; color: var(--muted); font-size: 0.875rem; }
+
+    /* ─── PROFILE CARDS ─── */
+    .profile-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin: 16px 0; }
+    .profile-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
+    .profile-card .pname { font-weight: 700; color: #fff; font-size: 0.9rem; }
+    .profile-card .pdesc { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
+
+    /* ─── SCROLLSPY ─── */
+    section { scroll-margin-top: 24px; }
+
+    /* ─── RESPONSIVE ─── */
+    @media (max-width: 768px) {
+      nav { transform: translateX(-100%); }
+      main { margin-left: 0; padding: 32px 24px 80px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════
+     NAVIGATION SIDEBAR
+════════════════════════════════════════════════════ -->
+<nav id="sidebar">
+  <div class="nav-logo">
+    <h1>A2A-MCP Server</h1>
+    <span class="badge">v0.1.0 · Architektur</span>
+  </div>
+
+  <span class="nav-section">Einführung</span>
+  <a href="#overview">Überblick</a>
+  <a href="#quickstart">Quick Start</a>
+  <a href="#profiles">Profile</a>
+
+  <span class="nav-section">Architektur</span>
+  <a href="#architecture">Systemarchitektur</a>
+  <a href="#routing">Skill-Routing</a>
+  <a href="#workers">Worker-Agents</a>
+
+  <span class="nav-section">Kernfunktionen</span>
+  <a href="#workflow">Workflow Engine</a>
+  <a href="#sandbox">Sandbox Execution</a>
+  <a href="#collaboration">Agent Collaboration</a>
+  <a href="#event-bus">Event Bus</a>
+  <a href="#skill-pipeline">Skill Pipelines</a>
+  <a href="#factory">Project Factory</a>
+  <a href="#memory">Memory &amp; Knowledge</a>
+
+  <span class="nav-section">Observability</span>
+  <a href="#tracing">Distributed Tracing</a>
+  <a href="#metrics">Metriken</a>
+  <a href="#cache">Skill Cache</a>
+  <a href="#circuit-breaker">Circuit Breaker</a>
+
+  <span class="nav-section">Sicherheit</span>
+  <a href="#auth">Auth &amp; RBAC</a>
+  <a href="#audit">Audit Logging</a>
+  <a href="#licensing">Skill-Tiers</a>
+
+  <span class="nav-section">Integration</span>
+  <a href="#webhooks">Webhooks</a>
+  <a href="#federation">Federation</a>
+  <a href="#plugins">Plugin System</a>
+  <a href="#deployment">Deployment</a>
+
+  <div class="nav-footer">
+    <div>Protokolle: MCP · A2A · ACP</div>
+    <div>Runtime: Bun ≥ 1.0 · TypeScript</div>
+    <div style="margin-top:6px;"><a href="https://github.com/xrey167/a2a-mcp-server" target="_blank">GitHub ↗</a></div>
+  </div>
+</nav>
+
+
+<!-- ═══════════════════════════════════════════════════
+     MAIN CONTENT
+════════════════════════════════════════════════════ -->
+<main>
+
+  <!-- HERO -->
+  <div class="hero">
+    <h1>A2A-MCP Server</h1>
+    <p class="subtitle">
+      Ein Multi-Protokoll-Automatisierungs-Framework, das Claude Code, Zed IDE und A2A-kompatible Agenten
+      mit einer Flotte von 14 spezialisierten Worker-Agents verbindet.
+    </p>
+    <div class="badge-row">
+      <span class="badge-pill pill-purple">MCP (Anthropic)</span>
+      <span class="badge-pill pill-green">A2A (Google)</span>
+      <span class="badge-pill pill-red">ACP (Zed IDE)</span>
+      <span class="badge-pill pill-amber">14 Worker-Agents</span>
+      <span class="badge-pill pill-blue">50+ MCP-Tools</span>
+      <span class="badge-pill pill-blue">Bun · TypeScript · MIT</span>
+    </div>
+  </div>
+
+
+  <!-- ─── ÜBERBLICK ─── -->
+  <section id="overview">
+    <h2>Überblick</h2>
+    <p>
+      Der <strong>A2A-MCP Server</strong> ist ein Single-Entry-Point-Orchestrator (<code>src/server.ts</code>),
+      der gleichzeitig als MCP-Server (stdio), A2A-HTTP-Endpunkt (Port 8080) und ACP-Server (stdin/stdout)
+      fungiert. Beim Start spawnt er lokale Worker-Prozesse, entdeckt ihre Fähigkeiten per
+      <code>GET /.well-known/agent.json</code> und baut eine dynamische Routing-Map auf.
+    </p>
+    <p>
+      Das System ist für drei Nutzergruppen konzipiert:
+    </p>
+    <ul>
+      <li><strong>KI-Assistenten (Claude Code, Zed):</strong> nutzen MCP/ACP-Protokoll, um Aufgaben an Worker zu delegieren</li>
+      <li><strong>Externe Dienste:</strong> sprechen A2A-HTTP oder triggern Webhooks</li>
+      <li><strong>Entwickler:</strong> erweitern das System mit eigenen Workers, Pipelines und Plugins</li>
+    </ul>
+
+    <div class="callout callout-info">
+      <strong>Schlüsselprinzip: stdout ist reserviert</strong>
+      Alle Log-Ausgaben müssen über <code>process.stderr.write()</code> erfolgen — niemals <code>console.log()</code>.
+      stdout ist ausschließlich für den MCP JSON-RPC-Stream.
+    </div>
+  </section>
+
+
+  <!-- ─── QUICK START ─── -->
+  <section id="quickstart">
+    <h2>Quick Start</h2>
+    <h3>Voraussetzungen</h3>
+    <ul>
+      <li><a href="https://bun.sh" target="_blank">Bun</a> ≥ 1.0</li>
+      <li><code>ANTHROPIC_API_KEY</code> — für <code>ask_claude</code> und LLM-basiertes Routing</li>
+      <li>Optional: <code>GOOGLE_API_KEY</code> (Design-Worker), <code>NASA_FIRMS_KEY</code> (Climate-Worker)</li>
+    </ul>
+
+    <h3>Installation &amp; Registrierung</h3>
+    <pre><code class="language-bash"># Repository klonen und Abhängigkeiten installieren
+git clone https://github.com/xrey167/a2a-mcp-server
+cd a2a-mcp-server
+bun install
+
+# Konfiguration initialisieren (Profil wählen)
+bun src/cli.ts init           # full  — alle 14 Worker
+bun src/cli.ts init --lite    # lite  — shell + web + ai
+bun src/cli.ts init --data    # data  — lite + data
+bun src/cli.ts init --osint   # osint — lite + 6 OSINT-Worker
+
+# Mit Claude Code registrieren (user scope)
+claude mcp add --scope user a2a-mcp-bridge -- bun $(pwd)/src/server.ts
+claude mcp list   # Verbindung prüfen</code></pre>
+
+    <h3>Starten</h3>
+    <pre><code class="language-bash"># Orchestrator + alle aktivierten Worker starten
+bun src/server.ts
+
+# Einen einzelnen Worker isoliert starten
+bun src/workers/shell.ts
+
+# Tool testen ohne Claude Code neu zu starten
+env -u CLAUDECODE claude -p "Use the delegate tool to run echo hello" \
+  --allowedTools "mcp__a2a-mcp-bridge__delegate"</code></pre>
+
+    <h3>Wichtige CLI-Befehle</h3>
+    <table>
+      <thead><tr><th>Befehl</th><th>Beschreibung</th></tr></thead>
+      <tbody>
+        <tr><td><code>bun src/cli.ts init</code></td><td>Konfiguration initialisieren / Profil wählen</td></tr>
+        <tr><td><code>bun src/cli.ts workers</code></td><td>Verfügbare Worker auflisten</td></tr>
+        <tr><td><code>bun src/cli.ts create-worker &lt;name&gt;</code></td><td>Neuen Worker scaffolden</td></tr>
+        <tr><td><code>bun build src/server.ts --target bun</code></td><td>Typecheck via Bundler (kein tsc nötig)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+
+  <!-- ─── PROFILE ─── -->
+  <section id="profiles">
+    <h2>Profile</h2>
+    <p>
+      Das System unterstützt <strong>Profile</strong>, um gezielt nur eine Teilmenge der Worker zu starten.
+      Das aktive Profil wird in <code>~/.a2a-mcp/config.json</code> gesetzt.
+    </p>
+    <div class="profile-row">
+      <div class="profile-card">
+        <div class="pname">full</div>
+        <div class="pdesc">Alle 14 Worker aktiv. Maximale Fähigkeiten.</div>
+      </div>
+      <div class="profile-card">
+        <div class="pname">lite</div>
+        <div class="pdesc">shell + web + ai. Minimaler Ressourcenverbrauch.</div>
+      </div>
+      <div class="profile-card">
+        <div class="pname">data</div>
+        <div class="pdesc">lite + data. Für Datenanalyse-Workflows.</div>
+      </div>
+      <div class="profile-card">
+        <div class="pname">osint</div>
+        <div class="pdesc">lite + 6 OSINT-Worker (news, market, signal, monitor, infra, climate).</div>
+      </div>
+    </div>
+    <pre><code class="language-json">// ~/.a2a-mcp/config.json
+{
+  "profile": "lite",
+  "workers": { "enabled": ["shell", "web", "ai"] },
+  "remoteWorkers": [
+    { "url": "https://my-agent.example.com", "name": "custom-agent" }
+  ]
+}</code></pre>
+  </section>
+
+
+  <!-- ─── ARCHITEKTUR ─── -->
+  <section id="architecture">
+    <h2>Systemarchitektur</h2>
+    <p>
+      Der Orchestrator ist das Herzstück. Er nimmt Anfragen über drei Protokolle entgegen,
+      wendet Sicherheits- und Observability-Schichten an und leitet sie an den passenden Worker weiter.
+    </p>
+
+    <div class="arch-diagram">┌──────────────────────────────────────────────────────────────────┐
+│                       Orchestrator v3.0.0                        │
+│                                                                  │
+│  ┌───────────┐   ┌───────────────┐   ┌─────────┐   ┌────────┐  │
+│  │ MCP stdio │   │ A2A HTTP:8080 │   │  ACP    │   │  /dash │  │
+│  │ (Claude)  │   │  (Fastify)    │   │  (Zed)  │   │  board │  │
+│  └─────┬─────┘   └──────┬────────┘   └────┬────┘   └────────┘  │
+│        └────────────────┴────────────────-┘                     │
+│                              │                                   │
+│  ┌───────────────────────────┴─────────────────────────────────┐ │
+│  │               Skill Router &amp; Dispatcher                    │ │
+│  │  1. agentUrl  → direkt (circuit-broken)                    │ │
+│  │  2. skillId   → Skill-Map-Lookup                           │ │
+│  │  3. nichts    → ask_claude wählt {url, skillId}            │ │
+│  └───────────────────────────┬─────────────────────────────────┘ │
+│                              │                                   │
+│  ┌───────────────────────────┴─────────────────────────────────┐ │
+│  │  Circuit Breaker │ Metriken │ Tracing │ Skill Cache         │ │
+│  │  RBAC │ Audit    │ License Gate │ Prompt Sanitizer          │ │
+│  └───────────────────────────┬─────────────────────────────────┘ │
+│                              │                                   │
+│  ┌───────────────────────────┴─────────────────────────────────┐ │
+│  │                       Worker Fleet                          │ │
+│  │  shell:8081  web:8082   ai:8083   code:8084                 │ │
+│  │  knowledge:8085  design:8086  factory:8087                  │ │
+│  │  data:8088  news:8089  market:8090  signal:8091             │ │
+│  │  monitor:8092  infra:8093  climate:8094                     │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘</div>
+
+    <h3>Startup-Sequenz</h3>
+    <ol class="steps">
+      <li>
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <strong>Konfiguration laden</strong>
+          <p>Liest <code>~/.a2a-mcp/config.json</code>: Profil, aktivierte Worker, Remote-Worker-URLs.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <strong>Worker spawnen</strong>
+          <p>Startet aktivierte lokale Worker als Subprozesse via <code>Bun.spawn</code>.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <strong>Agent Discovery</strong>
+          <p>Fragt jeden Worker per <code>GET /.well-known/agent.json</code> ab (Exponential Backoff, bis zu 5 Versuche).</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <strong>Routing-Map aufbauen</strong>
+          <p>Erstellt die <code>skillId → workerURL</code>-Map für schnelles Routing.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-num">5</div>
+        <div class="step-body">
+          <strong>Health Polling</strong>
+          <p>Alle 30 Sekunden werden Worker-Health-Checks durchgeführt. Circuit Breaker reagieren bei Ausfällen.</p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+
+  <!-- ─── ROUTING ─── -->
+  <section id="routing">
+    <h2>Skill-Routing</h2>
+    <p>
+      Das <code>delegate</code>-Tool ist das primäre MCP-Werkzeug. Es leitet Anfragen nach einer
+      dreistufigen Priorisierung weiter:
+    </p>
+    <ol class="steps">
+      <li>
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <strong>Direktes Routing via <code>agentUrl</code></strong>
+          <p>Ist eine explizite URL angegeben, wird die Anfrage direkt (circuit-broken) dorthin gesendet.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <strong>Skill-Map-Lookup via <code>skillId</code></strong>
+          <p>Ist eine Skill-ID bekannt, findet das System den zuständigen Worker über die interne Map.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <strong>LLM-basiertes Routing</strong>
+          <p>Kein explizites Ziel? <code>ask_claude</code> analysiert die Worker-Cards und wählt <code>{url, skillId}</code>.</p>
+        </div>
+      </li>
+    </ol>
+    <div class="callout callout-tip">
+      <strong>Capability Negotiation</strong>
+      <code>src/capability-negotiation.ts</code> ermöglicht versions-bewusstes Routing mit SemVer-Matching,
+      Load-Awareness und Health-Scores.
+    </div>
+  </section>
+
+
+  <!-- ─── WORKER AGENTS ─── -->
+  <section id="workers">
+    <h2>Worker-Agents</h2>
+    <p>
+      Jeder Worker ist ein eigenständiger Fastify-HTTP-Server in einem separaten Prozess.
+      Alle Worker implementieren die Skills <code>remember</code> und <code>recall</code>
+      (backed by <code>src/memory.ts</code>).
+    </p>
+
+    <div class="worker-grid">
+      <div class="worker-card">
+        <div class="port">:8081 · shell</div>
+        <h4>Shell Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Dateisystem &amp; Shell-Ausführung mit SSE-Streaming.</p>
+        <div class="skills">
+          <span class="skill-tag">run_shell</span>
+          <span class="skill-tag">read_file</span>
+          <span class="skill-tag">write_file</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8082 · web</div>
+        <h4>Web Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">HTTP-Anfragen und API-Aufrufe.</p>
+        <div class="skills">
+          <span class="skill-tag">fetch_url</span>
+          <span class="skill-tag">call_api</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8083 · ai</div>
+        <h4>AI Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Claude-Aufrufe, Dateisuche, SQLite-Abfragen.</p>
+        <div class="skills">
+          <span class="skill-tag">ask_claude</span>
+          <span class="skill-tag">search_files</span>
+          <span class="skill-tag">query_sqlite</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8084 · code</div>
+        <h4>Code Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Code-Ausführung via Codex-CLI-Subprocess.</p>
+        <div class="skills">
+          <span class="skill-tag">codex_exec</span>
+          <span class="skill-tag">codex_review</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8085 · knowledge</div>
+        <h4>Knowledge Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Notiz-Management mit CRUD und Volltextsuche.</p>
+        <div class="skills">
+          <span class="skill-tag">create_note</span>
+          <span class="skill-tag">read_note</span>
+          <span class="skill-tag">update_note</span>
+          <span class="skill-tag">search_notes</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8086 · design</div>
+        <h4>Design Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">UI/UX-Analyse und Verbesserungsvorschläge (Gemini).</p>
+        <div class="skills">
+          <span class="skill-tag">enhance_ui_prompt</span>
+          <span class="skill-tag">suggest_screens</span>
+          <span class="skill-tag">design_critique</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8087 · factory</div>
+        <h4>Factory Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Vollständige Projekte aus vagen Ideen generieren.</p>
+        <div class="skills">
+          <span class="skill-tag">normalize_intent</span>
+          <span class="skill-tag">create_project</span>
+          <span class="skill-tag">quality_gate</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8088 · data</div>
+        <h4>Data Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">CSV/JSON-Parsing, Transformationen, Pivot-Tables.</p>
+        <div class="skills">
+          <span class="skill-tag">parse_csv</span>
+          <span class="skill-tag">transform_data</span>
+          <span class="skill-tag">analyze_data</span>
+          <span class="skill-tag">pivot_table</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8089 · news</div>
+        <h4>News Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">RSS-Feeds, Klassifikation, Signaldetektion.</p>
+        <div class="skills">
+          <span class="skill-tag">fetch_rss</span>
+          <span class="skill-tag">classify_news</span>
+          <span class="skill-tag">detect_signals</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8090 · market</div>
+        <h4>Market Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Kursabfragen, technische Analyse, Screening.</p>
+        <div class="skills">
+          <span class="skill-tag">fetch_quote</span>
+          <span class="skill-tag">technical_analysis</span>
+          <span class="skill-tag">screen_market</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8091 · signal</div>
+        <h4>Signal Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Bedrohungsklassifikation, Instabilitätsindex.</p>
+        <div class="skills">
+          <span class="skill-tag">aggregate_signals</span>
+          <span class="skill-tag">classify_threat</span>
+          <span class="skill-tag">instability_index</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8092 · monitor</div>
+        <h4>Monitor Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Konflikttracking, Schifffahrt, Watchlist-Checks.</p>
+        <div class="skills">
+          <span class="skill-tag">track_conflicts</span>
+          <span class="skill-tag">track_vessels</span>
+          <span class="skill-tag">watchlist_check</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8093 · infra</div>
+        <h4>Infra Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Supply-Chain-Mapping, Engpass-Analyse.</p>
+        <div class="skills">
+          <span class="skill-tag">cascade_analysis</span>
+          <span class="skill-tag">supply_chain_map</span>
+          <span class="skill-tag">chokepoint_assess</span>
+        </div>
+      </div>
+      <div class="worker-card">
+        <div class="port">:8094 · climate</div>
+        <h4>Climate Agent</h4>
+        <p style="font-size:.82rem;color:var(--muted)">Erdbeben, Waldbrände, Klimaanomalien (NASA).</p>
+        <div class="skills">
+          <span class="skill-tag">fetch_earthquakes</span>
+          <span class="skill-tag">fetch_wildfires</span>
+          <span class="skill-tag">assess_exposure</span>
+        </div>
+      </div>
+    </div>
+
+    <h3>Eigenen Worker erstellen</h3>
+    <pre><code class="language-bash"># Scaffold generieren
+bun src/cli.ts create-worker my-tool</code></pre>
+    <p>Die neue Datei <code>src/workers/my-tool.ts</code> muss folgendes implementieren:</p>
+    <ol>
+      <li>Einen Fastify-Server auf einem freien Port</li>
+      <li>Ein <code>AGENT_CARD</code>-Export mit Skill-Definitionen</li>
+      <li>Einen Eintrag im <code>ALL_WORKERS</code>-Array in <code>src/server.ts</code></li>
+      <li>Alle Ausgaben ausschließlich via <code>stderr</code></li>
+    </ol>
+  </section>
+
+
+  <!-- ─── WORKFLOW ENGINE ─── -->
+  <section id="workflow">
+    <h2>Workflow Engine</h2>
+    <p>
+      <code>src/workflow-engine.ts</code> führt multi-step DAG-basierte Workflows aus.
+      Steps deklarieren Abhängigkeiten; die Engine führt sie in topologischer Reihenfolge mit
+      maximaler Parallelität aus.
+    </p>
+    <h3>Kernkonzepte</h3>
+    <ul>
+      <li><strong>Template-Referenzen:</strong> <code>{"{{stepId.result}}"}</code> verbindet Outputs mit Inputs</li>
+      <li><strong>Bedingte Ausführung:</strong> <code>when</code>-Ausdrücke pro Step</li>
+      <li><strong>Fehlerstrategien:</strong> <code>fail</code>, <code>skip</code>, <code>retry</code> pro Step</li>
+    </ul>
+    <pre><code class="language-typescript">// Beispiel-Workflow: Datei lesen → analysieren → Bericht erstellen
+const workflow: WorkflowDefinition = {
+  steps: [
+    {
+      id: "read",
+      skillId: "read_file",
+      args: { path: "./data.csv" }
+    },
+    {
+      id: "analyze",
+      skillId: "analyze_data",
+      dependsOn: ["read"],
+      args: { data: "{{read.result}}" }
+    },
+    {
+      id: "report",
+      skillId: "ask_claude",
+      dependsOn: ["analyze"],
+      args: { prompt: "Erstelle einen Bericht aus: {{analyze.result}}" }
+    }
+  ]
+};</code></pre>
+  </section>
+
+
+  <!-- ─── SANDBOX ─── -->
+  <section id="sandbox">
+    <h2>Sandbox Execution</h2>
+    <p>
+      <code>sandbox_execute</code> führt TypeScript-Code in isolierten Bun-Subprozessen aus.
+      Der Code hat Zugriff auf alle Worker-Skills via <code>skill(id, args)</code>.
+    </p>
+    <ul>
+      <li>Variablen persistieren per Session in SQLite (<code>~/.a2a-sandbox.db</code>)</li>
+      <li>Ergebnisse &gt;4KB werden automatisch in FTS5 indiziert → durchsuchbar via <code>search(varName, query)</code></li>
+      <li><code>sandbox_vars</code> verwaltet persistierte Variablen</li>
+    </ul>
+    <pre><code class="language-typescript">// Im Sandbox-Kontext verfügbar:
+const result = await skill("ask_claude", { prompt: "Analysiere ..." });
+const found = await search("result", "Schlüsselwort");
+$vars.myData = result; // persistieren</code></pre>
+  </section>
+
+
+  <!-- ─── AGENT COLLABORATION ─── -->
+  <section id="collaboration">
+    <h2>Agent Collaboration</h2>
+    <p>
+      <code>src/agent-collaboration.ts</code> implementiert Multi-Agent-Konsens- und Verhandlungsprotokolle.
+    </p>
+    <table>
+      <thead><tr><th>Strategie</th><th>Beschreibung</th></tr></thead>
+      <tbody>
+        <tr><td><code>fan_out</code></td><td>Parallele Abfrage mehrerer Agents + Merge der Ergebnisse</td></tr>
+        <tr><td><code>consensus</code></td><td>KI-bewertetes Voting über Agent-Antworten</td></tr>
+        <tr><td><code>debate</code></td><td>Iterative Kritik/Verfeinerung zwischen Agents</td></tr>
+        <tr><td><code>map_reduce</code></td><td>Aufgabe verteilen → Teilergebnisse aggregieren</td></tr>
+      </tbody>
+    </table>
+    <p>Das MCP-Tool <code>collaborate</code> gibt eine <code>taskId</code> zurück — das Ergebnis wird asynchron abgerufen.</p>
+  </section>
+
+
+  <!-- ─── EVENT BUS ─── -->
+  <section id="event-bus">
+    <h2>Event Bus</h2>
+    <p>
+      <code>src/event-bus.ts</code> implementiert ein Real-Time Pub/Sub-System mit topic-basiertem Routing.
+    </p>
+    <ul>
+      <li><strong>Wildcards:</strong> <code>*</code> (ein Segment), <code>#</code> (multi-Segment) — z.B. <code>agent.*.completed</code>, <code>workflow.#</code></li>
+      <li><strong>Event History</strong> mit konfigurierbarer Retention</li>
+      <li><strong>Dead Letter Queue</strong> für fehlgeschlagene Deliveries</li>
+      <li>Events werden automatisch bei Agent-Completion/-Failure publiziert</li>
+    </ul>
+    <table>
+      <thead><tr><th>MCP-Tool</th><th>Funktion</th></tr></thead>
+      <tbody>
+        <tr><td><code>event_publish</code></td><td>Event publizieren</td></tr>
+        <tr><td><code>event_subscribe</code></td><td>Topic abonnieren (mit Wildcard-Support)</td></tr>
+        <tr><td><code>event_replay</code></td><td>Events ab einem Timestamp wiederholen</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+
+  <!-- ─── SKILL PIPELINES ─── -->
+  <section id="skill-pipeline">
+    <h2>Skill Pipelines (Composer)</h2>
+    <p>
+      <code>src/skill-composer.ts</code> ermöglicht deklaratives Skill-Chaining mit
+      <code>pipe()</code>-Semantik.
+    </p>
+    <ul>
+      <li>Output eines Steps wird automatisch Input des nächsten</li>
+      <li>Template-Referenzen: <code>{"{{prev.result}}"}</code>, <code>{"{{input.*}}"}</code>, <code>{"{{steps.alias.result}}"}</code></li>
+      <li>Fehlerstrategien pro Step: <code>abort</code> (Standard), <code>skip</code>, Fallback-Wert</li>
+      <li>Bedingte Ausführung via <code>when</code>-Ausdrücke</li>
+    </ul>
+    <table>
+      <thead><tr><th>Tool</th><th>Beschreibung</th></tr></thead>
+      <tbody>
+        <tr><td><code>compose_pipeline</code></td><td>Neue Pipeline definieren und speichern</td></tr>
+        <tr><td><code>execute_pipeline</code></td><td>Gespeicherte Pipeline ausführen</td></tr>
+        <tr><td><code>list_pipelines</code></td><td>Alle verfügbaren Pipelines auflisten</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+
+  <!-- ─── FACTORY ─── -->
+  <section id="factory">
+    <h2>Project Factory</h2>
+    <p>
+      <code>factory_workflow</code> generiert vollständige Projekte aus einer vagen Idee.
+      Der Factory-Worker koordiniert ai-agent (Spec + Code Gen), shell-agent (File I/O)
+      und code-agent (Review).
+    </p>
+    <h3>Unterstützte Pipeline-Typen</h3>
+    <ul>
+      <li><strong>app</strong> — Expo (React Native)</li>
+      <li><strong>website</strong> — Next.js</li>
+      <li><strong>mcp-server</strong> — MCP + Bun</li>
+      <li><strong>agent</strong> — KI-Agent</li>
+      <li><strong>api</strong> — REST API</li>
+      <li><strong>cli</strong> — CLI-Tool</li>
+    </ul>
+    <div class="callout callout-tip">
+      <strong>Ralph Mode (Quality Gate)</strong>
+      Jede generierte Datei wird mehrdimensional bewertet. Bei zu niedrigem Score läuft automatisch
+      eine Fix-Schleife — so lange, bis alle Qualitätskriterien erfüllt sind.
+    </div>
+  </section>
+
+
+  <!-- ─── MEMORY ─── -->
+  <section id="memory">
+    <h2>Memory &amp; Knowledge</h2>
+    <p>
+      <code>src/memory.ts</code> schreibt Erinnerungen parallel in zwei Speicher:
+    </p>
+    <ul>
+      <li><strong>SQLite</strong> — <code>~/.a2a-memory.db</code> (schnelle Abfragen)</li>
+      <li><strong>Obsidian Markdown</strong> — <code>~/Documents/Obsidian/a2a-knowledge/_memory/</code> (human-readable, versionierbar)</li>
+    </ul>
+    <p>Jeder Worker kann <code>remember</code> und <code>recall</code> nutzen, um kontextuelles Wissen zu persistieren.</p>
+  </section>
+
+
+  <!-- ─── TRACING ─── -->
+  <section id="tracing">
+    <h2>Distributed Tracing</h2>
+    <p>
+      <code>src/tracing.ts</code> implementiert OpenTelemetry-style Observability.
+      Jede Delegation erstellt automatisch eine Trace mit Kind-Spans pro Worker-Aufruf.
+    </p>
+    <ul>
+      <li>Trace → Span Hierarchie mit automatischer Context-Propagation</li>
+      <li>Span Tags, Events, Status-Tracking</li>
+      <li>Waterfall-Visualisierung für Debugging</li>
+    </ul>
+    <table>
+      <thead><tr><th>Tool</th><th>Beschreibung</th></tr></thead>
+      <tbody>
+        <tr><td><code>list_traces</code></td><td>Alle Traces auflisten</td></tr>
+        <tr><td><code>get_trace</code></td><td>Waterfall-Ansicht einer Trace abrufen</td></tr>
+        <tr><td><code>search_traces</code></td><td>Traces nach Skill/Agent/Status suchen</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+
+  <!-- ─── METRIKEN ─── -->
+  <section id="metrics">
+    <h2>Metriken</h2>
+    <p>
+      <code>src/metrics.ts</code> sammelt Skill-Ausführungsmetriken.
+      Verfügbar via <code>get_metrics</code>-Tool und <code>a2a://metrics</code>-Resource.
+    </p>
+    <ul>
+      <li>Call-Counts pro Skill</li>
+      <li>Latenzen: p50, p95, p99</li>
+      <li>Fehlerquoten pro Worker</li>
+    </ul>
+  </section>
+
+
+  <!-- ─── CACHE ─── -->
+  <section id="cache">
+    <h2>Skill Cache</h2>
+    <p>
+      <code>src/skill-cache.ts</code> ist ein LRU-Cache mit TTL für idempotente Skill-Ergebnisse.
+    </p>
+    <ul>
+      <li>Content-addressable Keys (deterministisches Hashing von <code>skillId + args</code>)</li>
+      <li>Per-Skill TTL-Konfiguration</li>
+      <li>Side-Effect-Skills (<code>run_shell</code>, <code>write_file</code>, etc.) werden automatisch ausgeschlossen</li>
+      <li>Integriert in den Delegate-Flow: Cache-Check vor Worker-Aufruf</li>
+    </ul>
+  </section>
+
+
+  <!-- ─── CIRCUIT BREAKER ─── -->
+  <section id="circuit-breaker">
+    <h2>Circuit Breaker</h2>
+    <p>
+      <code>src/circuit-breaker.ts</code> schützt das System vor kaskadierende Ausfällen.
+    </p>
+    <ul>
+      <li><strong>Zustände:</strong> <code>closed</code> → <code>open</code> → <code>half_open</code></li>
+      <li>Bei <code>open</code>: Fail-Fast ohne Worker-Aufruf</li>
+      <li>Auto-Recovery nach konfigurierbarem Cooldown</li>
+      <li>Ein Circuit Breaker pro Worker</li>
+    </ul>
+  </section>
+
+
+  <!-- ─── AUTH ─── -->
+  <section id="auth">
+    <h2>Auth &amp; RBAC</h2>
+    <p>
+      <code>src/auth.ts</code> verwaltet API-Keys mit SHA-256-Hashing und rollenbasierter Zugriffskontrolle.
+    </p>
+    <table>
+      <thead><tr><th>Rolle</th><th>Berechtigungen</th></tr></thead>
+      <tbody>
+        <tr><td><code>admin</code></td><td>Vollzugriff, Key-Management, Konfiguration</td></tr>
+        <tr><td><code>operator</code></td><td>Skills ausführen, Workflows starten</td></tr>
+        <tr><td><code>viewer</code></td><td>Nur Lesen, keine Ausführung</td></tr>
+      </tbody>
+    </table>
+    <p>
+      <code>src/workspace.ts</code> implementiert Team-Workspaces mit Mitgliedern, Rollen
+      (owner/member/readonly), gemeinsamer Umgebung und Knowledge-Directories.
+    </p>
+  </section>
+
+
+  <!-- ─── AUDIT ─── -->
+  <section id="audit">
+    <h2>Audit Logging</h2>
+    <p>
+      <code>src/audit.ts</code> schreibt ein unveränderliches SQLite-Audit-Trail aller Skill-Invocations
+      nach <code>~/.a2a-mcp/audit.db</code>.
+    </p>
+    <ul>
+      <li>Abfragbar nach: Actor, Skill, Workspace, Zeitraum</li>
+      <li>Automatisch indiziert für schnelle Queries</li>
+    </ul>
+    <table>
+      <thead><tr><th>Tool</th><th>Beschreibung</th></tr></thead>
+      <tbody>
+        <tr><td><code>audit_query</code></td><td>Audit-Log abfragen (gefiltert)</td></tr>
+        <tr><td><code>audit_stats</code></td><td>Aggregierte Statistiken abrufen</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+
+  <!-- ─── LICENSING ─── -->
+  <section id="licensing">
+    <h2>Skill-Tiers &amp; Licensing</h2>
+    <p>
+      <code>src/skill-tier.ts</code> implementiert ein Open-Core-Modell mit drei Tiers.
+    </p>
+    <table>
+      <thead><tr><th>Tier</th><th>Beschreibung</th></tr></thead>
+      <tbody>
+        <tr><td><code>free</code></td><td>Kernfähigkeiten, keine Lizenz nötig</td></tr>
+        <tr><td><code>pro</code></td><td>Erweiterte Skills, Lizenzschlüssel erforderlich</td></tr>
+        <tr><td><code>enterprise</code></td><td>Voller Funktionsumfang inkl. RBAC, Audit, Agency-Workflows</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Lizenz via <code>~/.a2a-mcp/license.json</code> oder Umgebungsvariable <code>A2A_LICENSE_KEY</code>.
+    </p>
+  </section>
+
+
+  <!-- ─── WEBHOOKS ─── -->
+  <section id="webhooks">
+    <h2>Webhooks</h2>
+    <p>
+      <code>src/webhooks.ts</code> erlaubt die Integration externer Dienste (GitHub, Stripe, etc.).
+    </p>
+    <ul>
+      <li>HMAC-SHA256 Signaturverifizierung</li>
+      <li>Payload-Field-Mapping auf A2A-Tasks</li>
+      <li>Asynchrone Task-Erstellung</li>
+      <li>Endpunkt: <code>POST /webhooks/:id</code> auf dem A2A-HTTP-Server (Port 8080)</li>
+    </ul>
+  </section>
+
+
+  <!-- ─── FEDERATION ─── -->
+  <section id="federation">
+    <h2>Federation</h2>
+    <p>
+      Remote-Worker können ohne lokalen Prozess eingebunden werden. Der Orchestrator entdeckt,
+      health-pollt und routet Skills zu ihnen — genau wie bei lokalen Workern.
+    </p>
+    <pre><code class="language-json">// ~/.a2a-mcp/config.json
+{
+  "remoteWorkers": [
+    { "url": "https://my-agent.example.com", "name": "custom-agent" }
+  ]
+}</code></pre>
+    <p>Die URL wird automatisch in der SSRF-Validierung whitegelistet.</p>
+  </section>
+
+
+  <!-- ─── PLUGINS ─── -->
+  <section id="plugins">
+    <h2>Plugin System</h2>
+    <p>
+      Das Plugin-System (<code>src/skill-loader.ts</code>) lädt benutzerdefinierte Worker
+      aus <code>~/.a2a-mcp/workers/</code>.
+    </p>
+    <ul>
+      <li>Auto-Discovery beim Start</li>
+      <li>File-Watcher für Hot-Reload im Entwicklungsmodus</li>
+      <li>Plugins können neue Skills, Personas und MCP-Tools bereitstellen</li>
+    </ul>
+  </section>
+
+
+  <!-- ─── DEPLOYMENT ─── -->
+  <section id="deployment">
+    <h2>Deployment</h2>
+    <h3>Docker</h3>
+    <pre><code class="language-bash">docker build -t a2a-mcp-server .
+docker-compose up</code></pre>
+
+    <h3>Fly.io</h3>
+    <pre><code class="language-bash">fly deploy   # fly.toml ist bereits konfiguriert</code></pre>
+
+    <h3>Railway</h3>
+    <pre><code class="language-bash"># railway.json ist bereits im Repository enthalten
+railway up</code></pre>
+
+    <h3>Health-Endpunkte</h3>
+    <p>Implementiert via <code>src/cloud.ts</code> mit Graceful-Shutdown und Readiness-Probes.</p>
+    <table>
+      <thead><tr><th>Endpunkt</th><th>Beschreibung</th></tr></thead>
+      <tbody>
+        <tr><td><code>GET /healthz</code></td><td>Liveness-Check</td></tr>
+        <tr><td><code>GET /readyz</code></td><td>Readiness-Check (Worker bereit?)</td></tr>
+        <tr><td><code>GET /health</code></td><td>Detaillierter Health-Status</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Umgebungsvariablen</h3>
+    <table>
+      <thead><tr><th>Variable</th><th>Beschreibung</th><th>Pflicht</th></tr></thead>
+      <tbody>
+        <tr><td><code>ANTHROPIC_API_KEY</code></td><td>Claude-API-Key</td><td>Ja (oder OAuth)</td></tr>
+        <tr><td><code>GOOGLE_API_KEY</code></td><td>Gemini für Design-Worker</td><td>Nein</td></tr>
+        <tr><td><code>NASA_FIRMS_KEY</code></td><td>Wildfire-Daten für Climate-Worker</td><td>Nein</td></tr>
+        <tr><td><code>A2A_LICENSE_KEY</code></td><td>Pro/Enterprise-Lizenzschlüssel</td><td>Nein</td></tr>
+        <tr><td><code>OBSIDIAN_VAULT</code></td><td>Pfad zum Obsidian-Vault (Standard: ~/Documents/Obsidian/a2a-knowledge)</td><td>Nein</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+</main>
+
+<!-- ─── SCROLLSPY SCRIPT ─── -->
+<script>
+  const sections = document.querySelectorAll('section[id]');
+  const navLinks = document.querySelectorAll('nav a[href^="#"]');
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        navLinks.forEach(a => a.classList.remove('active'));
+        const active = document.querySelector(`nav a[href="#${e.target.id}"]`);
+        if (active) active.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  sections.forEach(s => observer.observe(s));
+</script>
+
+</body>
+</html>
