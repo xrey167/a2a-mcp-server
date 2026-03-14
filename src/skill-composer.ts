@@ -137,6 +137,16 @@ function resolveTemplate(
   context: { input: Record<string, unknown>; prev: { result?: string }; steps: Record<string, { result?: string }> },
 ): unknown {
   if (typeof template === "string") {
+    // Non-embedded single reference: parse JSON so downstream skills get objects/arrays
+    const singleRefMatch = template.match(/^\s*\{\{([\w.]+)\}\}\s*$/);
+    if (singleRefMatch) {
+      const value = getNestedValue(context, singleRefMatch[1]);
+      if (value === undefined) return `<${singleRefMatch[1]}>`;
+      const str = sanitizeSubstitution(String(value));
+      try { return JSON.parse(str); } catch { return str; }
+    }
+
+    // Embedded: substitute as sanitized string within the larger text
     return template.replace(/\{\{([\w.]+)\}\}/g, (_, path: string) => {
       const value = getNestedValue(context, path);
       return value !== undefined ? sanitizeSubstitution(String(value)) : `<${path}>`;

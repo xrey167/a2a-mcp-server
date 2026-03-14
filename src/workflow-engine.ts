@@ -173,13 +173,37 @@ function resolveTemplates(
     // argument value — for shell skills this is the "run whatever the previous
     // step returned" pattern — so only basic cleaning is applied.
     const isEmbedded = !/^\s*\{\{[-\w]+\.result\}\}\s*$/.test(value);
+
+    // Non-embedded single reference: try to return parsed JSON so downstream
+    // skills receive arrays/objects instead of JSON strings.  This is critical
+    // for workflow chaining where step A produces `[{...}]` and step B's Zod
+    // schema expects an array, not a string.
+    if (!isEmbedded) {
+      const match = value.match(/^\s*\{\{([-\w]+)\.result\}\}\s*$/);
+      if (match) {
+        const stepId = match[1];
+        const result = stepResults.get(stepId);
+        if (!result) {
+          process.stderr.write(`[workflow] template ref {{${stepId}.result}} not found — substituting placeholder\n`);
+        }
+        const rawValue = result?.result ?? `<step ${stepId} not found>`;
+        try {
+          return JSON.parse(rawValue);
+        } catch {
+          // Not valid JSON — return as sanitized string
+          return sanitizeTemplateValue(rawValue, targetSkillId, false);
+        }
+      }
+    }
+
+    // Embedded: substitute as sanitized string within the larger text
     return value.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
       const result = stepResults.get(stepId);
       if (!result) {
         process.stderr.write(`[workflow] template ref {{${stepId}.result}} not found — substituting placeholder\n`);
       }
       const rawValue = result?.result ?? `<step ${stepId} not found>`;
-      return sanitizeTemplateValue(rawValue, targetSkillId, isEmbedded);
+      return sanitizeTemplateValue(rawValue, targetSkillId, true);
     });
   }
   if (Array.isArray(value)) {
