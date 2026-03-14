@@ -103,6 +103,22 @@ const SignalSchemas = {
       mediaCoverage: z.number().optional().default(0.05),
     }).optional().default({}),
   }).passthrough(),
+
+  correlate_signals: z.object({
+    signals: z.array(z.object({
+      type: z.string(),
+      source: z.string().optional().default(""),
+      title: z.string().optional().default(""),
+      description: z.string().optional().default(""),
+      severity: z.enum(["critical", "high", "medium", "low", "info"]).optional().default("info"),
+      country: z.string().optional().default(""),
+      timestamp: z.string().optional().default(""),
+      value: z.number().optional(),
+      metadata: z.record(z.unknown()).optional().default({}),
+    })).min(1),
+    windowHours: z.number().positive().optional().default(24),
+    minConfidence: z.number().min(0).max(1).optional().default(0.3),
+  }).passthrough(),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -119,6 +135,7 @@ const AGENT_CARD = {
     { id: "detect_convergence", name: "Detect Convergence", description: "Detect geographic convergence where multiple signal types cluster within a radius" },
     { id: "baseline_compare", name: "Baseline Compare", description: "Temporal baseline analysis: compare recent values against rolling baseline via z-score" },
     { id: "instability_index", name: "Instability Index", description: "Compute composite Country Instability Index from weighted multi-stream indicators" },
+    { id: "correlate_signals", name: "Correlate Signals", description: "Detect 14 cross-domain correlation patterns (Silent Divergence, Conflict Escalation, Cyber-Infrastructure, etc.)" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -581,6 +598,293 @@ function computeInstabilityIndex(
   return { country, index, level, breakdown, dominantFactors };
 }
 
+// ── Cross-Domain Correlation Patterns ─────────────────────────────
+
+/** Signal types recognized for pattern matching */
+const SIGNAL_TYPES = {
+  conflict: ["conflict", "attack", "war", "combat", "strike"],
+  military: ["military", "troops", "deployment", "exercise", "naval"],
+  cyber: ["cyber", "hack", "breach", "malware", "ransomware"],
+  infrastructure: ["infrastructure", "pipeline", "cable", "port", "power"],
+  economic: ["economic", "market", "trade", "finance", "gdp"],
+  climate: ["climate", "earthquake", "flood", "wildfire", "hurricane", "disaster"],
+  displacement: ["displacement", "refugee", "migration", "asylum"],
+  news: ["news", "media", "press", "report", "coverage"],
+  nuclear: ["nuclear", "radiation", "enrichment", "warhead"],
+  maritime: ["maritime", "vessel", "shipping", "tanker", "naval"],
+  unrest: ["unrest", "protest", "riot", "demonstration", "coup"],
+  logistics: ["logistics", "supply", "transport", "cargo"],
+} as const;
+
+interface CorrelationSignal {
+  type: string;
+  source: string;
+  title: string;
+  description: string;
+  severity: string;
+  country: string;
+  timestamp: string;
+  value?: number;
+  metadata: Record<string, unknown>;
+}
+
+interface PatternMatch {
+  pattern: string;
+  id: number;
+  detected: boolean;
+  confidence: number;
+  evidence: string[];
+  countries: string[];
+}
+
+function classifySignalDomain(sig: CorrelationSignal): string[] {
+  const text = `${sig.type} ${sig.title} ${sig.description}`.toLowerCase();
+  const domains: string[] = [];
+  for (const [domain, keywords] of Object.entries(SIGNAL_TYPES)) {
+    if (keywords.some(kw => text.includes(kw))) domains.push(domain);
+  }
+  return domains.length > 0 ? domains : [sig.type.toLowerCase()];
+}
+
+function detectCorrelationPatterns(
+  signals: CorrelationSignal[],
+  windowHours: number,
+  minConfidence: number,
+): { patterns: PatternMatch[]; summary: { detected: number; total: number; highConfidence: number } } {
+  // Filter by time window
+  const now = Date.now();
+  const cutoff = now - windowHours * 60 * 60 * 1000;
+  const filtered = signals.filter(s => {
+    if (!s.timestamp) return true;
+    const ts = new Date(s.timestamp).getTime();
+    return isNaN(ts) || ts >= cutoff;
+  });
+
+  // Pre-classify all signals into domains
+  const byDomain = new Map<string, CorrelationSignal[]>();
+  const byCountry = new Map<string, CorrelationSignal[]>();
+
+  for (const sig of filtered) {
+    const domains = classifySignalDomain(sig);
+    for (const d of domains) {
+      if (!byDomain.has(d)) byDomain.set(d, []);
+      byDomain.get(d)!.push(sig);
+    }
+    const country = sig.country || "unknown";
+    if (!byCountry.has(country)) byCountry.set(country, []);
+    byCountry.get(country)!.push(sig);
+  }
+
+  const domainCount = (d: string) => (byDomain.get(d) ?? []).length;
+  const domainSeverity = (d: string) => {
+    const sigs = byDomain.get(d) ?? [];
+    return sigs.reduce((s, sig) => s + (SEVERITY_SCORE[sig.severity] ?? 1), 0);
+  };
+  const countriesFor = (d: string) => [...new Set((byDomain.get(d) ?? []).map(s => s.country).filter(Boolean))];
+  const evidenceFor = (d: string, limit = 3) => (byDomain.get(d) ?? []).map(s => s.title).filter(Boolean).slice(0, limit);
+
+  const patterns: PatternMatch[] = [];
+
+  // Pattern 1: Silent Divergence — market/economic signals without news coverage
+  {
+    const market = domainCount("economic");
+    const news = domainCount("news");
+    const detected = market >= 2 && news === 0;
+    const confidence = detected ? Math.min(0.9, 0.5 + market * 0.1) : market >= 1 && news === 0 ? 0.3 : 0;
+    patterns.push({ pattern: "Silent Divergence", id: 1, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${market} economic signals, 0 news signals`, ...evidenceFor("economic")] : [],
+      countries: detected ? countriesFor("economic") : [] });
+  }
+
+  // Pattern 2: News Flood — high news volume without market reaction
+  {
+    const news = domainCount("news");
+    const market = domainCount("economic");
+    const detected = news >= 5 && market === 0;
+    const confidence = detected ? Math.min(0.9, 0.4 + news * 0.05) : 0;
+    patterns.push({ pattern: "News Flood", id: 2, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${news} news signals, 0 market signals`, ...evidenceFor("news")] : [],
+      countries: detected ? countriesFor("news") : [] });
+  }
+
+  // Pattern 3: Conflict Escalation — rising conflict + military in same country
+  {
+    const conflictCountries = new Set(countriesFor("conflict"));
+    const militaryCountries = new Set(countriesFor("military"));
+    const overlap = [...conflictCountries].filter(c => militaryCountries.has(c) && c !== "unknown");
+    const detected = overlap.length > 0;
+    const severity = domainSeverity("conflict") + domainSeverity("military");
+    const confidence = detected ? Math.min(0.95, 0.5 + severity * 0.02) : 0;
+    patterns.push({ pattern: "Conflict Escalation", id: 3, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`Conflict+military overlap in: ${overlap.join(", ")}`, ...evidenceFor("conflict"), ...evidenceFor("military")] : [],
+      countries: overlap });
+  }
+
+  // Pattern 4: Cyber-Infrastructure — cyber threats coinciding with infrastructure signals
+  {
+    const cyber = domainCount("cyber");
+    const infra = domainCount("infrastructure");
+    const detected = cyber >= 1 && infra >= 1;
+    const confidence = detected ? Math.min(0.9, 0.4 + (cyber + infra) * 0.08) : 0;
+    patterns.push({ pattern: "Cyber-Infrastructure", id: 4, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${cyber} cyber + ${infra} infrastructure signals`, ...evidenceFor("cyber"), ...evidenceFor("infrastructure")] : [],
+      countries: detected ? [...new Set([...countriesFor("cyber"), ...countriesFor("infrastructure")])] : [] });
+  }
+
+  // Pattern 5: Economic Cascade — economic stress + displacement together
+  {
+    const econ = domainCount("economic");
+    const disp = domainCount("displacement");
+    const detected = econ >= 1 && disp >= 1;
+    const confidence = detected ? Math.min(0.85, 0.4 + (econ + disp) * 0.1) : 0;
+    patterns.push({ pattern: "Economic Cascade", id: 5, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${econ} economic + ${disp} displacement signals`, ...evidenceFor("economic"), ...evidenceFor("displacement")] : [],
+      countries: detected ? [...new Set([...countriesFor("economic"), ...countriesFor("displacement")])] : [] });
+  }
+
+  // Pattern 6: Climate-Conflict — natural disaster signals near conflict zones
+  {
+    const climateCountries = new Set(countriesFor("climate"));
+    const conflictCountries = new Set(countriesFor("conflict"));
+    const overlap = [...climateCountries].filter(c => conflictCountries.has(c) && c !== "unknown");
+    const detected = overlap.length > 0;
+    const confidence = detected ? Math.min(0.85, 0.5 + overlap.length * 0.1) : 0;
+    patterns.push({ pattern: "Climate-Conflict", id: 6, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`Climate+conflict overlap in: ${overlap.join(", ")}`, ...evidenceFor("climate"), ...evidenceFor("conflict")] : [],
+      countries: overlap });
+  }
+
+  // Pattern 7: Military Buildup — military + logistics signals increasing together
+  {
+    const mil = domainCount("military");
+    const log = domainCount("logistics");
+    const detected = mil >= 2 && log >= 1;
+    const confidence = detected ? Math.min(0.9, 0.45 + (mil + log) * 0.08) : 0;
+    patterns.push({ pattern: "Military Buildup", id: 7, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${mil} military + ${log} logistics signals`, ...evidenceFor("military"), ...evidenceFor("logistics")] : [],
+      countries: detected ? [...new Set([...countriesFor("military"), ...countriesFor("logistics")])] : [] });
+  }
+
+  // Pattern 8: Media Blackout — signals present but no media coverage
+  {
+    const totalNonNews = filtered.filter(s => !classifySignalDomain(s).includes("news")).length;
+    const news = domainCount("news");
+    const detected = totalNonNews >= 5 && news === 0;
+    const confidence = detected ? Math.min(0.85, 0.4 + totalNonNews * 0.04) : 0;
+    patterns.push({ pattern: "Media Blackout", id: 8, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${totalNonNews} signals with 0 media coverage`] : [],
+      countries: detected ? [...new Set(filtered.map(s => s.country).filter(Boolean))] : [] });
+  }
+
+  // Pattern 9: Humanitarian Crisis — displacement + conflict + climate converging
+  {
+    const disp = domainCount("displacement");
+    const conf = domainCount("conflict");
+    const clim = domainCount("climate");
+    const detected = disp >= 1 && conf >= 1 && clim >= 1;
+    const allCountries = [...new Set([...countriesFor("displacement"), ...countriesFor("conflict"), ...countriesFor("climate")])];
+    const confidence = detected ? Math.min(0.95, 0.5 + (disp + conf + clim) * 0.05) : 0;
+    patterns.push({ pattern: "Humanitarian Crisis", id: 9, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${disp} displacement + ${conf} conflict + ${clim} climate signals`, ...evidenceFor("displacement")] : [],
+      countries: detected ? allCountries : [] });
+  }
+
+  // Pattern 10: Supply Chain Stress — infrastructure + economic + maritime signals
+  {
+    const infra = domainCount("infrastructure");
+    const econ = domainCount("economic");
+    const mar = domainCount("maritime");
+    const present = (infra >= 1 ? 1 : 0) + (econ >= 1 ? 1 : 0) + (mar >= 1 ? 1 : 0);
+    const detected = present >= 2;
+    const confidence = detected ? Math.min(0.85, 0.35 + present * 0.15 + (infra + econ + mar) * 0.03) : 0;
+    patterns.push({ pattern: "Supply Chain Stress", id: 10, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${infra} infra + ${econ} economic + ${mar} maritime signals`] : [],
+      countries: detected ? [...new Set([...countriesFor("infrastructure"), ...countriesFor("economic"), ...countriesFor("maritime")])] : [] });
+  }
+
+  // Pattern 11: Political Instability — civil unrest + media coverage spike
+  {
+    const unrest = domainCount("unrest");
+    const news = domainCount("news");
+    const detected = unrest >= 1 && news >= 2;
+    const confidence = detected ? Math.min(0.85, 0.4 + (unrest + news) * 0.07) : 0;
+    patterns.push({ pattern: "Political Instability", id: 11, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${unrest} unrest + ${news} media signals`, ...evidenceFor("unrest")] : [],
+      countries: detected ? countriesFor("unrest") : [] });
+  }
+
+  // Pattern 12: Cross-Border Spillover — same signal type in multiple countries
+  {
+    const typeCountries = new Map<string, Set<string>>();
+    for (const sig of filtered) {
+      if (!sig.country || sig.country === "unknown") continue;
+      const domains = classifySignalDomain(sig);
+      for (const d of domains) {
+        if (!typeCountries.has(d)) typeCountries.set(d, new Set());
+        typeCountries.get(d)!.add(sig.country);
+      }
+    }
+    const spillovers: string[] = [];
+    const spilloverCountries = new Set<string>();
+    for (const [type, countries] of typeCountries) {
+      if (countries.size >= 3) {
+        spillovers.push(`${type}: ${[...countries].join(", ")}`);
+        for (const c of countries) spilloverCountries.add(c);
+      }
+    }
+    const detected = spillovers.length > 0;
+    const confidence = detected ? Math.min(0.9, 0.4 + spillovers.length * 0.15) : 0;
+    patterns.push({ pattern: "Cross-Border Spillover", id: 12, detected, confidence: round(confidence, 2),
+      evidence: detected ? spillovers : [],
+      countries: [...spilloverCountries] });
+  }
+
+  // Pattern 13: Dual-Use Concern — nuclear/cyber + military signals
+  {
+    const nuc = domainCount("nuclear");
+    const cyber = domainCount("cyber");
+    const mil = domainCount("military");
+    const dualUse = nuc + cyber;
+    const detected = dualUse >= 1 && mil >= 1;
+    const confidence = detected ? Math.min(0.9, 0.5 + dualUse * 0.1 + mil * 0.05) : 0;
+    patterns.push({ pattern: "Dual-Use Concern", id: 13, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`${nuc} nuclear + ${cyber} cyber + ${mil} military signals`, ...evidenceFor("nuclear"), ...evidenceFor("cyber")] : [],
+      countries: detected ? [...new Set([...countriesFor("nuclear"), ...countriesFor("cyber"), ...countriesFor("military")])] : [] });
+  }
+
+  // Pattern 14: Momentum Shift — severity trend change across signal types
+  {
+    // Sort by timestamp and check for severity trend reversal
+    const withTs = filtered
+      .filter(s => s.timestamp)
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const halfIdx = Math.floor(withTs.length / 2);
+    const firstHalf = withTs.slice(0, halfIdx);
+    const secondHalf = withTs.slice(halfIdx);
+    const avgFirst = firstHalf.length > 0 ? firstHalf.reduce((s, sig) => s + (SEVERITY_SCORE[sig.severity] ?? 1), 0) / firstHalf.length : 0;
+    const avgSecond = secondHalf.length > 0 ? secondHalf.reduce((s, sig) => s + (SEVERITY_SCORE[sig.severity] ?? 1), 0) / secondHalf.length : 0;
+    const shift = avgSecond - avgFirst;
+    const detected = Math.abs(shift) >= 1 && withTs.length >= 4;
+    const confidence = detected ? Math.min(0.8, 0.3 + Math.abs(shift) * 0.15) : 0;
+    const direction = shift > 0 ? "escalating" : "de-escalating";
+    patterns.push({ pattern: "Momentum Shift", id: 14, detected, confidence: round(confidence, 2),
+      evidence: detected ? [`Severity trend ${direction}: ${round(avgFirst, 1)} → ${round(avgSecond, 1)}`] : [],
+      countries: detected ? [...new Set(withTs.map(s => s.country).filter(Boolean))] : [] });
+  }
+
+  // Filter by minConfidence
+  const detectedPatterns = patterns.filter(p => p.detected && p.confidence >= minConfidence);
+
+  return {
+    patterns: detectedPatterns,
+    summary: {
+      detected: detectedPatterns.length,
+      total: 14,
+      highConfidence: detectedPatterns.filter(p => p.confidence >= 0.7).length,
+    },
+  };
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string {
@@ -638,6 +942,15 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       const { country, indicators, weights } = SignalSchemas.instability_index.parse(args);
       const result = computeInstabilityIndex(country, indicators, weights);
       return safeStringify(result, 2);
+    }
+
+    case "correlate_signals": {
+      const { signals, windowHours, minConfidence } = SignalSchemas.correlate_signals.parse(args);
+      const result = detectCorrelationPatterns(signals, windowHours, minConfidence);
+      return safeStringify({
+        totalSignals: signals.length,
+        ...result,
+      }, 2);
     }
 
     default:

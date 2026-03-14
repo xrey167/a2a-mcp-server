@@ -256,12 +256,22 @@ interface SurgeAlert {
   foreignOperators: string[];
 }
 
+interface ProximityCluster {
+  centroidLat: number;
+  centroidLon: number;
+  radiusKm: number;
+  theater: string;
+  types: string[];
+  totalCount: number;
+  activities: Array<{ type: string; count: number; operator: string; distanceKm: number }>;
+}
+
 function detectSurges(
   activities: Activity[],
   baselineHours: number,
   surgeMultiplier: number,
   minCount: number,
-): { alerts: SurgeAlert[]; theaterSummary: Record<string, { totalActivity: number; surgeCount: number }> } {
+): { alerts: SurgeAlert[]; theaterSummary: Record<string, { totalActivity: number; surgeCount: number }>; proximityCorrelations: ProximityCluster[] } {
   const now = Date.now();
   const baselineCutoff = now - baselineHours * 60 * 60 * 1000;
   const recentCutoff = now - (baselineHours / 4) * 60 * 60 * 1000;
@@ -321,7 +331,59 @@ function detectSurges(
     return b.multiplier - a.multiplier;
   });
 
-  return { alerts, theaterSummary };
+  // ── Proximity Correlation (Haversine 150km) ──────────────────
+  // Cluster geographically close activities across types
+  const PROXIMITY_KM = 150;
+  const geoActivities = activities.filter(a => a.lat !== undefined && a.lon !== undefined);
+  const assigned = new Set<number>();
+  const proxClusters: ProximityCluster[] = [];
+
+  for (let i = 0; i < geoActivities.length; i++) {
+    if (assigned.has(i)) continue;
+    const cluster: Array<{ activity: Activity; index: number; distance: number }> = [
+      { activity: geoActivities[i], index: i, distance: 0 },
+    ];
+    assigned.add(i);
+
+    for (let j = i + 1; j < geoActivities.length; j++) {
+      if (assigned.has(j)) continue;
+      const dist = haversineKm(
+        geoActivities[i].lat!, geoActivities[i].lon!,
+        geoActivities[j].lat!, geoActivities[j].lon!,
+      );
+      if (dist <= PROXIMITY_KM) {
+        cluster.push({ activity: geoActivities[j], index: j, distance: dist });
+        assigned.add(j);
+      }
+    }
+
+    // Only report clusters with multiple activity types (cross-type correlation)
+    const types = new Set(cluster.map(c => c.activity.type));
+    if (types.size >= 2) {
+      const centroidLat = round(cluster.reduce((s, c) => s + c.activity.lat!, 0) / cluster.length);
+      const centroidLon = round(cluster.reduce((s, c) => s + c.activity.lon!, 0) / cluster.length);
+      const maxDist = Math.max(...cluster.map(c => c.distance), 0);
+
+      proxClusters.push({
+        centroidLat,
+        centroidLon,
+        radiusKm: round(maxDist || PROXIMITY_KM, 1),
+        theater: geoActivities[i].theater,
+        types: [...types],
+        totalCount: cluster.reduce((s, c) => s + c.activity.count, 0),
+        activities: cluster.map(c => ({
+          type: c.activity.type,
+          count: c.activity.count,
+          operator: c.activity.operator,
+          distanceKm: round(c.distance, 1),
+        })),
+      });
+    }
+  }
+
+  proxClusters.sort((a, b) => b.totalCount - a.totalCount);
+
+  return { alerts, theaterSummary, proximityCorrelations: proxClusters };
 }
 
 // ── Theater Posture Assessment ───────────────────────────────────
@@ -690,6 +752,7 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       return safeStringify({
         totalActivities: activities.length,
         surgeAlerts: result.alerts.filter(a => a.surgeDetected).length,
+        proximityClusterCount: result.proximityCorrelations.length,
         ...result,
       }, 2);
     }
