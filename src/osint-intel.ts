@@ -56,13 +56,17 @@ export function buildOsintBriefWorkflow(
 ): WorkflowDefinition {
   const sources = opts.sources ?? ["news", "market", "signal", "monitor", "infra", "climate"];
   const steps: WorkflowDefinition["steps"] = [];
+  const regionArg = opts.region ? { country: opts.region } : {};
+
+  // ── Phase 1: Independent data collection (parallel) ────────────
+  // These workers fetch from external APIs and need no upstream data.
 
   if (sources.includes("news")) {
     steps.push({
-      id: "news_signals",
-      skillId: "detect_signals",
-      label: "Detect news signals",
-      args: { articles: [], ...(opts.region ? { region: opts.region } : {}) },
+      id: "news_collect",
+      skillId: "aggregate_feeds",
+      label: "Collect news feeds",
+      args: { urls: ["https://feeds.bbci.co.uk/news/world/rss.xml", "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"], limit: 30, dedup: true },
       onError: "skip" as const,
     });
   }
@@ -72,17 +76,7 @@ export function buildOsintBriefWorkflow(
       id: "market_screen",
       skillId: "screen_market",
       label: "Screen market for anomalies",
-      args: { assets: [], ...(opts.region ? { region: opts.region } : {}) },
-      onError: "skip" as const,
-    });
-  }
-
-  if (sources.includes("signal")) {
-    steps.push({
-      id: "signal_aggregate",
-      skillId: "aggregate_signals",
-      label: "Aggregate multi-source signals",
-      args: { signals: [], ...(opts.region ? { country: opts.region } : {}) },
+      args: { assets: [], sortBy: "changePercent", sortDir: "desc", limit: 20 },
       onError: "skip" as const,
     });
   }
@@ -92,7 +86,7 @@ export function buildOsintBriefWorkflow(
       id: "conflicts",
       skillId: "track_conflicts",
       label: "Track active conflicts",
-      args: { ...(opts.region ? { region: opts.region } : {}) },
+      args: { conflicts: [], ...regionArg },
       onError: "skip" as const,
     });
   }
@@ -102,7 +96,7 @@ export function buildOsintBriefWorkflow(
       id: "infra_risk",
       skillId: "redundancy_score",
       label: "Score infrastructure redundancy",
-      args: { ...(opts.region ? { region: opts.region } : {}), categories: ["cables", "ports", "power", "pipelines"] },
+      args: { region: opts.region ?? "global", infrastructure: { submarineCables: 0, ports: 0, pipelines: 0, powerPlants: 0 }, thresholds: {} },
       onError: "skip" as const,
     });
   }
@@ -117,18 +111,60 @@ export function buildOsintBriefWorkflow(
     });
   }
 
-  // Synthesize brief after all sources complete
+  // ── Phase 2: Chained analysis (depends on Phase 1 outputs) ─────
+
+  if (sources.includes("news")) {
+    steps.push({
+      id: "news_signals",
+      skillId: "detect_signals",
+      label: "Detect news signals from collected articles",
+      dependsOn: ["news_collect"],
+      args: { articles: "{{news_collect.result}}", baselineHours: 24, spikeMultiplier: 3 },
+      onError: "skip" as const,
+    });
+  }
+
+  if (sources.includes("signal")) {
+    // Aggregate signals from upstream news + monitor outputs
+    const signalDeps: string[] = [];
+    if (sources.includes("news")) signalDeps.push("news_signals");
+    if (sources.includes("monitor")) signalDeps.push("conflicts");
+
+    steps.push({
+      id: "signal_aggregate",
+      skillId: "aggregate_signals",
+      label: "Aggregate multi-source signals",
+      dependsOn: signalDeps.length > 0 ? signalDeps : undefined,
+      args: { signals: [], windowHours: 24, dedup: true, ...regionArg },
+      onError: "skip" as const,
+    });
+
+    // Cross-domain correlation patterns (depends on aggregated signals)
+    steps.push({
+      id: "signal_correlate",
+      skillId: "correlate_signals",
+      label: "Detect cross-domain correlation patterns",
+      dependsOn: ["signal_aggregate"],
+      args: { signals: "{{signal_aggregate.result}}", windowHours: 24, minConfidence: 0.3 },
+      onError: "skip" as const,
+    });
+  }
+
+  // ── Phase 3: Synthesis (depends on all previous phases) ────────
+
+  const allStepIds = steps.map(s => s.id);
+
   steps.push({
     id: "synthesize",
     skillId: "ask_claude",
     label: "Synthesize intelligence brief",
-    dependsOn: steps.map(s => s.id),
+    dependsOn: allStepIds,
     args: {
       prompt: `You are an OSINT analyst. Synthesize the following multi-source intelligence data into a structured brief.
 Region focus: ${opts.region ?? "global"}.
 
 Data from workers:
-${steps.filter(s => s.id !== "synthesize").map(s => `- ${s.label}: {{${s.id}.result}}`).join("\n")}
+${allStepIds.map(id => `- ${id}: {{${id}.result}}`).join("\n")}
 
 Output format:
 ## Executive Summary
@@ -136,6 +172,9 @@ Output format:
 
 ## Key Threats (by severity)
 (bullet points with severity tags)
+
+## Correlation Patterns Detected
+(cross-domain patterns from signal_correlate, if available)
 
 ## Market Signals
 (notable moves, anomalies)
@@ -219,39 +258,51 @@ export function buildThreatAssessWorkflow(
   opts: z.infer<typeof OsintThreatAssessInputSchema>,
 ): WorkflowDefinition {
   const steps: WorkflowDefinition["steps"] = [
+    // Phase 1: Independent data collection (parallel)
     {
       id: "signals",
       skillId: "aggregate_signals",
       label: "Aggregate signals for region",
-      args: { signals: [], country: opts.region },
-      onError: "skip" as const,
-    },
-    {
-      id: "convergence",
-      skillId: "detect_convergence",
-      label: "Detect geographic convergence",
-      args: { signals: [], radiusKm: 500 },
+      args: { signals: [], country: opts.region, windowHours: 24, dedup: true },
       onError: "skip" as const,
     },
     {
       id: "conflicts",
       skillId: "track_conflicts",
       label: "Track conflicts in region",
-      args: { region: opts.region },
-      onError: "skip" as const,
-    },
-    {
-      id: "instability",
-      skillId: "instability_index",
-      label: "Compute instability index",
-      args: { country: opts.region, streams: {} },
+      args: { conflicts: [], region: opts.region },
       onError: "skip" as const,
     },
     {
       id: "surge",
       skillId: "detect_surge",
       label: "Detect military surges",
-      args: { theater: opts.region, current: {}, baseline: {} },
+      args: { activities: [], baselineHours: 48, surgeMultiplier: 2 },
+      onError: "skip" as const,
+    },
+    // Phase 2: Chained analysis (depends on Phase 1)
+    {
+      id: "convergence",
+      skillId: "detect_convergence",
+      label: "Detect geographic convergence",
+      dependsOn: ["signals"],
+      args: { signals: "{{signals.result}}", radiusKm: 500, minTypes: 2 },
+      onError: "skip" as const,
+    },
+    {
+      id: "instability",
+      skillId: "instability_index",
+      label: "Compute instability index",
+      dependsOn: ["signals", "conflicts", "surge"],
+      args: { country: opts.region, indicators: { conflictEvents: 0, militaryActivity: 0, civilUnrest: 0, cyberThreats: 0, economicStress: 0, displacement: 0, naturalDisasters: 0, mediaCoverage: 0 } },
+      onError: "skip" as const,
+    },
+    {
+      id: "correlate",
+      skillId: "correlate_signals",
+      label: "Detect cross-domain correlation patterns",
+      dependsOn: ["signals"],
+      args: { signals: "{{signals.result}}", windowHours: 24, minConfidence: 0.3 },
       onError: "skip" as const,
     },
   ];
@@ -261,7 +312,7 @@ export function buildThreatAssessWorkflow(
       id: "cascade",
       skillId: "cascade_analysis",
       label: "Analyze cascade failure risk",
-      args: { nodes: [], edges: [], failNodeId: "" },
+      args: { nodes: [], edges: [], failedNodes: [], maxDepth: 3 },
       onError: "skip" as const,
     });
     steps.push({
@@ -285,7 +336,8 @@ export function buildThreatAssessWorkflow(
       id: "exposure",
       skillId: "assess_exposure",
       label: "Assess hazard exposure",
-      args: { events: [], assets: [] },
+      dependsOn: ["earthquakes"],
+      args: { events: "{{earthquakes.result}}", assets: [] },
       onError: "skip" as const,
     });
   }
