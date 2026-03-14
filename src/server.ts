@@ -314,7 +314,7 @@ async function waitForWorker(w: typeof WORKERS[number], maxWaitMs = 10_000): Pro
         workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
         return true;
       }
-    } catch {}
+    } catch { /* worker not yet ready — retry */ }
     await new Promise(r => setTimeout(r, 500));
   }
   workerHealth.set(w.name, { healthy: false, failCount: 0, lastCheck: Date.now() });
@@ -561,11 +561,11 @@ ${sanitizedMessage}`;
 
     const aiUrl = workerCards.find(c => c.name === "ai-agent")?.url;
     if (aiUrl) {
-      const response = await sendTask(aiUrl, {
+      const response = await sendWithResilience(aiUrl, {
         skillId: "ask_claude",
         args: { prompt },
         message: { role: "user" as const, parts: [{ kind: "text" as const, text: prompt }] },
-      });
+      }, { apiKey: getAgentApiKey(aiUrl) });
       try {
         const parsed = JSON.parse(response);
         if (parsed.url && parsed.skillId) {
@@ -623,12 +623,12 @@ function startDesignWorkflow(args: Record<string, unknown>): string {
       const [projectRaw, promptResult] = await Promise.all([
         callMcpTool("create_project", { title }),
         screensOnly
-          ? sendTask(designWorkerUrl, {
+          ? sendWithResilience(designWorkerUrl, {
               skillId: "enhance_ui_prompt",
               args: { description: appConcept, deviceType: deviceType.toLowerCase() },
               message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
             }, { timeoutMs: 60_000 })
-          : sendTask(designWorkerUrl, {
+          : sendWithResilience(designWorkerUrl, {
               skillId: "suggest_screens",
               args: { appConcept, deviceType: deviceType.toLowerCase() },
               message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
@@ -700,7 +700,7 @@ function startFactoryWorkflow(args: Record<string, unknown>): string {
 
       // Step 1: Normalize intent
       emitProgress(task.id, "Normalizing intent — expanding idea into detailed spec…");
-      const specResult = await sendTask(factoryWorkerUrl, {
+      const specResult = await sendWithResilience(factoryWorkerUrl, {
         skillId: "normalize_intent",
         args: { idea, pipeline: pipelineId },
         message: { role: "user" as const, parts: [{ kind: "text" as const, text: idea }] },
@@ -709,7 +709,7 @@ function startFactoryWorkflow(args: Record<string, unknown>): string {
 
       // Step 2: Full project creation (scaffold + generate + QA loop)
       emitProgress(task.id, "Creating project — scaffold, code generation, quality review…");
-      const projectResult = await sendTask(factoryWorkerUrl, {
+      const projectResult = await sendWithResilience(factoryWorkerUrl, {
         skillId: "create_project",
         args: { idea, pipeline: pipelineId, outputDir },
         message: { role: "user" as const, parts: [{ kind: "text" as const, text: idea }] },
@@ -1340,7 +1340,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           updateWorkflowRun(workflowRunId, "completed");
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
           updateWorkflowRun(workflowRunId, "failed", msg);
         }
       })();
@@ -1621,7 +1621,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const result = await executePipeline(pipelineRef, input, (sid, a, t) => dispatchSkill(sid, a, t));
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          try { markFailed(task.id, { code: "PIPELINE_ERROR", message: String(err) }); } catch {}
+          try { markFailed(task.id, { code: "PIPELINE_ERROR", message: String(err) }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1669,7 +1669,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           );
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          try { markFailed(task.id, { code: "COLLABORATION_ERROR", message: String(err) }); } catch {}
+          try { markFailed(task.id, { code: "COLLABORATION_ERROR", message: String(err) }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1878,7 +1878,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "OSINT_BRIEF_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "OSINT_BRIEF_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1901,7 +1901,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "OSINT_ALERT_SCAN_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "OSINT_ALERT_SCAN_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1924,7 +1924,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "OSINT_THREAT_ASSESS_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "OSINT_THREAT_ASSESS_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1947,7 +1947,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "OSINT_MARKET_SNAPSHOT_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "OSINT_MARKET_SNAPSHOT_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
 
@@ -1974,7 +1974,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
       // Route to a registered worker by skill ID
       const router = buildSkillRouter(workerCards, getExternalCards());
       const url = router.get(skillId);
-      if (url) return sendTask(url, { skillId, args, message: { role: "user" as const, parts: [{ kind: "text" as const, text }] } }, { apiKey: getAgentApiKey(url) });
+      if (url) return sendWithResilience(url, { skillId, args, message: { role: "user" as const, parts: [{ kind: "text" as const, text }] } }, { apiKey: getAgentApiKey(url) });
 
       throw new Error(`Unknown skill: ${skillId}`);
     }
@@ -3646,7 +3646,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 });
               }
             }
-          } catch {}
+          } catch { /* SSE chunk parse error — skip */ }
         }
       }
     } finally {
@@ -4203,7 +4203,7 @@ function pruneSnapshotExports(dir: string, retentionDays: number): void {
       const stats = statSync(fullPath);
       if (!stats.isFile()) continue;
       if (stats.mtimeMs < cutoff) unlinkSync(fullPath);
-    } catch {}
+    } catch { /* file already removed or inaccessible */ }
   }
 }
 
@@ -4425,7 +4425,7 @@ async function buildConnectorTrustReport(input: {
   let manifest: Record<string, unknown> = {};
   try {
     manifest = JSON.parse(await Bun.file(manifestPath).text()) as Record<string, unknown>;
-  } catch {}
+  } catch { /* manifest not parseable — use empty default */ }
 
   const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts as Array<Record<string, unknown>> : [];
   const jsonArtifactPath = artifacts.find(a => a.type === "json" && typeof a.path === "string")?.path as string | undefined;
@@ -4525,7 +4525,7 @@ async function buildConnectorSalesPacket(input: {
       if (Array.isArray(manifest.artifacts)) {
         artifacts = manifest.artifacts as Array<Record<string, unknown>>;
       }
-    } catch {}
+    } catch { /* manifest not parseable */ }
   }
 
   const fullPacket = {
@@ -5147,7 +5147,7 @@ async function startHttpServer() {
         dispatchSkill(webhook.skillId, args, JSON.stringify(request.body), undefined, request.ip)
           .then(result => markCompleted(task.id, result))
           .catch(err => {
-            try { markFailed(task.id, { code: "WEBHOOK_ERROR", message: String(err) }); } catch {}
+            try { markFailed(task.id, { code: "WEBHOOK_ERROR", message: String(err) }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
           });
         logWebhookCall(webhookId, "success", task.id, undefined, payloadSize);
         return { status: "accepted", taskId: task.id };
@@ -6733,7 +6733,7 @@ async function startHttpServer() {
           updateWorkflowRun(workflowRunId, "completed");
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
           updateWorkflowRun(workflowRunId, "failed", msg);
         }
       })();
