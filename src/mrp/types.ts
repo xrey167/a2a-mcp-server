@@ -59,7 +59,7 @@ export interface TimePhasedDemand {
 // ── Supply Records ───────────────────────────────────────────────
 
 export interface SupplyRecord {
-  type: "on_hand" | "purchase_order" | "production_order" | "planned_order";
+  type: "on_hand" | "purchase_order" | "production_order" | "planned_order" | "transfer_order";
   sourceId: string;
   itemNo: string;
   quantity: number;

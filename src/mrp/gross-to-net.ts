@@ -16,6 +16,7 @@ import type {
   PurchaseOrder,
   ProductionOrder,
   ItemAvailability,
+  TransferOrder,
 } from "../erp/types.js";
 import type {
   PlanningHorizon,
@@ -43,6 +44,7 @@ export function buildSupplyPlan(
   productionOrders: ProductionOrder[],
   availability: ItemAvailability[],
   horizon: PlanningHorizon,
+  transferOrders?: TransferOrder[],
 ): Map<string, TimePhasedSupply> {
   const result = new Map<string, TimePhasedSupply>();
   const availMap = new Map(availability.map((a) => [a.itemNo, a]));
@@ -102,6 +104,27 @@ export function buildSupplyPlan(
         quantity: prod.quantity,
         availableDate: prod.dueDate,
       });
+    }
+  }
+
+  // Add transfer order receipts (in-transit stock arriving at destination)
+  if (transferOrders) {
+    for (const to of transferOrders) {
+      if (to.status === "received") continue; // already in inventory
+      const supply = result.get(to.itemNo);
+      if (!supply) continue;
+      const bucketIdx = dateToBucket(to.receiptDate, horizon);
+      const bucket = supply.buckets[bucketIdx];
+      if (bucket) {
+        bucket.scheduledReceipts += to.quantity;
+        bucket.supplyRecords.push({
+          type: "transfer_order",
+          sourceId: to.number,
+          itemNo: to.itemNo,
+          quantity: to.quantity,
+          availableDate: to.receiptDate,
+        });
+      }
     }
   }
 
