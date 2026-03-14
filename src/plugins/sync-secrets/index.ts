@@ -41,7 +41,9 @@ interface SyncConfig {
 function loadConfig(): SyncConfig {
   let file: Partial<SyncConfig> = {};
   if (existsSync(SYNC_CONFIG_FILE)) {
-    try { file = JSON.parse(readFileSync(SYNC_CONFIG_FILE, "utf-8")); } catch {}
+    try { file = JSON.parse(readFileSync(SYNC_CONFIG_FILE, "utf-8")); } catch (e: any) {
+      process.stderr.write(`[sync-secrets] failed to parse config: ${e}\n`);
+    }
   }
   return {
     serverUrl: process.env.SYNC_SERVER_URL ?? file.serverUrl ?? "http://localhost:8080",
