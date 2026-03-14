@@ -81,6 +81,20 @@ const MarketSchemas = {
   correlation: z.object({
     series: z.record(z.array(z.number()).min(2)),
   }).passthrough(),
+
+  market_composite: z.object({
+    prices: z.array(z.number()).min(14),
+    volumes: z.array(z.number()).optional(),
+    period: z.number().int().positive().optional().default(14),
+    weights: z.object({
+      rsi: z.number().optional().default(0.2),
+      macd: z.number().optional().default(0.2),
+      volumeAnomaly: z.number().optional().default(0.15),
+      momentum: z.number().optional().default(0.15),
+      volatility: z.number().optional().default(0.15),
+      trend: z.number().optional().default(0.15),
+    }).optional().default({}),
+  }).passthrough(),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -98,6 +112,7 @@ const AGENT_CARD = {
     { id: "screen_market", name: "Screen Market", description: "Filter and rank assets by price, volume, change, and market cap thresholds" },
     { id: "detect_anomalies", name: "Detect Anomalies", description: "Detect price and volume anomalies using z-score against rolling baseline" },
     { id: "correlation", name: "Correlation Matrix", description: "Compute Pearson correlation matrix between multiple price series" },
+    { id: "market_composite", name: "Market Composite", description: "Compute a composite 0-100 market score combining RSI, MACD, volume anomaly, momentum, volatility, and trend" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -772,6 +787,94 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         assetCount: keys.length,
         matrix,
         strongestCorrelations: pairs.slice(0, 10),
+      }, 2);
+    }
+
+    case "market_composite": {
+      const { prices, volumes, period, weights } = MarketSchemas.market_composite.parse(args);
+      const components: Record<string, { raw: number; normalized: number; weight: number; contribution: number }> = {};
+
+      // 1. RSI component (0-100 already; 50 = neutral, <30 = oversold/bullish, >70 = overbought/bearish)
+      const rsiValues = computeRSI(prices, period);
+      const latestRsi = rsiValues[rsiValues.length - 1] ?? 50;
+      // Normalize: 0 (very bearish) to 100 (very bullish) — invert RSI logic
+      const rsiNorm = round(100 - latestRsi, 2);
+      components.rsi = { raw: latestRsi, normalized: rsiNorm, weight: weights.rsi, contribution: round(rsiNorm * weights.rsi, 2) };
+
+      // 2. MACD component (histogram direction and magnitude)
+      const macdResult = computeMACD(prices);
+      const hist = macdResult.histogram.filter(v => v !== null) as number[];
+      const latestHist = hist[hist.length - 1] ?? 0;
+      const prevHist = hist[hist.length - 2] ?? 0;
+      // Normalize histogram to 0-100 using sigmoid-like mapping
+      const histRange = Math.max(...hist.map(Math.abs), 0.01);
+      const macdNorm = round(50 + (latestHist / histRange) * 50, 2);
+      const macdTrend = latestHist > prevHist ? "improving" : "deteriorating";
+      components.macd = { raw: latestHist, normalized: macdNorm, weight: weights.macd, contribution: round(macdNorm * weights.macd, 2) };
+
+      // 3. Volume anomaly (if volumes provided)
+      let volNorm = 50; // neutral default
+      if (volumes && volumes.length === prices.length && volumes.length >= period) {
+        const recentVol = volumes.slice(-period);
+        const avgVol = recentVol.reduce((a, b) => a + b, 0) / recentVol.length;
+        const latestVol = volumes[volumes.length - 1];
+        // High volume on price increase = bullish; high volume on price decrease = bearish
+        const priceChange = prices[prices.length - 1] - prices[prices.length - 2];
+        const volRatio = avgVol > 0 ? latestVol / avgVol : 1;
+        volNorm = round(Math.min(100, Math.max(0, 50 + (priceChange > 0 ? 1 : -1) * (volRatio - 1) * 30)), 2);
+      }
+      components.volumeAnomaly = { raw: volNorm, normalized: volNorm, weight: weights.volumeAnomaly, contribution: round(volNorm * weights.volumeAnomaly, 2) };
+
+      // 4. Price momentum (rate of change over period)
+      const pricePeriodAgo = prices[prices.length - 1 - period] ?? prices[0];
+      const latestPrice = prices[prices.length - 1];
+      const roc = pricePeriodAgo !== 0 ? ((latestPrice - pricePeriodAgo) / pricePeriodAgo) * 100 : 0;
+      // Map ROC to 0-100: -10% → 0, 0% → 50, +10% → 100
+      const momNorm = round(Math.min(100, Math.max(0, 50 + roc * 5)), 2);
+      components.momentum = { raw: round(roc, 2), normalized: momNorm, weight: weights.momentum, contribution: round(momNorm * weights.momentum, 2) };
+
+      // 5. Volatility (lower volatility = higher score, more stable)
+      const returns: number[] = [];
+      for (let i = 1; i < prices.length; i++) {
+        returns.push((prices[i] - prices[i - 1]) / (prices[i - 1] || 1));
+      }
+      const recentReturns = returns.slice(-period);
+      const meanReturn = recentReturns.reduce((a, b) => a + b, 0) / recentReturns.length;
+      const variance = recentReturns.reduce((acc, r) => acc + (r - meanReturn) ** 2, 0) / recentReturns.length;
+      const volatility = Math.sqrt(variance) * 100; // annualize-ish
+      // Low vol = high score: 0% vol → 100, 5%+ vol → 0
+      const volScore = round(Math.min(100, Math.max(0, 100 - volatility * 20)), 2);
+      components.volatility = { raw: round(volatility, 4), normalized: volScore, weight: weights.volatility, contribution: round(volScore * weights.volatility, 2) };
+
+      // 6. Trend (SMA crossover: price vs SMA)
+      const smaValues = computeSMA(prices, period);
+      const latestSma = smaValues[smaValues.length - 1] ?? latestPrice;
+      const trendPct = latestSma !== 0 ? ((latestPrice - latestSma) / latestSma) * 100 : 0;
+      const trendNorm = round(Math.min(100, Math.max(0, 50 + trendPct * 10)), 2);
+      const trendDir = latestPrice > latestSma ? "bullish" : latestPrice < latestSma ? "bearish" : "neutral";
+      components.trend = { raw: round(trendPct, 2), normalized: trendNorm, weight: weights.trend, contribution: round(trendNorm * weights.trend, 2) };
+
+      // Composite score
+      const compositeScore = round(
+        Object.values(components).reduce((s, c) => s + c.contribution, 0), 1
+      );
+
+      let signal: string;
+      if (compositeScore >= 75) signal = "strong_buy";
+      else if (compositeScore >= 60) signal = "buy";
+      else if (compositeScore >= 40) signal = "hold";
+      else if (compositeScore >= 25) signal = "sell";
+      else signal = "strong_sell";
+
+      return safeStringify({
+        compositeScore,
+        signal,
+        macdTrend,
+        trendDirection: trendDir,
+        dataPoints: prices.length,
+        period,
+        components,
+        weights,
       }, 2);
     }
 

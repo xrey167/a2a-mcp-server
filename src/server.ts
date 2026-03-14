@@ -51,6 +51,9 @@ import { applyFilters, recordFilterStats, type FilterContext } from "./output-fi
 import { recordTokenSaving, getTokenStats } from "./token-tracker.js";
 import { teeOutput, readTee, pruneTeeFiles, listTeeFiles } from "./tee.js";
 import { getAgencyProductSummary, getAgencyRoiSnapshot, getAgencyWorkflowTemplates } from "./agency-product.js";
+import { configureNotifications, notify, getNotificationConfig, getNotificationHistory, getNotificationStats, subscribeToAlerts, closeNotificationsDb } from "./notifications.js";
+import { createAlertRule, deleteAlertRule, toggleAlertRule, listAlertRules, getAlertRule, getAlertHistory, initAlertRules, stopAlertRules, closeAlertRulesDb, type AlertRuleInput } from "./alert-rules.js";
+import { initScheduler, addJob, removeJob, toggleJob, listJobs, getSchedulerStats, stopScheduler, type SchedulerJob } from "./scheduler.js";
 import {
   OsintBriefInputSchema,
   OsintAlertScanInputSchema,
@@ -8496,7 +8499,54 @@ async function main() {
   const stopRenewalScheduler = startConnectorRenewalScheduler();
   const stopFollowupWritebackScheduler = startFollowupWritebackScheduler();
   const stopSnapshotScheduler = startConnectorRenewalSnapshotScheduler();
-  onShutdown(async () => { stopRenewalScheduler(); stopFollowupWritebackScheduler(); stopSnapshotScheduler(); flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
+
+  // Initialize notification channels from config
+  if (CONFIG.notifications) {
+    configureNotifications(CONFIG.notifications);
+  }
+
+  // Initialize alert rules engine
+  initAlertRules();
+
+  // Initialize scheduler with dispatch functions
+  const schedulerDispatch = async (skillId: string, args: Record<string, unknown>, text: string) => {
+    const card = workerCards.find(c => c.skills.some(s => s.id === skillId));
+    if (!card) return `No worker found for skill: ${skillId}`;
+    const result = await sendTask(card.url, { skillId, args, message: { parts: [{ text }] } });
+    return typeof result === "string" ? result : safeStringify(result, 2);
+  };
+  const schedulerWorkflow = async (workflowId: string, args: Record<string, unknown>) => {
+    const result = await executeWorkflow({ id: workflowId, name: workflowId, steps: [], ...args } as WorkflowDefinition, async (skillId, sArgs) => {
+      return schedulerDispatch(skillId, sArgs as Record<string, unknown>, "");
+    });
+    return safeStringify(result, 2);
+  };
+  initScheduler({ dispatch: schedulerDispatch, executeWorkflow: schedulerWorkflow });
+
+  // Subscribe to climate events for automated proximity detection
+  subscribe("agent.climate-agent.completed", async (event: AgentEvent) => {
+    try {
+      const climateCard = workerCards.find(c => c.name === "climate-agent");
+      const infraCard = workerCards.find(c => c.name === "infra-agent");
+      if (!climateCard || !infraCard) return;
+
+      // Load infrastructure and assess exposure
+      const infraResult = await sendTask(infraCard.url, { skillId: "load_infrastructure", args: { filter: {} }, message: { parts: [{ text: "" }] } });
+      if (!infraResult) return;
+
+      // Publish proximity alert if critical infrastructure is near climate events
+      publish("alert.proximity.detected", {
+        source: "proximity-detector",
+        climateEvent: event.data,
+        infrastructure: "auto-assessed",
+        severity: "medium",
+      }, { source: "orchestrator" }).catch(() => {});
+    } catch (err) {
+      process.stderr.write(`[proximity-detector] error: ${err}\n`);
+    }
+  }, { name: "proximity-detector" });
+
+  onShutdown(async () => { stopRenewalScheduler(); stopFollowupWritebackScheduler(); stopSnapshotScheduler(); stopScheduler(); stopAlertRules(); closeAlertRulesDb(); closeNotificationsDb(); flushPendingLastUsed(); closeAuditDb(); shutdownWorkers(); });
 
   // Start periodic health checks (every 30s)
   pollWorkerHealth().catch(() => {});

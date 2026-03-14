@@ -142,6 +142,37 @@ const FederationConfigSchema = z.object({
   discoveryTimeoutMs: z.number().int().positive().optional().default(5_000),
 });
 
+const NotificationsConfigSchema = z.object({
+  slack: z.object({
+    webhookUrl: z.string().url(),
+    channel: z.string().optional(),
+    username: z.string().optional(),
+  }).optional(),
+  telegram: z.object({
+    botToken: z.string(),
+    chatId: z.string(),
+    parseMode: z.string().optional(),
+  }).optional(),
+  email: z.object({
+    smtpUrl: z.string(),
+    from: z.string(),
+    to: z.string(),
+    subjectPrefix: z.string().optional(),
+  }).optional(),
+});
+
+const SchedulerConfigSchema = z.object({
+  enabled: z.boolean().optional().default(true),
+  jobs: z.array(z.object({
+    id: z.string(),
+    intervalMs: z.number().int().positive(),
+    skillId: z.string().optional(),
+    workflow: z.string().optional(),
+    args: z.record(z.unknown()).optional().default({}),
+    enabled: z.boolean().optional().default(true),
+  })).optional().default([]),
+});
+
 const ConfigSchema = z.object({
   server: ServerConfigSchema.optional(),
   erp: ErpConfigSchema.optional(),
@@ -159,6 +190,10 @@ const ConfigSchema = z.object({
   federation: FederationConfigSchema.optional(),
   /** Output filter settings (RTK-style token reduction) */
   outputFilter: OutputFilterConfigSchema.optional(),
+  /** Notification channels for alerting (Slack, Telegram, Email) */
+  notifications: NotificationsConfigSchema.optional(),
+  /** Scheduler for recurring OSINT monitoring jobs */
+  scheduler: SchedulerConfigSchema.optional(),
   /** Extra environment variables to pass to workers */
   env: z.record(z.string()).optional(),
 }).strict();

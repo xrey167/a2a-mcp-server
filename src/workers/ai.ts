@@ -53,9 +53,36 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         });
         const block = message.content[0];
         return block.type === "text" ? block.text : safeStringify(block);
-      } catch {
-        // Fallback to claude CLI (Claude Code OAuth). --strict-mcp-config
-        // prevents re-spawning the MCP server on already-occupied ports.
+      } catch (anthropicErr) {
+        // Try Ollama/LM Studio as second fallback (OpenAI-compatible API)
+        const ollamaUrl = process.env.OLLAMA_URL ?? process.env.LM_STUDIO_URL;
+        const ollamaModel = process.env.OLLAMA_MODEL ?? "llama3";
+        if (ollamaUrl) {
+          try {
+            process.stderr.write(`[${NAME}] Falling back to Ollama/LM Studio at ${ollamaUrl}\n`);
+            const ollamaRes = await fetch(`${ollamaUrl}/api/chat`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                model: ollamaModel,
+                messages: [
+                  ...(persona.systemPrompt ? [{ role: "system", content: persona.systemPrompt }] : []),
+                  { role: "user", content: prompt },
+                ],
+                stream: false,
+              }),
+              signal: AbortSignal.timeout(120_000),
+            });
+            if (ollamaRes.ok) {
+              const ollamaData = await ollamaRes.json() as any;
+              const content = ollamaData?.message?.content ?? ollamaData?.choices?.[0]?.message?.content ?? "";
+              if (content) return content;
+            }
+          } catch (ollamaErr) {
+            process.stderr.write(`[${NAME}] Ollama fallback failed: ${ollamaErr}\n`);
+          }
+        }
+        // Final fallback to claude CLI (Claude Code OAuth)
         return await runClaudeCLI(prompt, model);
       }
     }
