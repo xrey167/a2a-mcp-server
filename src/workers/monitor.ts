@@ -23,6 +23,7 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { round, haversineKm } from "../worker-utils.js";
 
 const PORT = 8092;
 const NAME = "monitor-agent";
@@ -147,23 +148,7 @@ const AGENT_CARD = {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-// TODO: extract round to shared utility — duplicated in signal.ts, climate.ts, and market.ts
-function round(n: number, decimals = 2): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
-
-// TODO: extract haversineKm to shared utility — duplicated in signal.ts and climate.ts
-function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
+// round() and haversineKm() imported from ../worker-utils.js
 
 // ── Conflict Tracking ────────────────────────────────────────────
 
@@ -319,8 +304,8 @@ function detectSurges(
       theater,
       type,
       currentCount: recentSum,
-      baselineAvg: round(baselineAvg),
-      multiplier: round(multiplier),
+      baselineAvg: round(baselineAvg, 2),
+      multiplier: round(multiplier, 2),
       surgeDetected,
       foreignOperators: [...g.foreignOps],
     });
@@ -370,7 +355,7 @@ function assessTheaterPosture(
   for (const [key, current] of Object.entries(activities)) {
     const bl = (base as Record<string, number>)[key] ?? 1;
     const ratio = bl > 0 ? current / bl : current;
-    breakdown[key] = { current, baseline: bl, ratio: round(ratio) };
+    breakdown[key] = { current, baseline: bl, ratio: round(ratio, 2) };
     totalRatio += ratio;
     categoryCount++;
   }

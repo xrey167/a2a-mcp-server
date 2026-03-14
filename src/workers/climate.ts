@@ -22,6 +22,7 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { round, haversineKm } from "../worker-utils.js";
 
 const PORT = 8094;
 const NAME = "climate-agent";
@@ -133,23 +134,7 @@ const AGENT_CARD = {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-// TODO: extract round to shared utility — duplicated in signal.ts, monitor.ts, and market.ts
-function round(n: number, decimals = 2): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
-
-// TODO: extract haversineKm to shared utility — duplicated in signal.ts and monitor.ts
-function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
+// round() and haversineKm() imported from ../worker-utils.js
 
 /**
  * Parse a single CSV line handling quoted fields with embedded commas.
@@ -536,10 +521,10 @@ function detectClimateAnomalies(
     const stddev = Math.sqrt(variance);
 
     baselineStats[metric] = {
-      mean: round(mean),
-      stddev: round(stddev),
-      min: round(Math.min(...baselineValues)),
-      max: round(Math.max(...baselineValues)),
+      mean: round(mean, 2),
+      stddev: round(stddev, 2),
+      min: round(Math.min(...baselineValues), 2),
+      max: round(Math.max(...baselineValues), 2),
       count: baselineValues.length,
     };
 

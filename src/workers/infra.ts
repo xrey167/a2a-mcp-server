@@ -22,6 +22,7 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { round } from "../worker-utils.js";
 
 const PORT = 8093;
 const NAME = "infra-agent";
@@ -146,10 +147,7 @@ const AGENT_CARD = {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-function round(n: number, decimals = 2): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
+// round() imported from ../worker-utils.js
 
 // ── Cascade Failure Analysis (BFS) ───────────────────────────────
 

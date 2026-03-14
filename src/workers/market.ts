@@ -19,6 +19,7 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { round, validateUrlNotInternal } from "../worker-utils.js";
 
 const PORT = 8090;
 const NAME = "market-agent";
@@ -102,35 +103,7 @@ const AGENT_CARD = {
   ],
 };
 
-// ── SSRF Prevention ──────────────────────────────────────────────
-// Duplicated from news.ts — TODO: extract to a shared utility module.
-
-/** Block requests to private/internal network addresses (SSRF prevention). */
-function validateUrlNotInternal(urlStr: string): void {
-  const parsed = new URL(urlStr);
-  const hostname = parsed.hostname.toLowerCase();
-
-  // Block localhost variants
-  if (hostname === "localhost" || hostname === "[::1]" || hostname === "0.0.0.0") {
-    throw new Error(`SSRF blocked: private/internal address "${hostname}"`);
-  }
-
-  // Block private/internal IP ranges
-  const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (ipMatch) {
-    const [, a, b] = ipMatch.map(Number);
-    if (
-      a === 127 ||                          // 127.x.x.x loopback
-      a === 10 ||                            // 10.x.x.x private
-      (a === 172 && b >= 16 && b <= 31) ||   // 172.16-31.x.x private
-      (a === 192 && b === 168) ||            // 192.168.x.x private
-      (a === 169 && b === 254) ||            // 169.254.x.x link-local / cloud metadata
-      a === 0                                // 0.0.0.0/8
-    ) {
-      throw new Error(`SSRF blocked: private/internal address "${hostname}"`);
-    }
-  }
-}
+// validateUrlNotInternal() imported from ../worker-utils.js
 
 // ── Yahoo Finance Helpers ────────────────────────────────────────
 // NOTE: This uses Yahoo Finance's unofficial v8 chart API which is undocumented
@@ -319,11 +292,7 @@ async function fetchAlphaVantageHistory(
 
 // ── Technical Indicators ─────────────────────────────────────────
 
-// TODO: extract round to shared utility — duplicated in signal.ts, monitor.ts, and climate.ts
-function round(n: number, decimals = 4): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
+// round() imported from ../worker-utils.js
 
 function computeSMA(prices: number[], period: number): (number | null)[] {
   const result: (number | null)[] = [];

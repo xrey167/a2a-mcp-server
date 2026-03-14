@@ -18,6 +18,7 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
+import { validateUrlNotInternal } from "../worker-utils.js";
 
 const PORT = 8089;
 const NAME = "news-agent";
@@ -175,32 +176,7 @@ function parseRssFeed(xml: string, sourceUrl: string, limit: number): Article[] 
   return articles.filter(a => a.title.length > 0);
 }
 
-/** Block requests to private/internal network addresses (SSRF prevention). */
-function validateUrlNotInternal(urlStr: string): void {
-  const parsed = new URL(urlStr);
-  const hostname = parsed.hostname.toLowerCase();
-
-  // Block localhost variants
-  if (hostname === "localhost" || hostname === "[::1]" || hostname === "0.0.0.0") {
-    throw new Error(`SSRF blocked: private/internal address "${hostname}"`);
-  }
-
-  // Block private/internal IP ranges
-  const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (ipMatch) {
-    const [, a, b] = ipMatch.map(Number);
-    if (
-      a === 127 ||                          // 127.x.x.x loopback
-      a === 10 ||                            // 10.x.x.x private
-      (a === 172 && b >= 16 && b <= 31) ||   // 172.16-31.x.x private
-      (a === 192 && b === 168) ||            // 192.168.x.x private
-      (a === 169 && b === 254) ||            // 169.254.x.x link-local
-      a === 0                                // 0.0.0.0/8
-    ) {
-      throw new Error(`SSRF blocked: private/internal address "${hostname}"`);
-    }
-  }
-}
+// validateUrlNotInternal() imported from ../worker-utils.js
 
 async function fetchRss(url: string, limit: number, timeout: number): Promise<Article[]> {
   validateUrlNotInternal(url);
