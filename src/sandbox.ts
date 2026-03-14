@@ -60,7 +60,7 @@ export async function executeSandbox(opts: SandboxOptions): Promise<SandboxResul
   // Build temp file: prelude + user code + epilogue
   const tmpFile = join(tmpdir(), `sandbox-${randomUUID()}.ts`);
   const fullCode = buildPrelude(existingVars, sessionId) + "\n" + code + "\n" + buildEpilogue();
-  writeFileSync(tmpFile, fullCode, "utf-8");
+  writeFileSync(tmpFile, fullCode, { encoding: "utf-8", mode: 0o600 });
 
   try {
     return await runSubprocess(tmpFile, sessionId, dispatch, timeout);

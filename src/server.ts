@@ -288,12 +288,15 @@ function spawnWorker(w: typeof WORKERS[number]) {
     respawning.add(w.name);
     const n = (workerFailures.get(w.name) ?? 0) + 1;
     workerFailures.set(w.name, n);
+    // Signal circuit breaker so callers fail-fast while worker is down
+    getBreaker(w.name).recordFailure();
     const delayMs = Math.min(1_000 * (2 ** (n - 1)), 60_000);
     process.stderr.write(`[orchestrator] ${w.name} exited (code ${exitCode}, failure #${n}) — respawning in ${delayMs}ms\n`);
     const timer = setTimeout(() => spawnWorker(w), delayMs);
     respawnTimers.set(w.name, timer);
   }).catch((err) => {
     process.stderr.write(`[orchestrator] ${w.name} proc.exited error: ${err}\n`);
+    getBreaker(w.name).recordFailure();
   });
 }
 
@@ -374,7 +377,6 @@ function buildSkillRouter(builtinCards: AgentCard[], externalCards: AgentCard[] 
       map.set(skill.id, card.url);
     }
   }
-  skillRouterCache = map;
   return map;
 }
 

@@ -70,6 +70,17 @@ const pipelines = new Map<string, Pipeline>();
 
 /** Register a composed pipeline. */
 export function compose(name: string, steps: PipelineStep[], description?: string): Pipeline {
+  // Warn if two steps share the same effective alias (step.as ?? step.skillId)
+  const aliases = new Map<string, number>();
+  for (let i = 0; i < steps.length; i++) {
+    const key = steps[i].as ?? steps[i].skillId;
+    if (aliases.has(key)) {
+      process.stderr.write(`[composer] pipeline "${name}": steps ${aliases.get(key)} and ${i} share alias "${key}" — add 'as' fields to distinguish them\n`);
+    } else {
+      aliases.set(key, i);
+    }
+  }
+
   const pipeline: Pipeline = {
     id: randomUUID(),
     name,
@@ -140,6 +151,8 @@ function getNestedValue(obj: unknown, path: string): unknown {
   let current: unknown = obj;
   for (const part of parts) {
     if (current === null || current === undefined || typeof current !== "object") return undefined;
+    // Guard against prototype pollution via __proto__, constructor, prototype keys
+    if (part === "__proto__" || part === "constructor" || part === "prototype") return undefined;
     current = (current as Record<string, unknown>)[part];
   }
   return current;
@@ -203,7 +216,8 @@ export async function executePipeline(
       }
 
       if (typeof step.onError === "object" && "fallback" in step.onError) {
-        const fallback = String(step.onError.fallback);
+        const raw = step.onError.fallback;
+        const fallback = typeof raw === "string" ? raw : JSON.stringify(raw);
         prevResult = fallback;
         lastOutput = fallback;
         stepsMap[step.as ?? step.skillId] = { result: fallback };

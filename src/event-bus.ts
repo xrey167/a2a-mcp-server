@@ -83,35 +83,39 @@ const deadLetters: DeadLetter[] = [];
 function topicMatches(pattern: string, topic: string): boolean {
   const patternParts = pattern.split(".");
   const topicParts = topic.split(".");
+  // Iterative DP to avoid exponential backtracking with multiple '#' wildcards
+  const memo = new Map<string, boolean>();
 
-  let pi = 0;
-  let ti = 0;
+  function match(pi: number, ti: number): boolean {
+    const key = `${pi}:${ti}`;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
 
-  while (pi < patternParts.length && ti < topicParts.length) {
+    if (pi === patternParts.length && ti === topicParts.length) { memo.set(key, true); return true; }
+    if (pi === patternParts.length) { memo.set(key, false); return false; }
+
     if (patternParts[pi] === "#") {
-      // # matches everything remaining
-      if (pi === patternParts.length - 1) return true;
-      // Try matching the rest from each position
+      // '#' matches zero or more segments
       for (let i = ti; i <= topicParts.length; i++) {
-        if (topicMatches(patternParts.slice(pi + 1).join("."), topicParts.slice(i).join("."))) {
-          return true;
-        }
+        if (match(pi + 1, i)) { memo.set(key, true); return true; }
       }
+      memo.set(key, false);
       return false;
     }
-    if (patternParts[pi] !== "*" && patternParts[pi] !== topicParts[ti]) {
-      return false;
+
+    if (ti === topicParts.length) { memo.set(key, false); return false; }
+
+    if (patternParts[pi] === "*" || patternParts[pi] === topicParts[ti]) {
+      const result = match(pi + 1, ti + 1);
+      memo.set(key, result);
+      return result;
     }
-    pi++;
-    ti++;
+
+    memo.set(key, false);
+    return false;
   }
 
-  // Handle trailing #
-  if (pi < patternParts.length && patternParts[pi] === "#") {
-    return pi === patternParts.length - 1;
-  }
-
-  return pi === patternParts.length && ti === topicParts.length;
+  return match(0, 0);
 }
 
 // ── Filter Matching ──────────────────────────────────────────────

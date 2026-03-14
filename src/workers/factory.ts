@@ -362,7 +362,13 @@ Be strict. A score of ${threshold}+ means production-ready quality. Deduct point
   });
 
   const raw = await askClaude(prompt);
-  const parsed = JSON.parse(stripJsonFences(raw));
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(stripJsonFences(raw));
+  } catch {
+    log(`qualityGate: failed to parse LLM response as JSON — treating as failed gate`);
+    return { passed: false, scores: {}, average: 0, issues: [{ dimension: "parse", severity: "critical", description: "LLM returned non-JSON response", fix: "Retry generation" }], summary: "Quality gate could not parse LLM response" };
+  }
 
   const scores = parsed.scores as Record<string, number>;
   const values = Object.values(scores);

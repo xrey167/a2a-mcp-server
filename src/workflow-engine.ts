@@ -175,6 +175,9 @@ function resolveTemplates(
     const isEmbedded = !/^\s*\{\{[-\w]+\.result\}\}\s*$/.test(value);
     return value.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
       const result = stepResults.get(stepId);
+      if (!result) {
+        process.stderr.write(`[workflow] template ref {{${stepId}.result}} not found — substituting placeholder\n`);
+      }
       const rawValue = result?.result ?? `<step ${stepId} not found>`;
       return sanitizeTemplateValue(rawValue, targetSkillId, isEmbedded);
     });
@@ -247,14 +250,14 @@ function evaluateCondition(when: string | undefined, stepResults: Map<string, St
   if (!when || when === "always") return true;
 
   // Check {{stepId.result}} is truthy
-  const resolved = when.replace(/\{\{(\w+)\.result\}\}/g, (_, stepId) => {
+  const resolved = when.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
     const result = stepResults.get(stepId);
     if (!result || result.status !== "completed" || !result.result) return "";
     return result.result;
   });
 
   // Check {{stepId.status}} === "completed"
-  const statusResolved = resolved.replace(/\{\{(\w+)\.status\}\}/g, (_, stepId) => {
+  const statusResolved = resolved.replace(/\{\{([-\w]+)\.status\}\}/g, (_, stepId) => {
     const result = stepResults.get(stepId);
     return result?.status ?? "unknown";
   });
@@ -408,12 +411,13 @@ export async function executeWorkflow(
 
   const hasFailures = allResults.some(r => r.status === "failed");
   const allCompleted = allResults.every(r => r.status === "completed" || r.status === "skipped");
+  const skippedCount = allResults.filter(r => r.status === "skipped").length;
 
-  onProgress?.(`Workflow "${workflow.name ?? workflow.id}" finished in ${totalDurationMs}ms — ${completed.size} completed, ${failed.size} failed`);
+  onProgress?.(`Workflow "${workflow.name ?? workflow.id}" finished in ${totalDurationMs}ms — ${completed.size} completed, ${skippedCount} skipped, ${failed.size} failed`);
 
   return {
     workflowId: workflow.id,
-    status: hasFailures ? (completed.size > 0 ? "partial" : "failed") : "completed",
+    status: hasFailures ? (completed.size > 0 ? "partial" : "failed") : (allCompleted ? "completed" : "partial"),
     steps: allResults,
     totalDurationMs,
   };

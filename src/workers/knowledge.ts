@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, watch } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, watch, realpathSync } from "fs";
 import { join, dirname, basename, resolve } from "path";
 import { homedir } from "os";
 import { Database } from "bun:sqlite";
@@ -23,6 +23,8 @@ const KnowledgeSchemas = {
 const PORT = 8085;
 const NAME = "knowledge-agent";
 const VAULT = resolve(process.env.OBSIDIAN_VAULT ?? join(homedir(), "Documents/Obsidian/a2a-knowledge"));
+// Resolve the real VAULT path once at startup to handle symlinked vault dirs
+const VAULT_REAL = (() => { try { return realpathSync(VAULT); } catch { return VAULT; } })();
 
 // ── FTS5 Index for fast full-text search ─────────────────────────
 const INDEX_DB_PATH = join(homedir(), ".a2a-knowledge-index.db");
@@ -131,15 +133,24 @@ const AGENT_CARD = {
   ],
 };
 
+/** Resolve symlinks on the parent dir (file may not exist yet for new notes). */
+function safeRealpathSync(p: string): string {
+  try { return realpathSync(p); } catch {
+    try { return join(realpathSync(dirname(p)), basename(p)); } catch { return p; }
+  }
+}
+
 function notePath(title: string): string {
   const p = resolve(VAULT, `${title}.md`);
-  if (!p.startsWith(VAULT + "/")) throw new Error(`Invalid note title: "${title}"`);
+  const real = safeRealpathSync(p);
+  if (!real.startsWith(VAULT_REAL + "/")) throw new Error(`Invalid note title: "${title}"`);
   return p;
 }
 
 function safeScanDir(folder: string): string {
   const p = resolve(VAULT, folder);
-  if (!p.startsWith(VAULT + "/") && p !== VAULT) throw new Error(`Invalid folder: "${folder}"`);
+  const real = safeRealpathSync(p);
+  if (!real.startsWith(VAULT_REAL + "/") && real !== VAULT_REAL) throw new Error(`Invalid folder: "${folder}"`);
   return p;
 }
 

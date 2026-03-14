@@ -118,8 +118,8 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
           }
         }
         const fileList = safeFiles.join(", ");
-        // Sanitize scope to prevent shell injection via codex exec
-        const safeScope = scope.replace(/[^a-zA-Z0-9 _\-,.:]/g, "");
+        // Sanitize scope to prevent prompt injection via codex exec
+        const safeScope = sanitizeUserInput(scope, "review_scope");
         const result = spawnSync(
           "codex", ["exec", "--full-auto", `Review these files for ${safeScope}: ${fileList}`],
           { encoding: "utf-8", timeout: CODEX_TIMEOUT }
