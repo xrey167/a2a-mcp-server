@@ -89,7 +89,7 @@ const healthStatus = new Map<string, boolean>();
 function parseSemVer(version: string): { major: number; minor: number; patch: number } | null {
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
-  return { major: parseInt(match[1]), minor: parseInt(match[2]), patch: parseInt(match[3]) };
+  return { major: parseInt(match[1]!, 10), minor: parseInt(match[2]!, 10), patch: parseInt(match[3]!, 10) };
 }
 
 function compareSemVer(a: string, b: string): number {
@@ -248,9 +248,10 @@ export function negotiate(skillId: string, query?: NegotiationQuery): Negotiatio
   // Sort by score descending
   candidates.sort((a, b) => b.score - a.score);
 
-  const best = candidates.length > 0 ? candidates[0].capability : null;
-  const reason = best
-    ? `Selected ${best.agentName} (score: ${candidates[0].score.toFixed(1)}, ${candidates[0].reasons.join(", ")})`
+  const top = candidates[0];
+  const best = top?.capability ?? null;
+  const reason = best && top
+    ? `Selected ${best.agentName} (score: ${top.score.toFixed(1)}, ${top.reasons.join(", ")})`
     : "No matching capabilities found";
 
   return { best, candidates, reason };
