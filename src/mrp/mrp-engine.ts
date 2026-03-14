@@ -362,7 +362,7 @@ function backLinkPeggedDemand(plannedOrders: PlannedOrder[], pegging: PeggingTre
       if (peg.supplySourceType === "planned_order") {
         const order = orderMap.get(peg.supplySourceId);
         if (order && !order.peggedDemand.some(
-          (p: PeggingRecord) => p.demandSourceId === peg.demandSourceId && p.demandItemNo === peg.demandItemNo,
+          (p: PeggingRecord) => p.demandSourceType === peg.demandSourceType && p.demandSourceId === peg.demandSourceId && p.demandItemNo === peg.demandItemNo,
         )) {
           order.peggedDemand.push(peg);
         }
