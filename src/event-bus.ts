@@ -273,6 +273,57 @@ export function getEventBusStats(): {
   };
 }
 
+/** Retry dead letters by re-publishing their events. Returns count of retried events. */
+export async function replayDeadLetters(opts?: { limit?: number; olderThanMs?: number }): Promise<{
+  retried: number;
+  succeeded: number;
+  failed: number;
+  remaining: number;
+}> {
+  const limit = opts?.limit ?? 50;
+  const cutoff = opts?.olderThanMs ? Date.now() - opts.olderThanMs : Infinity;
+
+  // Take up to `limit` dead letters that are old enough
+  const toRetry: DeadLetter[] = [];
+  const kept: DeadLetter[] = [];
+  for (const dl of deadLetters) {
+    if (toRetry.length < limit && dl.timestamp <= cutoff) {
+      toRetry.push(dl);
+    } else {
+      kept.push(dl);
+    }
+  }
+
+  let succeeded = 0;
+  let failed = 0;
+
+  for (const dl of toRetry) {
+    try {
+      await publish(dl.event.topic, dl.event.data, {
+        source: dl.event.source,
+        correlationId: dl.event.correlationId,
+        meta: { ...dl.event.meta, retriedFrom: dl.event.id },
+      });
+      succeeded++;
+    } catch {
+      // Re-add to dead letters if retry also fails
+      kept.push(dl);
+      failed++;
+    }
+  }
+
+  // Replace dead letters array
+  deadLetters.length = 0;
+  deadLetters.push(...kept);
+
+  return {
+    retried: toRetry.length,
+    succeeded,
+    failed,
+    remaining: deadLetters.length,
+  };
+}
+
 /** Clear all state (for testing). */
 export function resetEventBus(): void {
   subscriptions.clear();
