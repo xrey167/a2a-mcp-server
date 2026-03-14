@@ -20,7 +20,9 @@ let _hasUnshare: boolean | null = null;
 function hasUnshare(): boolean {
   if (_hasUnshare !== null) return _hasUnshare;
   try {
-    execSync("unshare --help", { stdio: "ignore", timeout: 2000 });
+    // Test if unshare actually works with --net and --map-root-user flags
+    // (not just if the command exists, since GitHub Actions blocks user namespace mapping)
+    execSync("unshare --net --map-root-user -- true", { stdio: "ignore", timeout: 2000 });
     _hasUnshare = true;
   } catch {
     _hasUnshare = false;
@@ -39,7 +41,7 @@ function buildSandboxCommand(bunPath: string, tmpFile: string): string[] {
   const bunCmd = `${bunPath} --smol ${tmpFile}`;
 
   if (hasUnshare()) {
-    // Use unshare for network + PID namespace isolation (no root needed with user namespace)
+    // Use unshare for network namespace isolation (no root needed with user namespace)
     // --net: isolate network (no external access)
     // --map-root-user: map current user to root in namespace (allows unshare without root)
     return ["sh", "-c", `${ulimits} exec unshare --net --map-root-user -- ${bunCmd}`];
