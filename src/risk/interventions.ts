@@ -320,3 +320,117 @@ function buildComponentMap(components: BOMComponent[]): Map<string, BOMComponent
   walk(components, new Set(), 0);
   return map;
 }
+
+// ── Dual Sourcing Optimizer (SC-2) ──────────────────────────────
+
+export interface DualSourceVendor {
+  id: string;
+  name: string;
+  unitCost: number;
+  moq: number;
+  leadTime: number;
+  riskScore: number;
+  country: string;
+  capacityMax: number;
+}
+
+export interface DualSourceScenario {
+  primaryVendor: { id: string; name: string; share: number; unitCost: number };
+  secondaryVendor: { id: string; name: string; share: number; unitCost: number };
+
+  totalCostOfOwnership: number;
+  riskReduction: number;
+  geographicDiversification: boolean;
+  moqSatisfied: boolean;
+
+  tradeoffs: {
+    costPremium: number;
+    complexityIncrease: "low" | "medium" | "high";
+    qualityRisk: string;
+  };
+}
+
+/**
+ * Evaluate dual sourcing scenarios for an item.
+ * Compares split ratios between vendor pairs and selects optimal combinations.
+ */
+export function optimizeDualSourcing(
+  itemNo: string,
+  annualDemand: number,
+  vendors: DualSourceVendor[],
+  splitRatios?: number[],
+): DualSourceScenario[] {
+  if (vendors.length < 2) return [];
+
+  const ratios = splitRatios ?? [0.7, 0.6, 0.5];
+  const scenarios: DualSourceScenario[] = [];
+
+  // Sort vendors by risk-adjusted cost (cost weighted by risk)
+  const sorted = [...vendors].sort((a, b) => {
+    const adjA = a.unitCost * (1 + a.riskScore / 200);
+    const adjB = b.unitCost * (1 + b.riskScore / 200);
+    return adjA - adjB;
+  });
+
+  // Best single-source TCO for comparison
+  const bestSingle = sorted[0];
+  const singleTCO = bestSingle.unitCost * annualDemand;
+
+  // Evaluate pairs
+  for (let i = 0; i < Math.min(sorted.length, 3); i++) {
+    for (let j = i + 1; j < Math.min(sorted.length, 4); j++) {
+      const primary = sorted[i];
+      const secondary = sorted[j];
+
+      for (const primaryShare of ratios) {
+        const secondaryShare = 1 - primaryShare;
+        const primaryQty = Math.round(annualDemand * primaryShare);
+        const secondaryQty = annualDemand - primaryQty;
+
+        // Check MOQ
+        const moqSatisfied = primaryQty >= primary.moq && secondaryQty >= secondary.moq;
+
+        // Check capacity
+        if (primaryQty > primary.capacityMax || secondaryQty > secondary.capacityMax) continue;
+
+        // TCO
+        const tco = primary.unitCost * primaryQty + secondary.unitCost * secondaryQty;
+        const costPremium = Math.round(((tco - singleTCO) / singleTCO) * 100);
+
+        // Risk reduction: weighted average risk vs single source
+        const blendedRisk = primary.riskScore * primaryShare + secondary.riskScore * secondaryShare;
+        const riskReduction = Math.round(((bestSingle.riskScore - blendedRisk) / Math.max(1, bestSingle.riskScore)) * 100);
+
+        const geoDiversified = primary.country !== secondary.country;
+
+        const complexity: "low" | "medium" | "high" = primaryShare >= 0.8 ? "low" : primaryShare >= 0.6 ? "medium" : "high";
+
+        scenarios.push({
+          primaryVendor: { id: primary.id, name: primary.name, share: primaryShare, unitCost: primary.unitCost },
+          secondaryVendor: { id: secondary.id, name: secondary.name, share: secondaryShare, unitCost: secondary.unitCost },
+          totalCostOfOwnership: Math.round(tco * 100) / 100,
+          riskReduction,
+          geographicDiversification: geoDiversified,
+          moqSatisfied,
+          tradeoffs: {
+            costPremium,
+            complexityIncrease: complexity,
+            qualityRisk: primary.country !== secondary.country
+              ? "Different origins may have quality variance — incoming inspection recommended"
+              : "Same origin — consistent quality expected",
+          },
+        });
+      }
+    }
+  }
+
+  // Sort by best risk/cost tradeoff
+  scenarios.sort((a, b) => {
+    // Prefer scenarios where risk reduction > cost premium
+    const aValue = a.riskReduction - a.tradeoffs.costPremium;
+    const bValue = b.riskReduction - b.tradeoffs.costPremium;
+    return bValue - aValue;
+  });
+
+  return scenarios;
+}
