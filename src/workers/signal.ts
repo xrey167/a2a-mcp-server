@@ -172,10 +172,41 @@ interface AggregatedCluster {
   signalCount: number;
   severityScore: number;
   avgSeverity: number;
+  normalizedDensity: number; // signals per 100k km² (geo-normalized)
+  centroidLat: number | null;
+  centroidLon: number | null;
   typeDistribution: Record<string, number>;
   sourceDiversity: number;
   signals: Array<{ type: string; title: string; severity: string; source: string }>;
 }
+
+// Country land area in 1000 km² for geo-normalization (top ~60 countries + regions)
+const COUNTRY_AREA_K: Record<string, number> = {
+  russia: 17098, canada: 9985, china: 9597, "united states": 9834, usa: 9834, us: 9834,
+  brazil: 8516, australia: 7692, india: 3287, argentina: 2780, kazakhstan: 2725,
+  algeria: 2382, "dr congo": 2345, "saudi arabia": 2150, mexico: 1964, indonesia: 1905,
+  sudan: 1886, libya: 1760, iran: 1648, mongolia: 1564, peru: 1285,
+  chad: 1284, niger: 1267, angola: 1247, mali: 1240, "south africa": 1221,
+  colombia: 1142, ethiopia: 1104, bolivia: 1099, mauritania: 1031, egypt: 1002,
+  tanzania: 945, nigeria: 924, venezuela: 912, pakistan: 882, namibia: 824,
+  mozambique: 801, turkey: 784, chile: 756, zambia: 753, myanmar: 677,
+  afghanistan: 652, "south sudan": 644, france: 640, somalia: 638, ukraine: 604,
+  madagascar: 587, kenya: 580, yemen: 528, thailand: 513, spain: 506,
+  turkmenistan: 488, cameroon: 475, papua: 463, sweden: 450, uzbekistan: 447,
+  morocco: 447, iraq: 438, japan: 378, germany: 357, philippines: 300,
+  uk: 243, "united kingdom": 243, italy: 301, poland: 313, finland: 338,
+  vietnam: 331, malaysia: 330, norway: 324, "ivory coast": 322, romania: 238,
+  ghana: 239, laos: 237, guyana: 215, belarus: 208, kyrgyzstan: 200,
+  syria: 185, cambodia: 181, uruguay: 176, tunisia: 164, nepal: 147,
+  bangladesh: 148, tajikistan: 143, greece: 132, nicaragua: 130, north_korea: 121,
+  south_korea: 100, korea: 100, iceland: 103, hungary: 93, portugal: 92,
+  jordan: 89, serbia: 88, azerbaijan: 87, austria: 84, uae: 84,
+  czech: 79, panama: 75, ireland: 70, georgia: 70, sri_lanka: 66,
+  lithuania: 65, latvia: 65, croatia: 57, "bosnia": 51, slovakia: 49,
+  estonia: 45, denmark: 43, netherlands: 42, switzerland: 41, taiwan: 36,
+  belgium: 31, israel: 22, slovenia: 20, qatar: 12, lebanon: 10,
+  kuwait: 18, bahrain: 1, singapore: 1, luxembourg: 3, malta: 0.3,
+};
 
 function aggregateSignals(signals: Signal[], windowHours: number, dedup: boolean): {
   clusters: AggregatedCluster[];
@@ -212,24 +243,38 @@ function aggregateSignals(signals: Signal[], windowHours: number, dedup: boolean
     (byCountry.get(country) ?? (byCountry.set(country, []), byCountry.get(country))!).push(s);
   }
 
-  // Build clusters
+  // Build clusters with geo-normalization
   const clusters: AggregatedCluster[] = [];
   for (const [country, sigs] of byCountry) {
     const typeDistribution: Record<string, number> = {};
     const sources = new Set<string>();
     let severityScore = 0;
+    let latSum = 0, lonSum = 0, geoCount = 0;
 
     for (const s of sigs) {
       typeDistribution[s.type] = (typeDistribution[s.type] ?? 0) + 1;
       sources.add(s.source);
       severityScore += SEVERITY_SCORE[s.severity] ?? 1;
+      if (s.lat !== undefined && s.lon !== undefined) {
+        latSum += s.lat;
+        lonSum += s.lon;
+        geoCount++;
+      }
     }
+
+    // Geo-normalization: signal density per 100k km²
+    const countryKey = country.toLowerCase().replace(/[^a-z\s_]/g, "").trim();
+    const areaK = COUNTRY_AREA_K[countryKey] ?? 0;
+    const normalizedDensity = areaK > 0 ? round((sigs.length / areaK) * 100, 2) : 0;
 
     clusters.push({
       country,
       signalCount: sigs.length,
       severityScore,
       avgSeverity: round(severityScore / sigs.length, 2),
+      normalizedDensity,
+      centroidLat: geoCount > 0 ? round(latSum / geoCount) : null,
+      centroidLon: geoCount > 0 ? round(lonSum / geoCount) : null,
       typeDistribution,
       sourceDiversity: sources.size,
       signals: sigs.map(s => ({ type: s.type, title: s.title, severity: s.severity, source: s.source })).slice(0, 20),

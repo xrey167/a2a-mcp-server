@@ -52,6 +52,7 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 | `src/workers/monitor.ts` | 8092 | track_conflicts, detect_surge, theater_posture, track_vessels, check_freshness, watchlist_check |
 | `src/workers/infra.ts` | 8093 | cascade_analysis, supply_chain_map, chokepoint_assess, redundancy_score, dependency_graph |
 | `src/workers/climate.ts` | 8094 | fetch_earthquakes, fetch_wildfires, fetch_natural_events, assess_exposure, climate_anomalies, event_correlate |
+| `src/workers/supply-chain.ts` | 8095 | connect_erp, analyze_orders, critical_path, assess_risk, recommend_actions, monitor_dashboard, intelligence_report, predict_bottlenecks, deep_bom_analysis, run_mrp, mrp_impact |
 
 All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
 
