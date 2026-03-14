@@ -653,13 +653,16 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         const res = await fetch(customUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
         if (!res.ok) throw new Error(`Custom API HTTP ${res.status}`);
         quote = await res.json() as Record<string, unknown>;
+      } else if (provider === "yahoo") {
+        // Explicit Yahoo Finance request — uses undocumented API.
+        log("Warning: using unofficial Yahoo Finance API. Set ALPHAVANTAGE_API_KEY for a reliable official provider.");
+        quote = await fetchYahooQuote(symbol);
       } else if (process.env.ALPHAVANTAGE_API_KEY) {
         // Alpha Vantage is the primary official provider when the key is set.
         quote = await fetchAlphaVantageQuote(symbol);
       } else {
-        // Yahoo Finance fallback — uses undocumented API; set ALPHAVANTAGE_API_KEY
-        // to use an official provider instead.
-        console.warn("Warning: using unofficial Yahoo Finance API. Set ALPHAVANTAGE_API_KEY for a reliable official provider.");
+        // Default fallback to Yahoo when no API key is set.
+        log("Warning: using unofficial Yahoo Finance API. Set ALPHAVANTAGE_API_KEY for a reliable official provider.");
         quote = await fetchYahooQuote(symbol);
       }
       return safeStringify(quote, 2);
@@ -675,12 +678,17 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         return safeStringify(data, 2);
       }
       let history: { timestamps: string[]; open: number[]; high: number[]; low: number[]; close: number[]; volume: number[] };
-      if (provider === "alphavantage" || process.env.ALPHAVANTAGE_API_KEY) {
+      if (provider === "alphavantage") {
+        history = await fetchAlphaVantageHistory(symbol, interval, range);
+      } else if (provider === "yahoo") {
+        // Explicit Yahoo Finance request — uses undocumented API.
+        log("Warning: using unofficial Yahoo Finance API. Set ALPHAVANTAGE_API_KEY for a reliable official provider.");
+        history = await fetchYahooHistory(symbol, interval, range);
+      } else if (process.env.ALPHAVANTAGE_API_KEY) {
         // Alpha Vantage is the primary official provider when the key is set.
         history = await fetchAlphaVantageHistory(symbol, interval, range);
       } else {
-        // Yahoo Finance fallback — uses undocumented API; set ALPHAVANTAGE_API_KEY
-        // to use an official provider instead.
+        // Default fallback to Yahoo when no API key is set.
         log("Warning: using unofficial Yahoo Finance API. Set ALPHAVANTAGE_API_KEY for a reliable official provider.");
         history = await fetchYahooHistory(symbol, interval, range);
       }
