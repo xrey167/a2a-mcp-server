@@ -74,7 +74,8 @@ function getAuthFileSignature(): string | null {
   if (!existsSync(AUTH_FILE)) return null;
   try {
     const stat = statSync(AUTH_FILE);
-    return `${stat.mtimeMs}:${stat.size}`;
+    // Include inode so same-millisecond same-size edits are detected
+    return `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
   } catch {
     return null;
   }

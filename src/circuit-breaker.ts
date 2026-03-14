@@ -80,7 +80,7 @@ export class CircuitBreaker {
         this.transitionTo("half_open");
       } else {
         this.totalRejected++;
-        throw new CircuitOpenError(this.name, this.options.cooldownMs - (Date.now() - this.lastFailureTime));
+        throw new CircuitOpenError(this.name, Math.max(0, this.options.cooldownMs - (Date.now() - this.lastFailureTime)));
       }
     }
 
@@ -104,6 +104,11 @@ export class CircuitBreaker {
     this.failureCount = 0;
     this.successCount = 0;
     this.transitionTo("closed");
+  }
+
+  /** Manually record a failure (e.g. from external process crash). */
+  recordFailure(): void {
+    this.onFailure();
   }
 
   private onSuccess(): void {

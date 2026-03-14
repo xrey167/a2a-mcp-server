@@ -112,6 +112,9 @@ async function fanOut(
       .filter(r => !r.error)
       .map(r => `[${r.agent}]\n${r.result}`)
       .join("\n\n---\n\n");
+  } else if (merge === "best_score" || merge === "majority_vote") {
+    process.stderr.write(`[collaboration] merge strategy "${merge}" is not meaningful for fan_out — falling back to concat\n`);
+    output = responses.filter(r => !r.error).map(r => `[${r.agent}]\n${r.result}`).join("\n\n---\n\n");
   } else if (merge === "custom" && request.mergePrompt) {
     const responseSummary = responses
       .filter(r => !r.error)
@@ -197,7 +200,8 @@ Reply with JSON: { "scores": [{"id": 0, "score": 8, "reason": "..."}, ...], "bes
       totalDurationMs: Date.now() - startTime,
     };
   } catch {
-    // Fallback: return the first response
+    // Fallback: return the first response; log so callers know consensus scoring failed
+    process.stderr.write(`[collaboration] consensus judge returned invalid JSON — falling back to first response\n`);
     return {
       id,
       strategy: "consensus",
@@ -228,8 +232,9 @@ async function debate(
     if (validPrev.length < 2) break;
 
     // Each agent critiques others and refines their answer
-    const critiqueTasks = request.agents.map(async (agent, i) => {
-      const others = validPrev.filter((_, j) => j !== i);
+    const critiqueTasks = request.agents.map(async (agent) => {
+      // Filter by agent identity (not index) to correctly exclude self even when some agents failed
+      const others = validPrev.filter(r => r.agent !== agent);
       const othersSummary = others
         .map(r => `<perspective agent="${r.agent}">\n${r.result}\n</perspective>`)
         .join("\n");
@@ -251,8 +256,14 @@ Consider the other perspectives. If they raise valid points you missed, improve 
 Provide your refined answer.`;
 
       const agentStart = Date.now();
+      const timeoutMs = request.timeoutMs ?? 60_000;
       try {
-        const result = await dispatch(agent, { prompt }, prompt);
+        const result = await Promise.race([
+          dispatch(agent, { prompt }, prompt),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Timeout")), timeoutMs),
+          ),
+        ]);
         return { agent, result, durationMs: Date.now() - agentStart, round: round + 1 } as AgentResponse;
       } catch (err) {
         return { agent, result: "", error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - agentStart, round: round + 1 } as AgentResponse;
@@ -306,9 +317,9 @@ async function mapReduce(
     return { id, strategy: "map_reduce", output: "No items to process", responses: [], totalDurationMs: Date.now() - startTime };
   }
 
-  // Distribute items across agents round-robin
-  const agentCount = request.agents.length;
-  const chunks: Array<{ agent: string; items: unknown[] }> = request.agents.map(a => ({ agent: a, items: [] }));
+  // Distribute items across agents round-robin; only use as many agents as there are items
+  const agentCount = Math.min(request.agents.length, items.length);
+  const chunks: Array<{ agent: string; items: unknown[] }> = request.agents.slice(0, agentCount).map(a => ({ agent: a, items: [] }));
   for (let i = 0; i < items.length; i++) {
     chunks[i % agentCount].items.push(items[i]);
   }

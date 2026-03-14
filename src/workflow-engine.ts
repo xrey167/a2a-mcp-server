@@ -175,6 +175,9 @@ function resolveTemplates(
     const isEmbedded = !/^\s*\{\{[-\w]+\.result\}\}\s*$/.test(value);
     return value.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
       const result = stepResults.get(stepId);
+      if (!result) {
+        process.stderr.write(`[workflow] template ref {{${stepId}.result}} not found — substituting placeholder\n`);
+      }
       const rawValue = result?.result ?? `<step ${stepId} not found>`;
       return sanitizeTemplateValue(rawValue, targetSkillId, isEmbedded);
     });
@@ -247,14 +250,14 @@ function evaluateCondition(when: string | undefined, stepResults: Map<string, St
   if (!when || when === "always") return true;
 
   // Check {{stepId.result}} is truthy
-  const resolved = when.replace(/\{\{(\w+)\.result\}\}/g, (_, stepId) => {
+  const resolved = when.replace(/\{\{([-\w]+)\.result\}\}/g, (_, stepId) => {
     const result = stepResults.get(stepId);
     if (!result || result.status !== "completed" || !result.result) return "";
     return result.result;
   });
 
   // Check {{stepId.status}} === "completed"
-  const statusResolved = resolved.replace(/\{\{(\w+)\.status\}\}/g, (_, stepId) => {
+  const statusResolved = resolved.replace(/\{\{([-\w]+)\.status\}\}/g, (_, stepId) => {
     const result = stepResults.get(stepId);
     return result?.status ?? "unknown";
   });
