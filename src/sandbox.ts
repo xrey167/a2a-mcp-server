@@ -9,10 +9,47 @@ import { smartTruncate } from "./truncate.js";
 import { safeStringify } from "./safe-json.js";
 import { filterEnvForSandbox } from "./env-filter.js";
 import { getConfig } from "./config.js";
+import { execSync } from "child_process";
 
 function getTimeout() { return getConfig().sandbox.timeout; }
 function getMaxResultSize() { return getConfig().sandbox.maxResultSize; }
 function getIndexThreshold() { return getConfig().sandbox.indexThreshold; }
+
+// ── OS-level isolation detection ──────────────────────────
+let _hasUnshare: boolean | null = null;
+function hasUnshare(): boolean {
+  if (_hasUnshare !== null) return _hasUnshare;
+  try {
+    // Test if unshare actually works with --net and --map-root-user flags
+    // (not just if the command exists, since GitHub Actions blocks user namespace mapping)
+    execSync("unshare --net --map-root-user -- true", { stdio: "ignore", timeout: 2000 });
+    _hasUnshare = true;
+  } catch {
+    _hasUnshare = false;
+  }
+  return _hasUnshare;
+}
+
+/** Build sandbox command with OS-level resource limits and optional namespace isolation. */
+function buildSandboxCommand(bunPath: string, tmpFile: string): string[] {
+  // Resource limits via ulimit wrapper:
+  // - 256MB virtual memory limit
+  // - 1024 max open files
+  // - 64 max processes
+  // - 30s CPU time limit
+  const ulimits = "ulimit -v 262144 -n 1024 -u 64 -t 30 2>/dev/null;";
+  const bunCmd = `${bunPath} --smol ${tmpFile}`;
+
+  if (hasUnshare()) {
+    // Use unshare for network namespace isolation (no root needed with user namespace)
+    // --net: isolate network (no external access)
+    // --map-root-user: map current user to root in namespace (allows unshare without root)
+    return ["sh", "-c", `${ulimits} exec unshare --net --map-root-user -- ${bunCmd}`];
+  }
+
+  // Fallback: just resource limits, no namespace isolation
+  return ["sh", "-c", `${ulimits} exec ${bunCmd}`];
+}
 
 // ── Adapter discovery helpers ─────────────────────────────
 // These are injected by the orchestrator at wire-up time (Task 4)
@@ -78,7 +115,8 @@ async function runSubprocess(
   return new Promise((resolve) => {
     // Use absolute path to bun so sandbox works even with restricted PATH
     const bunPath = process.execPath;
-    const proc = Bun.spawn([bunPath, "--smol", tmpFile], {
+    const cmd = buildSandboxCommand(bunPath, tmpFile);
+    const proc = Bun.spawn(cmd, {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
