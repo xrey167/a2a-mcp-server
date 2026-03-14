@@ -130,7 +130,8 @@ export function loadRegistry(): Registry {
         ...BUILTIN_REGISTRY.workers.filter(w => !nameSet.has(w.name)),
       ];
       return { ...local, workers: merged };
-    } catch {
+    } catch (e: any) {
+      if (e?.code !== "ENOENT") process.stderr.write(`[worker-registry] failed to load registry: ${e}\n`);
       return BUILTIN_REGISTRY;
     }
   }
