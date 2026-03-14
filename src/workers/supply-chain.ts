@@ -31,6 +31,8 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 
+import { homedir } from "os";
+import { join } from "path";
 import type {
   ERPConnector,
   ERPConnectionConfig,
@@ -41,6 +43,10 @@ import type {
   ItemAvailability,
   PostedReceipt,
   WorkCenterData,
+  TransferOrder,
+  Vendor,
+  Intervention,
+  RoutingStep,
 } from "../erp/types.js";
 import { BusinessCentralConnector } from "../erp/business-central.js";
 import { OdooConnector } from "../erp/odoo.js";
@@ -160,6 +166,11 @@ const SupplyChainSchemas = {
     vendorNo: z.string().optional(),
   }).passthrough(),
 
+  execute_interventions: z.object({
+    interventionIds: z.array(z.string()).min(1),
+    dryRun: z.boolean().optional().default(false),
+  }).passthrough(),
+
   firm_orders: z.object({
     orderIds: z.array(z.string()).min(1),
   }).passthrough(),
@@ -239,6 +250,11 @@ const AGENT_CARD = {
       name: "Firm Orders",
       description: "Firm planned orders so they are excluded from MRP replanning. Firmed orders become fixed supply that MRP treats as committed.",
     },
+    {
+      id: "execute_interventions",
+      name: "Execute Interventions",
+      description: "Act on intervention recommendations from recommend_actions. Firms planned orders for advance purchases and dual-sourcing, stores safety-stock overrides for the next MRP run, and returns manual action steps for reschedule/make-or-buy recommendations.",
+    },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory" },
   ],
@@ -261,27 +277,68 @@ let firmedOrders: PlannedOrder[] = [];
 let cachedPeggingCache: unknown = undefined;
 let cachedExternalFactors: ExternalRiskFactors | undefined;
 let cachedVendorHealthScores: import("../erp/types.js").VendorHealthScore[] | undefined;
+let cachedTransferOrders: TransferOrder[] = [];
+let cachedVendors: Vendor[] | undefined;
+let cachedInterventions: Intervention[] = [];
+let cachedSafetyStockOverrides: Map<string, number> = new Map();
+
+// ── Firmed Orders Persistence ─────────────────────────────────────
+
+const FIRMED_ORDERS_PATH = join(homedir(), ".a2a-mcp", "firmed-orders.json");
+
+async function loadFirmedOrders(): Promise<void> {
+  try {
+    const text = await Bun.file(FIRMED_ORDERS_PATH).text();
+    const parsed = JSON.parse(text) as PlannedOrder[];
+    if (Array.isArray(parsed)) {
+      firmedOrders = parsed;
+      log(`loaded ${firmedOrders.length} firmed orders from disk`);
+    }
+  } catch {
+    // File doesn't exist yet or is invalid — start fresh
+  }
+}
+
+async function saveFirmedOrders(): Promise<void> {
+  try {
+    await Bun.write(FIRMED_ORDERS_PATH, JSON.stringify(firmedOrders, null, 2));
+  } catch (err) {
+    log(`warning: could not persist firmed orders: ${err}`);
+  }
+}
+
+async function clearFirmedOrdersPersistence(): Promise<void> {
+  firmedOrders = [];
+  try {
+    await Bun.write(FIRMED_ORDERS_PATH, "[]");
+  } catch {
+    // ignore
+  }
+}
 
 /** Reset all caches (new ERP connection) */
-function invalidateCaches() {
+async function invalidateCaches(): Promise<void> {
   cachedProductionOrders = [];
   cachedSalesOrders = [];
   cachedPurchaseOrders = [];
   cachedAvailability = [];
   cachedPostedReceipts = [];
   cachedERPWorkCenters = [];
+  cachedTransferOrders = [];
+  cachedVendors = undefined;
   lastAnalysisTimestamp = null;
+  await clearFirmedOrdersPersistence();
   invalidateDerivedCaches();
   log("all caches invalidated (new ERP connection)");
 }
 
-/** Reset derived caches only (fresh data load) */
+/** Reset derived caches only (fresh data load) — firmedOrders are user decisions, not reset here */
 function invalidateDerivedCaches() {
   cachedMRPResult = null;
-  firmedOrders = [];
   cachedPeggingCache = undefined;
   cachedExternalFactors = undefined;
   cachedVendorHealthScores = undefined;
+  cachedInterventions = [];
   log("derived caches invalidated (fresh data)");
 }
 
@@ -337,7 +394,7 @@ function extractVendorCountries(orders: ProductionOrder[]): string[] {
 function extractComponentCategories(components: BOMComponent[]): string[] {
   const cats = new Set<string>();
   for (const c of components) {
-    cats.add(c.itemName.split(/[\s-]/)[0] ?? "General");
+    cats.add(c.itemCategory ?? c.itemName.split(/[\s-]/)[0] ?? "General");
   }
   return [...cats].slice(0, 10);
 }
@@ -385,7 +442,7 @@ async function handleConnectERP(args: Record<string, unknown>): Promise<string> 
   }
 
   // New ERP connection invalidates all cached data
-  invalidateCaches();
+  await invalidateCaches();
 
   return safeStringify({
     status: "connected",
@@ -427,11 +484,12 @@ async function handleAnalyzeOrders(args: Record<string, unknown>): Promise<strin
   const itemNos = allComponents.map((c) => c.itemNo);
   const availability = itemNos.length > 0 ? await erp.getItemAvailability(itemNos) : [];
 
-  // Fetch posted receipts for actual lead time data
-  log("loading posted receipts and work centers");
-  const [postedReceipts, erpWorkCenters] = await Promise.all([
+  // Fetch posted receipts, work centers, and transfer orders
+  log("loading posted receipts, work centers, and transfer orders");
+  const [postedReceipts, erpWorkCenters, transferOrders] = await Promise.all([
     erp.getPostedReceipts({ dateFrom, dateTo }).catch(() => [] as PostedReceipt[]),
     erp.getWorkCenters().catch(() => [] as WorkCenterData[]),
+    erp.getTransferOrders({ dateFrom, dateTo }).catch(() => [] as TransferOrder[]),
   ]);
 
   // Cache for use in other skills
@@ -441,6 +499,7 @@ async function handleAnalyzeOrders(args: Record<string, unknown>): Promise<strin
   cachedAvailability = availability;
   cachedPostedReceipts = postedReceipts;
   cachedERPWorkCenters = erpWorkCenters;
+  cachedTransferOrders = transferOrders;
   lastAnalysisTimestamp = new Date().toISOString();
 
   // Build summary
@@ -739,6 +798,9 @@ async function handleRecommendActions(args: Record<string, unknown>): Promise<st
     aiEvaluation?.rankedInterventions?.map((r) => [r.id, r]) ?? [],
   );
 
+  // Cache raw interventions for use by execute_interventions
+  cachedInterventions = interventions;
+
   const result = {
     timestamp: new Date().toISOString(),
     summary: {
@@ -1019,6 +1081,14 @@ async function handleRunMRP(args: Record<string, unknown>): Promise<string> {
 
   log(`running MRP: ${horizonWeeks} weeks, ${bucketSize} buckets, ${lotSizingPolicy} lot sizing`);
 
+  // Build erpRoutings map from cached production order routing data
+  const erpRoutings = new Map<string, RoutingStep[]>();
+  for (const po of cachedProductionOrders) {
+    if (po.routings.length > 0 && !erpRoutings.has(po.itemNo)) {
+      erpRoutings.set(po.itemNo, po.routings);
+    }
+  }
+
   const result = runMRP({
     productionOrders: cachedProductionOrders,
     salesOrders: cachedSalesOrders,
@@ -1026,7 +1096,9 @@ async function handleRunMRP(args: Record<string, unknown>): Promise<string> {
     components: allComponents,
     availability: cachedAvailability,
     erpWorkCenters: cachedERPWorkCenters.length > 0 ? cachedERPWorkCenters : undefined,
+    erpRoutings: erpRoutings.size > 0 ? erpRoutings : undefined,
     firmedOrders: firmedOrders.length > 0 ? firmedOrders : undefined,
+    transferOrders: cachedTransferOrders.length > 0 ? cachedTransferOrders : undefined,
     config: mrpConfig,
   });
 
@@ -1113,10 +1185,12 @@ async function handleVendorHealth(args: Record<string, unknown>): Promise<string
   const { vendorNo } = SupplyChainSchemas.vendor_health.parse(args);
   const erp = requireConnector();
 
-  const vendors = await erp.getVendors();
+  if (!cachedVendors) {
+    cachedVendors = await erp.getVendors();
+  }
   const vendorsToAnalyze = vendorNo
-    ? vendors.filter((v) => v.no === vendorNo)
-    : vendors;
+    ? cachedVendors.filter((v) => v.no === vendorNo)
+    : cachedVendors;
 
   if (vendorsToAnalyze.length === 0) {
     return safeStringify({ error: vendorNo ? `Vendor ${vendorNo} not found` : "No vendors found" });
@@ -1152,7 +1226,7 @@ async function handleVendorHealth(args: Record<string, unknown>): Promise<string
   }, 2);
 }
 
-function handleFirmOrders(args: Record<string, unknown>): string {
+async function handleFirmOrders(args: Record<string, unknown>): Promise<string> {
   const { orderIds } = SupplyChainSchemas.firm_orders.parse(args);
 
   if (!cachedMRPResult) {
@@ -1174,6 +1248,10 @@ function handleFirmOrders(args: Record<string, unknown>): string {
     }
   }
 
+  if (firmed.length > 0) {
+    await saveFirmedOrders();
+  }
+
   return safeStringify({
     timestamp: new Date().toISOString(),
     firmedCount: firmed.length,
@@ -1181,6 +1259,147 @@ function handleFirmOrders(args: Record<string, unknown>): string {
     notFound: notFound.length > 0 ? notFound : undefined,
     totalFirmedOrders: firmedOrders.length,
     note: "Firmed orders will be treated as fixed supply in subsequent MRP runs.",
+  }, 2);
+}
+
+async function handleExecuteInterventions(args: Record<string, unknown>): Promise<string> {
+  const { interventionIds, dryRun } = SupplyChainSchemas.execute_interventions.parse(args);
+
+  if (cachedInterventions.length === 0) {
+    return safeStringify({
+      error: "No interventions available. Run recommend_actions first to generate recommendations.",
+    });
+  }
+
+  const selected = cachedInterventions.filter((i) => interventionIds.includes(i.id));
+  if (selected.length === 0) {
+    return safeStringify({
+      error: `None of the requested intervention IDs were found. Available: ${cachedInterventions.map((i) => i.id).join(", ")}`,
+    });
+  }
+
+  const executed: Array<{ id: string; type: string; component: string; action: string }> = [];
+  const newFirmedOrders: Array<{ id: string; itemNo: string; itemName: string; quantity: number }> = [];
+  const manualSteps: Array<{ id: string; type: string; component: string; steps: string[] }> = [];
+
+  for (const intervention of selected) {
+    const comp = intervention.componentId;
+    const compName = intervention.componentName;
+
+    if (intervention.type === "advance_purchase" || intervention.type === "dual_source") {
+      // Create a firmed planned order for this component
+      const targetQty = typeof intervention.details.recommendedOrderQty === "number"
+        ? intervention.details.recommendedOrderQty
+        : typeof intervention.details.safetyStockMonths === "number"
+          ? Math.ceil((intervention.details.safetyStockMonths as number) * 30)
+          : 1;
+      const orderDate = new Date().toISOString().slice(0, 10);
+      const dueDate = typeof intervention.details.targetDueDate === "string"
+        ? intervention.details.targetDueDate
+        : new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
+
+      const plannedOrder: PlannedOrder = {
+        id: `EXEC-${intervention.id.toUpperCase()}`,
+        itemNo: comp,
+        itemName: compName,
+        quantity: targetQty,
+        orderDate,
+        dueDate,
+        type: "purchase",
+        action: "create",
+        bomLevel: 0,
+        peggedDemand: [],
+        safetyBuffer: 0,
+        lotSizingPolicy: "L4L",
+        status: "firmed",
+      };
+
+      if (!dryRun) {
+        firmedOrders.push(plannedOrder);
+        newFirmedOrders.push({
+          id: plannedOrder.id,
+          itemNo: comp,
+          itemName: compName,
+          quantity: targetQty,
+        });
+      }
+
+      executed.push({
+        id: intervention.id,
+        type: intervention.type,
+        component: compName,
+        action: dryRun
+          ? `Would firm planned purchase order for ${targetQty} units due ${dueDate}`
+          : `Firmed planned purchase order ${plannedOrder.id} for ${targetQty} units due ${dueDate}`,
+      });
+    } else if (intervention.type === "safety_stock") {
+      const targetQty = typeof intervention.details.recommendedSafetyStock === "number"
+        ? intervention.details.recommendedSafetyStock as number
+        : 0;
+      if (!dryRun && targetQty > 0) {
+        cachedSafetyStockOverrides.set(comp, targetQty);
+      }
+      executed.push({
+        id: intervention.id,
+        type: intervention.type,
+        component: compName,
+        action: dryRun
+          ? `Would set safety stock override to ${targetQty} units for next MRP run`
+          : `Safety stock override set to ${targetQty} units — will apply in next MRP run`,
+      });
+    } else if (intervention.type === "reschedule") {
+      const delay = typeof intervention.details.suggestedDelayDays === "number"
+        ? intervention.details.suggestedDelayDays as number
+        : 0;
+      manualSteps.push({
+        id: intervention.id,
+        type: intervention.type,
+        component: compName,
+        steps: [
+          `Open production order for ${compName} in ERP`,
+          `Delay due date by ${delay} days to allow component delivery buffer`,
+          `Notify customer of revised delivery date`,
+          `Review impact on downstream sales orders using mrp_impact skill`,
+        ],
+      });
+      executed.push({ id: intervention.id, type: intervention.type, component: compName, action: "Manual steps generated" });
+    } else if (intervention.type === "make_or_buy") {
+      const recommendation = intervention.details.recommendation as string ?? "review";
+      manualSteps.push({
+        id: intervention.id,
+        type: intervention.type,
+        component: compName,
+        steps: [
+          `Review make-or-buy analysis for ${compName}: ${recommendation}`,
+          recommendation === "make"
+            ? `Set up internal production BOM and routing for ${compName}`
+            : `Issue RFQ to alternative suppliers for ${compName}`,
+          `Update replenishment method in ERP item card`,
+        ],
+      });
+      executed.push({ id: intervention.id, type: intervention.type, component: compName, action: "Manual steps generated" });
+    }
+  }
+
+  if (!dryRun && newFirmedOrders.length > 0) {
+    await saveFirmedOrders();
+  }
+
+  return safeStringify({
+    timestamp: new Date().toISOString(),
+    dryRun,
+    summary: {
+      requested: interventionIds.length,
+      actioned: executed.length,
+      firmedOrders: newFirmedOrders.length,
+      manualStepsGenerated: manualSteps.length,
+    },
+    executed,
+    newFirmedOrders: newFirmedOrders.length > 0 ? newFirmedOrders : undefined,
+    manualSteps: manualSteps.length > 0 ? manualSteps : undefined,
+    note: newFirmedOrders.length > 0
+      ? "New firmed orders added. Run run_mrp to see updated planned orders."
+      : undefined,
   }, 2);
 }
 
@@ -1232,6 +1451,8 @@ async function handleSkill(
       return handleVendorHealth(args);
     case "firm_orders":
       return handleFirmOrders(args);
+    case "execute_interventions":
+      return handleExecuteInterventions(args);
     default:
       return `Unknown skill: ${skillId}`;
   }
@@ -1283,6 +1504,9 @@ app.post<{ Body: Record<string, unknown> }>("/", async (request, reply) => {
 getPersona(NAME);
 watchPersonas();
 
-app.listen({ port: PORT, host: "localhost" }).then(() => {
-  log(`listening on http://localhost:${PORT}`);
+// Load persisted firmed orders before starting
+loadFirmedOrders().then(() => {
+  app.listen({ port: PORT, host: "localhost" }).then(() => {
+    log(`listening on http://localhost:${PORT}`);
+  });
 });
