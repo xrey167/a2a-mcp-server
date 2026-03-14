@@ -1413,24 +1413,46 @@ JSON metrics snapshot. No authentication required.
 **Response (application/json):**
 ```json
 {
-  "skills": {
-    "run_shell": {
-      "calls": 152,
-      "errors": 3,
-      "p50": 85,
-      "p95": 420,
-      "p99": 980
-    },
-    "read_file": {
-      "calls": 487,
-      "errors": 0,
-      "p50": 12,
-      "p95": 55,
-      "p99": 110
+  "timestamp": "2024-01-01T00:00:00.000Z",
+  "uptime": 3600,
+  "system": {
+    "totalCalls": 142,
+    "totalErrors": 3,
+    "errorRate": "2.1%",
+    "avgLatencyMs": 287
+  },
+  "skills": [
+    {
+      "skillId": "run_shell",
+      "worker": "shell-agent",
+      "calls": 89,
+      "errors": 1,
+      "errorRate": "1.1%",
+      "latency": { "p50": 124, "p95": 891, "p99": 2103, "max": 4200 },
+      "lastCalled": "2024-01-01T00:59:12.000Z"
     }
+  ],
+  "workers": [
+    {
+      "name": "shell-agent",
+      "url": "http://localhost:8081",
+      "totalCalls": 89,
+      "totalErrors": 1,
+      "errorRate": "1.1%",
+      "avgLatencyMs": 312
+    }
+  ],
+  "tokenSavings": {
+    "totalInputTokens": 45000,
+    "totalOutputTokens": 12000,
+    "totalSavedTokens": 8000,
+    "savingsRate": "15.4%",
+    "topSkills": [{ "skillId": "ask_claude", "saved": 4200, "count": 18 }]
   }
 }
 ```
+
+> `tokenSavings` is optional — only present if token tracking is initialized with data.
 
 ---
 
@@ -2054,46 +2076,52 @@ delegate
   message="Process order with audit trail"
 ```
 
-**Traces auto-created (integrated into delegate flow):**
+**Traces auto-created (integrated into delegate flow). Retrieve via MCP tool:**
 
 ```
-GET /traces → [
-  {
-    "traceId": "trace_abc123",
-    "startTime": "2026-03-14T10:00:00Z",
-    "spans": [
-      {
-        "spanId": "span_1",
-        "parentSpanId": null,
-        "name": "delegate:process_order",
-        "duration": 1200,
-        "status": "OK"
-      },
-      {
-        "spanId": "span_1a",
-        "parentSpanId": "span_1",
-        "name": "worker:data.fetch_order",
-        "duration": 150,
-        "status": "OK"
-      },
-      {
-        "spanId": "span_1b",
-        "parentSpanId": "span_1",
-        "name": "worker:shell.audit_log",
-        "duration": 80,
-        "status": "OK"
-      },
-      {
-        "spanId": "span_1c",
-        "parentSpanId": "span_1",
-        "name": "worker:ai.validate",
-        "duration": 900,
-        "status": "OK"
-      }
-    ]
-  }
-]
+get_trace
+  traceId="trace_abc123"
 ```
+
+**Response:**
+```json
+{
+  "traceId": "trace_abc123",
+  "startTime": "2026-03-14T10:00:00Z",
+  "waterfall": [
+    {
+      "spanId": "span_1",
+      "parentSpanId": null,
+      "operationName": "delegate:process_order",
+      "durationMs": 1200,
+      "status": "ok"
+    },
+    {
+      "spanId": "span_1a",
+      "parentSpanId": "span_1",
+      "operationName": "worker:data.fetch_order",
+      "durationMs": 150,
+      "status": "ok"
+    },
+    {
+      "spanId": "span_1b",
+      "parentSpanId": "span_1",
+      "operationName": "worker:shell.audit_log",
+      "durationMs": 80,
+      "status": "ok"
+    },
+    {
+      "spanId": "span_1c",
+      "parentSpanId": "span_1",
+      "operationName": "worker:ai.validate",
+      "durationMs": 900,
+      "status": "ok"
+    }
+  ]
+}
+```
+
+> Tracing is MCP-only. There is no `GET /traces` HTTP endpoint. Use the `list_traces`, `get_trace`, and `search_traces` MCP tools to access trace data.
 
 ---
 
