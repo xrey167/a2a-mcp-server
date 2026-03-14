@@ -233,6 +233,47 @@ Respond with ONLY valid JSON — no markdown fences, no explanation.`,
   },
 };
 
+// ── Digital Twin Pipeline ────────────────────────────────────────
+const digitalTwinPipeline: Pipeline = {
+  id: "digital-twin",
+  name: "Digital Twin",
+  description: "Manufacturing digital twin simulation with IoT data ingestion, physics-based models, and real-time dashboards",
+  stack: ["TypeScript", "Bun", "MQTT", "SQLite", "D3.js"],
+  intentPrompt: `You are a senior manufacturing engineer designing a digital twin system specification.
+
+Given this description: "{{idea}}"
+
+Produce a JSON object with these fields:
+- name: short project name (2-3 words, kebab-case)
+- description: one-sentence summary of the digital twin
+- assetType: type of physical asset being twinned (e.g. "production-line", "cnc-machine", "assembly-cell")
+- dataPoints: array of 5-10 sensor data points, each with { name, unit, sampleRateHz, source: "plc"|"scada"|"mqtt"|"rest" }
+- physicsModels: array of 2-4 behavioral models, each with { name, type: "first-principles"|"ml"|"hybrid", inputs: string[], outputs: string[] }
+- kpis: array of 3-5 KPIs, each with { name, formula, target, unit }
+- anomalyRules: array of 2-3 anomaly detection rules, each with { parameter, condition, severity: "warning"|"critical" }
+- dashboardPanels: array of 4-6 dashboard panels, each with { name, type: "gauge"|"timeseries"|"heatmap"|"3d-view"|"table", dataSource: string }
+- techNotes: any special requirements (protocols, edge computing, historical data, etc.)
+
+Respond with ONLY valid JSON — no markdown fences, no explanation.`,
+  steps: [
+    { id: "normalize", label: "Expanding digital twin specification", skillId: "ask_claude", replacesSpec: true },
+    { id: "scaffold", label: "Scaffolding project from template", skillId: "run_shell" },
+    { id: "generate_model", label: "Generating physics/ML model layer", skillId: "ask_claude" },
+    { id: "generate_ingestion", label: "Generating data ingestion pipeline", skillId: "ask_claude" },
+    { id: "generate_simulation", label: "Generating simulation engine", skillId: "ask_claude" },
+    { id: "generate_anomaly", label: "Generating anomaly detection", skillId: "ask_claude" },
+    { id: "generate_dashboard", label: "Generating monitoring dashboard", skillId: "ask_claude" },
+    { id: "write_files", label: "Writing generated code to disk", skillId: "run_shell" },
+    { id: "quality_gate", label: "Ralph Mode — quality review", skillId: "ask_claude" },
+    { id: "fix_issues", label: "Fixing quality issues", skillId: "ask_claude", optional: true },
+  ],
+  qualityGate: {
+    dimensions: ["code_quality", "type_safety", "model_accuracy", "data_pipeline", "dashboard_ux"],
+    passThreshold: 85,
+    maxIterations: 3,
+  },
+};
+
 // ── Pipeline Registry ───────────────────────────────────────────
 
 export const PIPELINES = new Map<string, Pipeline>([
@@ -242,6 +283,7 @@ export const PIPELINES = new Map<string, Pipeline>([
   ["agent", agentPipeline],
   ["api", apiPipeline],
   ["cli", cliPipeline],
+  ["digital-twin", digitalTwinPipeline],
 ]);
 
 export function getPipeline(id: string): Pipeline | undefined {
