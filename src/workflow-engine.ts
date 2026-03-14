@@ -411,12 +411,13 @@ export async function executeWorkflow(
 
   const hasFailures = allResults.some(r => r.status === "failed");
   const allCompleted = allResults.every(r => r.status === "completed" || r.status === "skipped");
+  const skippedCount = allResults.filter(r => r.status === "skipped").length;
 
-  onProgress?.(`Workflow "${workflow.name ?? workflow.id}" finished in ${totalDurationMs}ms — ${completed.size} completed, ${failed.size} failed`);
+  onProgress?.(`Workflow "${workflow.name ?? workflow.id}" finished in ${totalDurationMs}ms — ${completed.size} completed, ${skippedCount} skipped, ${failed.size} failed`);
 
   return {
     workflowId: workflow.id,
-    status: hasFailures ? (completed.size > 0 ? "partial" : "failed") : "completed",
+    status: hasFailures ? (completed.size > 0 ? "partial" : "failed") : (allCompleted ? "completed" : "partial"),
     steps: allResults,
     totalDurationMs,
   };

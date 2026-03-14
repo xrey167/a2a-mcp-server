@@ -377,7 +377,6 @@ function buildSkillRouter(builtinCards: AgentCard[], externalCards: AgentCard[] 
       map.set(skill.id, card.url);
     }
   }
-  skillRouterCache = map;
   return map;
 }
 
