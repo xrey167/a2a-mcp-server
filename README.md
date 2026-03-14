@@ -5,22 +5,28 @@
   <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
   <img src="https://img.shields.io/badge/protocol-ACP_(Zed)-ef4444" alt="ACP" />
   <img src="https://img.shields.io/badge/agents-14_workers-f59e0b" alt="Agents" />
-  <img src="https://img.shields.io/badge/MCP_tools-35-8b5cf6" alt="Tools" />
+  <img src="https://img.shields.io/badge/MCP_tools-50%2B-8b5cf6" alt="Tools" />
+  <img src="https://github.com/xrey167/a2a-mcp-server/actions/workflows/ci.yml/badge.svg" alt="CI" />
   <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
 </p>
 
 # A2A-MCP Server
 
-**A managed-cloud automation runtime for agencies** that need recurring, auditable client delivery workflows.
+A multi-protocol automation runtime that connects **Claude Code**, **Zed IDE**, and any A2A-compatible agent to a fleet of 14 specialized worker agents. Built on **Bun** and **TypeScript** with no build step required.
 
-Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, provides 35 MCP tools, supports DAG workflows, enterprise RBAC/audit, token savings, packaged agency workflows, and ERP connector product APIs.
+It speaks three protocols simultaneously:
+
+- **MCP** (stdio) — Claude Code and any MCP-compatible client
+- **A2A** (HTTP, port 8080) — Google's Agent-to-Agent protocol for agent federation
+- **ACP** (stdin/stdout) — Zed IDE integration
+
+> **Agency Product Mode:** The server ships with packaged agency workflows, ERP connectors, and RBAC/audit trails targeting recurring client-delivery operations at EUR 1.5k–3k/month. See [Agency Product Mode](#agency-product-mode).
 
 ---
 
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
-- [Agency Product Mode](#agency-product-mode)
+- [Architecture](#architecture)
 - [Quick Start](#quick-start)
 - [CLI Commands](#cli-commands)
 - [Worker Agents](#worker-agents)
@@ -28,21 +34,27 @@ Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, pr
 - [MCP Resources](#mcp-resources)
 - [MCP Prompts](#mcp-prompts)
 - [A2A HTTP Endpoints](#a2a-http-endpoints)
-- [ERP Expansion APIs](#erp-expansion-apis)
-- [ACP Integration (Zed IDE)](#acp-integration-zed-ide)
-- [Skills System](#skills-system)
 - [Workflow Engine](#workflow-engine)
 - [Multi-Agent Collaboration](#multi-agent-collaboration)
-- [Project Factory & Pipelines](#project-factory--pipelines)
-- [Memory & Knowledge](#memory--knowledge)
-- [Search](#search)
+- [Skill Pipelines (Composer)](#skill-pipelines-composer)
+- [Project Factory](#project-factory)
 - [Sandbox Execution](#sandbox-execution)
-- [Federation](#federation)
+- [Memory & Knowledge](#memory--knowledge)
+- [Event Bus](#event-bus)
+- [Distributed Tracing](#distributed-tracing)
+- [Skill Cache](#skill-cache)
+- [Capability Negotiation](#capability-negotiation)
+- [Webhooks](#webhooks)
 - [Output Filtering & Token Savings](#output-filtering--token-savings)
-- [Security](#security)
-- [Plugin System](#plugin-system)
+- [Federation](#federation)
+- [Security & RBAC](#security--rbac)
+- [Audit Logging](#audit-logging)
+- [Skill Tiers & Licensing](#skill-tiers--licensing)
 - [Persona System](#persona-system)
-- [MCP Registry & IDE Discovery](#mcp-registry--ide-discovery)
+- [Plugin System](#plugin-system)
+- [ACP Integration (Zed IDE)](#acp-integration-zed-ide)
+- [Agency Product Mode](#agency-product-mode)
+- [ERP Expansion APIs](#erp-expansion-apis)
 - [Configuration](#configuration)
 - [Environment Variables](#environment-variables)
 - [Deployment](#deployment)
@@ -51,63 +63,49 @@ Built with **Bun** and **TypeScript**, it spawns 8 specialized worker agents, pr
 
 ---
 
-## Agency Product Mode
-
-The default commercial posture is now outcome-first:
-
-- **Core outcome:** cut recurring client-delivery ops time in 30 days
-- **Primary ICP:** agencies and consultancies
-- **Packaged v1 workflows:** client reporting, approval gate, and handoff
-- **Commercial offer:** managed onboarding + managed cloud + weekly optimization
-- **Price anchor:** EUR 1.5k-EUR 3k / month + one-time setup fee
-
-Use these productized interfaces:
-
-- MCP tool `agency_workflow_templates` for ready-to-adapt workflow JSON
-- MCP tool `agency_roi_snapshot` for KPI output (runs, failure rate, time saved)
-- MCP resources `a2a://agency-workflows` and `a2a://agency-roi`
-
-Operational and sales playbooks live in [`docs/product/`](docs/product/README.md).
-
----
-
-## Architecture Overview
+## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                     Orchestrator (v3.0.0)                   │
-│  ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌─────────────┐  │
-│  │ MCP     │  │ A2A     │  │ ACP      │  │ Dashboard   │  │
-│  │ stdio   │  │ HTTP    │  │ stdin/   │  │ HTML UI     │  │
-│  │ Server  │  │ Fastify │  │ stdout   │  │ /dashboard  │  │
-│  └────┬────┘  └────┬────┘  └────┬─────┘  └─────────────┘  │
-│       │            │            │                           │
-│  ┌────┴────────────┴────────────┴─────────────────────┐    │
-│  │            Skill Router & Dispatcher               │    │
-│  │  (auto-route via LLM / direct URL / skill ID)      │    │
-│  └────────────────────┬───────────────────────────────┘    │
-│                       │                                     │
-│  ┌────────────────────┴───────────────────────────────┐    │
-│  │  Circuit Breaker │ Metrics │ Tracing │ Skill Cache │    │
-│  │  RBAC │ Audit │ License Gate │ Prompt Sanitizer    │    │
-│  └────────────────────┬───────────────────────────────┘    │
-│                       │                                     │
-│  ┌────────────────────┴───────────────────────────────┐    │
-│  │                  Worker Fleet                       │    │
-│  │  shell:8081  web:8082  ai:8083  code:8084          │    │
-│  │  knowledge:8085  design:8086  factory:8087         │    │
-│  │  data:8088  news:8089  market:8090  signal:8091   │    │
-│  │  monitor:8092  infra:8093  climate:8094            │    │
-│  │  [user-workers:8095+]                              │    │
-│  └────────────────────────────────────────────────────┘    │
-│                                                            │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │  Event Bus │ Workflow Engine │ Federation │ Memory   │  │
-│  │  Agent Collaboration │ Capability Negotiation       │  │
-│  │  Webhooks │ Workspaces │ Sandbox │ Plugins          │  │
-│  └──────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                      Orchestrator v3.0.0                        │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
+│  │ MCP      │  │ A2A HTTP │  │ ACP      │  │ Dashboard     │  │
+│  │ stdio    │  │ :8080    │  │ stdin/   │  │ /dashboard    │  │
+│  │ Server   │  │ Fastify  │  │ stdout   │  │ HTML UI       │  │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───────────────┘  │
+│       └─────────────┴─────────────┘                            │
+│                           │                                     │
+│  ┌────────────────────────┴──────────────────────────────────┐ │
+│  │              Skill Router & Dispatcher                    │ │
+│  │   1. agentUrl provided → direct (circuit-broken)         │ │
+│  │   2. skillId provided  → skill map lookup                │ │
+│  │   3. neither           → ask_claude picks {url, skillId} │ │
+│  └────────────────────────┬──────────────────────────────────┘ │
+│                           │                                     │
+│  ┌────────────────────────┴──────────────────────────────────┐ │
+│  │  Circuit Breaker │ Metrics │ Tracing │ Skill Cache        │ │
+│  │  RBAC │ Audit │ License Gate │ Prompt Sanitizer           │ │
+│  └────────────────────────┬──────────────────────────────────┘ │
+│                           │                                     │
+│  ┌────────────────────────┴──────────────────────────────────┐ │
+│  │                     Worker Fleet                          │ │
+│  │  shell:8081   web:8082    ai:8083    code:8084            │ │
+│  │  knowledge:8085  design:8086  factory:8087                │ │
+│  │  data:8088   news:8089   market:8090  signal:8091         │ │
+│  │  monitor:8092  infra:8093  climate:8094                   │ │
+│  └───────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────┘
 ```
+
+**Single entry point:** `src/server.ts` is simultaneously the MCP server and A2A orchestrator. On startup it:
+
+1. Reads `~/.a2a-mcp/config.json` (profile, enabled workers, remote workers)
+2. Spawns enabled local worker processes via `Bun.spawn`
+3. Discovers each worker's agent card via `GET /.well-known/agent.json` (exponential-backoff, 5 attempts)
+4. Builds a `skillId → workerURL` routing map
+5. Begins health polling every 30 s
+
+**stdout is reserved for MCP JSON-RPC.** All workers write diagnostics to stderr only.
 
 ---
 
@@ -115,824 +113,789 @@ Operational and sales playbooks live in [`docs/product/`](docs/product/README.md
 
 ### Prerequisites
 
-- [Bun](https://bun.sh) runtime (v1.0+)
-- `ANTHROPIC_API_KEY` environment variable (required for AI skills)
-- `GOOGLE_API_KEY` environment variable (optional, for design worker)
+- [Bun](https://bun.sh) ≥ 1.0
+- `ANTHROPIC_API_KEY` (for `ask_claude` and LLM routing)
+- Optional: `GOOGLE_API_KEY` (design worker), `NASA_FIRMS_KEY` (climate worker)
 
-### Installation
+### Install & register
 
 ```bash
-git clone https://github.com/xrey167/a2a-mcp-server.git
+git clone https://github.com/xrey167/a2a-mcp-server
 cd a2a-mcp-server
 bun install
+
+# Initialize config (choose a profile)
+bun src/cli.ts init          # full  — all 14 workers
+bun src/cli.ts init --lite   # lite  — shell + web + ai
+bun src/cli.ts init --data   # data  — lite + data
+bun src/cli.ts init --osint  # osint — lite + 6 OSINT workers
+
+# Register with Claude Code (user scope)
+claude mcp add --scope user a2a-mcp-bridge -- bun $(pwd)/src/server.ts
+claude mcp list   # verify
 ```
 
-### Initialize Configuration
+### Start
 
 ```bash
-# Full profile — all 14 workers
-bun run init
-
-# Lite profile — shell + web + ai workers only
-bun run init -- --lite
-
-# Data profile — shell + web + ai + data workers
-bun run init -- --data
+bun src/server.ts              # orchestrator + all enabled workers
+bun src/workers/shell.ts       # single worker in isolation
 ```
 
-This creates `~/.a2a-mcp/config.json` with sensible defaults.
-
-### Start the Server
+### Test a tool without restarting Claude Code
 
 ```bash
-# Start orchestrator + all workers
-bun run start
-
-# Development mode with hot-reload
-bun run dev
-
-# Start as ACP server (for Zed IDE)
-bun run start:acp
+env -u CLAUDECODE claude -p "Use the delegate tool to run echo hello" \
+  --allowedTools "mcp__a2a-mcp-bridge__delegate"
 ```
-
-The server exposes three interfaces simultaneously:
-
-| Protocol | Transport | Default Port |
-|----------|-----------|-------------|
-| MCP | stdio | — |
-| A2A | HTTP (Fastify) | 8080 |
-| ACP | stdin/stdout (NDJSON) | — |
 
 ---
 
 ## CLI Commands
 
-The CLI is available as `a2a-mcp-server` (or `bun src/cli.ts`):
+```bash
+bun src/cli.ts <command> [options]
+```
 
 | Command | Description |
-|---------|-------------|
-| `init [--lite\|--data\|--full]` | Create config file with the selected worker profile |
-| `config` | Print the resolved configuration |
-| `workers` | List discovered worker agents and their skills |
-| `create-worker <name>` | Scaffold a new user-space worker under `~/.a2a-mcp/workers/` |
-| `search <query>` | Search the community worker registry |
-| `install <name>` | Install a worker from the community registry |
-| `registry` | List all entries in the community worker registry |
-| `help` | Show help text |
+|---|---|
+| `init [--lite\|--data\|--osint\|--full]` | Create `~/.a2a-mcp/config.json` |
+| `config` | Print current config |
+| `workers` | List workers and their status |
+| `auth-create-key` | Create an RBAC API key |
+| `auth-list-keys` | List all key metadata |
+| `auth-revoke-key --target <id>` | Revoke a key |
+| `create-worker <name> [--port <n>]` | Scaffold a new worker file |
+| `search <query>` | Search the worker registry |
+| `install <worker-name>` | Install a registry worker |
+| `registry` | List all available registry workers |
+| `help` | Show help |
+
+### Profiles
+
+| Profile | Workers | Use case |
+|---|---|---|
+| `lite` | shell + web + ai | Fast, minimal footprint |
+| `data` | lite + data | Data processing |
+| `osint` | lite + news + market + signal + monitor + infra + climate | Intelligence gathering |
+| `full` | All 14 workers | Maximum capability |
 
 ---
 
 ## Worker Agents
 
-Each worker is a standalone Fastify microservice spawned as a subprocess. Workers register their `AgentCard` at `/.well-known/agent.json` and expose skills via A2A-compatible HTTP endpoints.
+All workers are standalone Fastify HTTP servers implementing the A2A protocol. Each exports a `/.well-known/agent.json` agent card and a `/healthz` endpoint. All include `remember` / `recall` skills backed by SQLite + Obsidian dual-write.
 
-| Worker | Port | Skills | Description |
-|--------|------|--------|-------------|
-| **shell** | 8081 | `run_shell`, `read_file`, `write_file`, `remember`, `recall` | File system operations and shell command execution |
-| **web** | 8082 | `fetch_url`, `call_api`, `remember`, `recall` | HTTP requests with token-bucket rate limiting and 10 MB body limit |
-| **ai** | 8083 | `ask_claude`, `search_files`, `query_sqlite`, `remember`, `recall` | Claude API calls (with CLI fallback), file glob search, read-only SQLite queries |
-| **code** | 8084 | `codex_exec`, `codex_review`, `remember`, `recall` | Code execution and review with path traversal protection |
-| **knowledge** | 8085 | `create_note`, `read_note`, `update_note`, `search_notes`, `list_notes`, `summarize_notes`, `remember`, `recall` | Obsidian vault CRUD with FTS5 full-text search index |
-| **design** | 8086 | `enhance_ui_prompt`, `suggest_screens`, `design_critique`, `remember`, `recall` | UI/UX design assistance powered by Google Gemini 2.0 Flash |
-| **factory** | 8087 | `normalize_intent`, `create_project`, `quality_gate`, `list_pipelines`, `list_templates`, `remember`, `recall` | Full project generation with 6 pipelines and "Ralph Mode" quality gate |
-| **data** | 8088 | `parse_csv`, `parse_json`, `transform_data`, `analyze_data`, `pivot_table`, `remember`, `recall` | CSV/JSON parsing, 12 transform operations, statistical analysis, pivot tables |
-| **news** | 8089 | `fetch_rss`, `aggregate_feeds`, `classify_news`, `cluster_news`, `detect_signals`, `remember`, `recall` | RSS/Atom feed aggregation, news clustering, signal detection |
-| **market** | 8090 | `fetch_quote`, `price_history`, `technical_analysis`, `screen_market`, `detect_anomalies`, `correlation`, `remember`, `recall` | Real-time quotes, technical indicators, anomaly detection, correlation |
-| **signal** | 8091 | `aggregate_signals`, `classify_threat`, `detect_convergence`, `baseline_compare`, `instability_index`, `remember`, `recall` | Multi-source signal fusion, threat classification, Country Instability Index |
-| **monitor** | 8092 | `track_conflicts`, `detect_surge`, `theater_posture`, `track_vessels`, `check_freshness`, `watchlist_check`, `remember`, `recall` | Conflict tracking, military surge detection, vessel monitoring, watchlists |
-| **infra** | 8093 | `cascade_analysis`, `supply_chain_map`, `chokepoint_assess`, `redundancy_score`, `dependency_graph`, `remember`, `recall` | Infrastructure cascade analysis, supply chain mapping, chokepoint assessment |
-| **climate** | 8094 | `fetch_earthquakes`, `fetch_wildfires`, `fetch_natural_events`, `assess_exposure`, `climate_anomalies`, `event_correlate`, `remember`, `recall` | USGS earthquakes, NASA FIRMS wildfires, EONET events, exposure assessment |
+| Worker | Port | Skills |
+|---|---|---|
+| **shell** | 8081 | `run_shell`, `read_file`, `write_file` + SSE streaming at `/stream` |
+| **web** | 8082 | `fetch_url`, `call_api` |
+| **ai** | 8083 | `ask_claude`, `search_files`, `query_sqlite` |
+| **code** | 8084 | `codex_exec`, `codex_review` (via `codex` CLI subprocess) |
+| **knowledge** | 8085 | `create_note`, `read_note`, `update_note`, `search_notes`, `list_notes` |
+| **design** | 8086 | `enhance_ui_prompt`, `suggest_screens`, `design_critique` (Gemini-powered) |
+| **factory** | 8087 | `normalize_intent`, `create_project`, `quality_gate`, `list_pipelines`, `list_templates` |
+| **data** | 8088 | `parse_csv`, `parse_json`, `transform_data`, `analyze_data`, `pivot_table` |
+| **news** | 8089 | `fetch_rss`, `aggregate_feeds`, `classify_news`, `cluster_news`, `detect_signals` |
+| **market** | 8090 | `fetch_quote`, `price_history`, `technical_analysis`, `screen_market`, `detect_anomalies`, `correlation` |
+| **signal** | 8091 | `aggregate_signals`, `classify_threat`, `detect_convergence`, `baseline_compare`, `instability_index` |
+| **monitor** | 8092 | `track_conflicts`, `detect_surge`, `theater_posture`, `track_vessels`, `check_freshness`, `watchlist_check` |
+| **infra** | 8093 | `cascade_analysis`, `supply_chain_map`, `chokepoint_assess`, `redundancy_score`, `dependency_graph` |
+| **climate** | 8094 | `fetch_earthquakes`, `fetch_wildfires`, `fetch_natural_events`, `assess_exposure`, `climate_anomalies`, `event_correlate` |
 
-### Worker Profiles
-
-| Profile | Workers | Use Case |
-|---------|---------|----------|
-| `full` | All 14 workers | Full capability |
-| `lite` | shell, web, ai | Lightweight setup for simple tasks |
-| `data` | shell, web, ai, data | Data analysis focused |
-| `osint` | shell, web, ai, news, market, signal, monitor, infra, climate | OSINT and intelligence monitoring |
-
-### User-Space Workers
-
-Create custom workers at `~/.a2a-mcp/workers/<name>/`:
+### Adding a custom worker
 
 ```bash
-a2a-mcp-server create-worker my-custom-worker
+bun src/cli.ts create-worker my-tool --port 8100
 ```
 
-This scaffolds a complete Fastify worker with AgentCard, health check, and A2A task endpoint. User workers are auto-discovered and assigned ports starting at 8095.
-
-### Community Worker Registry
-
-8 built-in registry entries: `github-agent`, `slack-agent`, `postgres-agent`, `redis-agent`, `docker-agent`, `s3-agent`, `playwright-agent`, `email-agent`.
-
-```bash
-a2a-mcp-server search github    # Search by name, description, or tags
-a2a-mcp-server install github-agent
-```
+This scaffolds `src/workers/my-tool.ts`. Add it to `ALL_WORKERS` in `src/server.ts` and it will be spawned automatically.
 
 ---
 
 ## MCP Tools
 
-The orchestrator exposes 35 tools via the MCP stdio interface. These are the tools available to any MCP client (Claude Desktop, Cursor, Windsurf, etc.):
+50+ tools registered on the MCP server, organized by category:
 
-### Core Delegation
-
-| Tool | Description |
-|------|-------------|
-| `delegate` | Route a task to the best worker via auto-routing, direct URL, or skill ID |
-| `list_agents` | List all worker agents, external agents, and their skills |
-
-### Shell
+### Core delegation
 
 | Tool | Description |
-|------|-------------|
-| `run_shell_stream` | Execute a shell command with real-time stdout/stderr streamed as MCP progress notifications |
+|---|---|
+| `delegate` | Route a skill to the appropriate worker (sync) |
+| `delegate_async` | Fire-and-forget delegation; returns a task ID |
+| `list_agents` | List all discovered workers with health and skills |
+| `register_agent` | Dynamically register a remote agent |
+| `unregister_agent` | Remove a remote agent |
 
-### Workflow & Composition
-
-| Tool | Description |
-|------|-------------|
-| `workflow_execute` | Execute a multi-step DAG workflow with parallel execution, template refs `{{stepId.result}}`, retry/skip error handling, and conditional execution |
-| `compose_pipeline` | Create a reusable skill pipeline with `pipe()` syntax — each step's output feeds the next |
-| `execute_pipeline` | Execute a composed pipeline by ID |
-| `design_workflow` | Full design pipeline: suggest screens, create project, generate each screen (async, returns taskId) |
-| `factory_workflow` | Full project generation pipeline: normalize, scaffold, codegen, quality gate (async, returns taskId) |
-| `agency_workflow_templates` | Return packaged agency workflow templates: reporting, approval gate, and handoff |
-| `agency_roi_snapshot` | Return KPI snapshot for runs completed, failure rate, estimated time saved, and manual steps removed |
-| `erp_workflow_run` | Run ERP packaged workflows: quote-to-order, lead-to-cash, collections |
-| `erp_kpis` | Return KPI snapshot for ERP product lines |
-| `erp_connector_connect` | Connect ERP systems (odoo, business-central, dynamics) with auth + metadata |
-| `erp_connector_sync` | Run two-way sync with idempotency and retry policy |
-| `erp_connector_status` | Return connector health, token status, and renewal warnings |
-| `erp_connector_renew` | Renew Business Central webhook subscription metadata |
-| `erp_connector_renew_due` | Auto-renew due connector subscriptions (supports dry-run) |
-| `erp_connector_kpis` | Return connector reliability and renewal KPI snapshot |
-| `erp_connector_renewals` | List renewal incidents with filter + pagination cursor |
-| `erp_connector_renewals_export` | Export renewal incidents as CSV |
-| `erp_connector_renewals_snapshot` | Generate CSV+JSON snapshot files for reporting |
-| `erp_connector_renewals_verify` | Verify snapshot manifest hashes/signature |
-| `erp_connector_trust_report` | Generate procurement-ready trust report |
-| `erp_connector_sales_packet` | Generate one-payload sales/proposal packet |
-| `erp_pilot_readiness` | Evaluate pilot go-live readiness gates |
-| `erp_launch_pilot` | Execute launch gate and generate outbound pilot packet |
-| `erp_pilot_launches` | List pilot launch attempts with status filters |
-| `erp_onboarding_create` | Create onboarding session for customer/product KPI tracking |
-| `erp_onboarding_capture` | Capture onboarding KPI snapshot (`baseline` or `current`) from tracked ERP data |
-| `erp_onboarding_report` | Build baseline-vs-current onboarding report with ROI deltas |
-| `erp_onboarding_list` | List onboarding sessions by status |
-| `erp_commercial_event_record` | Record funnel events (`qualified_call`, `proposal_sent`, `pilot_signed`) |
-| `erp_commercial_kpis` | Track commercial acceptance KPIs against wave targets (10/3/1) |
-| `erp_workflow_sla_status` | Evaluate SLA health for all workflow modules |
-| `erp_workflow_sla_escalate` | Create SLA incidents for breached modules with dedupe |
-| `erp_workflow_sla_incidents` | List workflow SLA incidents for operations follow-up |
-| `erp_workflow_sla_incident_update` | Update SLA incident lifecycle state (`acknowledged`/`resolved`) |
-| `erp_q2o_quote_sync` | Upsert quote records into Quote-to-Order state machine with traceability |
-| `erp_q2o_order_sync` | Upsert order conversion/fulfillment state linked to quote |
-| `erp_q2o_approval_decision` | Apply approval decision on quote approval items |
-| `erp_q2o_pipeline` | Return quote-to-order pipeline metrics and revenue-at-risk |
-| `erp_master_data_sync` | Sync master data (`customer`,`product`,`price`,`tax`) with drift detection |
-| `erp_master_data_mappings` | List field mappings per workspace/connector/entity |
-| `erp_master_data_mapping_update` | Update mapping and bump version |
-| `erp_analytics_executive` | Executive KPI view (conversion, approval time, revenue-at-risk, ROI) |
-| `erp_analytics_ops` | Ops KPI view (throughput/failures, retry/DLQ/replay, SLA timeline, MTTR) |
-
-### Collaboration
+### Sandbox execution
 
 | Tool | Description |
-|------|-------------|
-| `collaborate` | Multi-agent collaboration: `fan_out`, `consensus`, `debate`, `map_reduce` strategies |
+|---|---|
+| `sandbox_execute` | Run TypeScript in an isolated Bun subprocess with access to all worker skills |
+| `sandbox_vars` | List, read, or delete persisted sandbox variables |
 
-### Sandbox
-
-| Tool | Description |
-|------|-------------|
-| `sandbox_execute` | Execute TypeScript in an isolated Bun subprocess with access to all skills via `skill(id, args)` |
-
-### Event System
+### Memory
 
 | Tool | Description |
-|------|-------------|
-| `event_publish` | Publish an event to the topic-based event bus |
-| `event_subscribe` | Subscribe to events matching a topic pattern (supports `*` and `#` wildcards) |
-| `event_replay` | Replay events from history matching a topic pattern |
+|---|---|
+| `remember` | Store a fact (SQLite + Obsidian dual-write) |
+| `recall` | Retrieve facts by keyword |
+| `memory_list` | List stored memories |
+| `memory_cleanup` | Remove stale or duplicate memories |
 
-### Webhooks
+### Workflows & pipelines
 
 | Tool | Description |
-|------|-------------|
-| `register_webhook` | Register an inbound webhook with HMAC-SHA256 authentication |
-| `list_webhooks` | List all registered webhooks and their endpoints |
+|---|---|
+| `workflow_execute` | Run a DAG-based multi-agent workflow |
+| `factory_workflow` | Generate a complete project from a vague idea |
+| `compose_pipeline` | Define a declarative skill pipeline |
+| `execute_pipeline` | Run a previously composed pipeline |
+| `list_pipelines` | List saved pipelines |
+
+### Event bus
+
+| Tool | Description |
+|---|---|
+| `event_publish` | Publish an event to a topic |
+| `event_subscribe` | Subscribe to a topic pattern |
+| `event_replay` | Replay event history from a timestamp |
+
+### Multi-agent collaboration
+
+| Tool | Description |
+|---|---|
+| `collaborate` | Run fan_out / consensus / debate / map_reduce across agents |
 
 ### Observability
 
 | Tool | Description |
-|------|-------------|
-| `get_metrics` | Skill execution metrics: call counts, latencies (p50/p95/p99), error rates |
-| `list_traces` | List recent distributed traces across agent calls |
-| `get_trace` | Get waterfall visualization of a trace — full call chain with timing |
-| `cache_stats` | Skill cache statistics: hit rate, entries, size, top cached skills |
-| `cache_invalidate` | Invalidate cached skill results (by skill ID or all) |
-| `negotiate_capability` | Find the best agent for a skill based on version, features, health, and load |
-| `token_savings` | RTK-style output filtering statistics: total tokens saved, savings rate, top skills |
-| `read_raw_output` | Read raw unfiltered output from tee files (before token-saving filters) |
+|---|---|
+| `get_metrics` | Get skill execution metrics (call counts, p50/p95/p99 latencies, error rates) |
+| `worker_health` | Get circuit-breaker state and health for all workers |
+| `list_traces` | List distributed traces |
+| `get_trace` | Get a trace with waterfall visualization |
+| `search_traces` | Search traces by tag or span name |
 
-### Administration
+### Skill cache
 
 | Tool | Description |
-|------|-------------|
-| `workspace_manage` | Manage team workspaces: create, list, add/remove members, update settings |
-| `audit_query` | Query the audit log by actor, skill, workspace, time range, and success/failure |
-| `audit_stats` | Audit statistics: total calls, success rate, top skills, top actors |
-| `license_info` | Show current license tier (free/pro/enterprise) and skill tier requirements |
+|---|---|
+| `cache_stats` | Cache hit/miss stats and memory usage |
+| `cache_invalidate` | Invalidate cache entries by skill or pattern |
+| `cache_configure` | Set per-skill TTL or global cache size |
+
+### Capability negotiation
+
+| Tool | Description |
+|---|---|
+| `negotiate_capability` | Find the best worker for a skill+version requirement |
+| `list_capabilities` | List all registered capabilities with version and load info |
+| `capability_stats` | Routing decisions and scoring breakdown |
+
+### Auth & workspaces
+
+| Tool | Description |
+|---|---|
+| `workspace_manage` | Create, update, list, and delete team workspaces |
+| `license_info` | Show current license tier and enabled skills |
+
+### Audit
+
+| Tool | Description |
+|---|---|
+| `audit_query` | Query the immutable audit trail |
+| `audit_stats` | Aggregated audit statistics |
+
+### Webhooks
+
+| Tool | Description |
+|---|---|
+| `webhook_register` | Register an external webhook endpoint |
+| `webhook_list` | List registered webhooks |
+| `webhook_delete` | Remove a webhook |
+
+### Agency (product)
+
+| Tool | Description |
+|---|---|
+| `agency_workflow_templates` | Retrieve ready-to-adapt workflow JSON |
+| `agency_roi_snapshot` | KPI snapshot: runs, failure rate, time saved |
 
 ---
 
 ## MCP Resources
 
-17 resources exposed via the MCP `resources/list` handler:
+Resources expose live data as readable URIs:
 
-| URI | Description |
-|-----|-------------|
-| `a2a://context` | Current project context (summary, goals, stack, notes) |
-| `a2a://health` | Health status of all worker agents |
-| `a2a://tasks` | List of all active and recent tasks |
-| `a2a://metrics` | Skill execution metrics: call counts, latencies, error rates |
-| `a2a://circuit-breakers` | Circuit breaker states for all workers |
-| `a2a://webhooks` | Registered webhook endpoints |
-| `a2a://event-bus` | Event bus stats, subscriptions, and dead letters |
-| `a2a://traces` | Recent distributed traces across agent calls |
-| `a2a://cache` | Skill result cache statistics |
-| `a2a://capabilities` | Agent capability registry and negotiation stats |
-| `a2a://pipelines` | Registered skill composition pipelines |
-| `a2a://audit` | Recent audit log entries (enterprise) |
-| `a2a://license` | Current license tier and skill gates |
-| `a2a://workspaces` | Team workspaces and members |
-| `a2a://agency-workflows` | Packaged agency workflow templates for v1 delivery automation |
-| `a2a://agency-roi` | Agency pilot KPI snapshot (runs, reliability, estimated savings) |
-| `a2a://connectors` | ERP connector health and auth status for Odoo, Business Central, and Dynamics |
-| `a2a://connectors-kpis` | Connector reliability and renewal KPI snapshot |
-| `a2a://connector-renewals` | Recent connector renewal incidents feed |
+| URI | Content |
+|---|---|
+| `a2a://agents` | All discovered worker agent cards |
+| `a2a://metrics` | Execution metrics (JSON) |
+| `a2a://traces` | Recent distributed traces |
+| `a2a://cache` | Skill cache state |
+| `a2a://capabilities` | Capability registry |
+| `a2a://event-bus` | Event bus topics and subscriptions |
+| `a2a://pipelines` | Saved skill pipelines |
+| `a2a://workspaces` | Team workspaces |
+| `a2a://audit` | Recent audit log entries |
+| `a2a://license` | License tier and gated skills |
+| `a2a://agency-workflows` | Packaged agency workflow templates |
+| `a2a://agency-roi` | Agency ROI metrics |
 
 ---
 
 ## MCP Prompts
 
-### Personas
-
-7 agent-specific personas loaded from `src/personas/`:
-
-| Persona | Description |
-|---------|-------------|
-| `orchestrator` | System prompt for the main orchestrator agent |
-| `shell-agent` | System prompt for the shell worker |
-| `web-agent` | System prompt for the web worker |
-| `ai-agent` | System prompt for the AI worker |
-| `code-agent` | System prompt for the code worker |
-| `knowledge-agent` | System prompt for the knowledge worker |
-| `factory-agent` | System prompt for the factory worker |
-
-Each persona is a Markdown file with YAML frontmatter specifying model and temperature. Personas support hot-reload via filesystem watch.
-
-### Task Delegation Prompt
-
 | Prompt | Description |
-|--------|-------------|
-| `delegate-task` | Structured prompt template for task delegation with goal, context, and constraints |
+|---|---|
+| `osint_brief` | Generate an OSINT intelligence brief |
+| `osint_alert_scan` | Scan for threat alerts across OSINT workers |
+| `osint_threat_assess` | Full threat assessment pipeline |
 
 ---
 
 ## A2A HTTP Endpoints
 
-The Fastify HTTP server (default port 8080) exposes:
+The orchestrator exposes a Fastify HTTP server on port 8080:
 
 | Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/` | A2A JSON-RPC 2.0 entry point — methods: `tasks/send`, `tasks/get`, `tasks/cancel` |
-| `GET` | `/.well-known/agent.json` | A2A Agent Card (agent identity, skills, capabilities) |
-| `GET` | `/healthz` | Health check (returns `{ ok: true }`) |
-| `GET` | `/readyz` | Readiness probe (all workers healthy) |
-| `GET` | `/livez` | Liveness probe |
-| `GET` | `/dashboard` | Interactive HTML dashboard with real-time metrics |
-| `GET` | `/metrics` | Prometheus-style metrics JSON |
-| `POST` | `/webhooks/:id` | Inbound webhook receiver with HMAC-SHA256 verification |
-| `GET` | `/sse/:taskId` | Server-Sent Events stream for task progress |
+|---|---|---|
+| `POST` | `/` | A2A task dispatch (`tasks/send`) |
+| `GET` | `/.well-known/agent.json` | Orchestrator agent card |
+| `GET` | `/healthz` | Health check |
+| `GET` | `/readyz` | Readiness check |
+| `GET` | `/health` | Detailed health (all workers) |
+| `GET` | `/dashboard` | HTML dashboard UI |
+| `POST` | `/webhooks/:id` | Incoming webhook receiver |
 
-### A2A Authentication
+Each local worker also exposes the same structure on its own port. Workers additionally expose `GET /stream` for SSE streaming (shell worker).
 
-Set `A2A_API_KEY` environment variable to protect all HTTP endpoints. Requests must include:
-
-```
-Authorization: Bearer <your-api-key>
-```
-
----
-
-## ERP Expansion APIs
-
-Shared connector core for Odoo, Business Central, and Dynamics CRM with two-way sync defaults, idempotency keys, Retry-After aware backoff, and dead-letter capture.
-
-### Connector APIs
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/connectors/{odoo\|business-central\|dynamics}/connect` | Connect/update connector auth and metadata (Odoo requires `metadata.odooPlan=custom`) |
-| `POST` | `/v1/connectors/{type}/sync` | Run sync operation with idempotency key and retry policy |
-| `GET` | `/v1/connectors/{type}/status` | Connector health, token status, renewal warnings |
-| `GET` | `/v1/connectors/status` | Status overview of all connectors |
-| `POST` | `/v1/connectors/business-central/renew` | Renew Business Central webhook subscription metadata (default +3 days) |
-| `POST` | `/v1/connectors/renew-due` | Scan and renew all due connector subscriptions (Business Central currently supported) |
-| `GET` | `/v1/connectors/kpis` | Connector health and renewal KPI snapshot |
-| `GET` | `/v1/connectors/renewals` | Renewal incidents feed with filters (`connector`, `status`, `since`, `before`, `limit`) |
-| `GET` | `/v1/connectors/renewals/export.csv` | CSV export of renewal incidents with the same filters |
-| `POST` | `/v1/connectors/renewals/snapshot` | Generate snapshot files and return written paths |
-| `POST` | `/v1/connectors/renewals/verify` | Verify snapshot manifest integrity |
-| `GET` | `/v1/connectors/trust-report` | Build trust report from latest snapshot + verification + KPI deltas |
-| `GET` | `/v1/connectors/sales-packet` | Build combined sales packet (trust + connector KPIs + product KPIs + artifacts). `format=brief` adds executive summary; `format=email` returns subject + email-ready body. |
-| `GET` | `/v1/connectors/pilot-readiness` | Evaluate pilot readiness (trust score, manifest validity, connector health, zero renewal backlog) |
-| `POST` | `/v1/connectors/launch-pilot` | Run readiness gate and generate launch packet (or return blockers) |
-| `GET` | `/v1/connectors/pilot-launches` | List pilot launch attempts (`status`, `since`, `limit`) with persisted outcomes |
-| `POST` | `/v1/onboarding/sessions` | Create onboarding session (customer + product + optional connector scope) |
-| `GET` | `/v1/onboarding/sessions` | List onboarding sessions (`status`, `limit`) |
-| `POST` | `/v1/onboarding/sessions/{id}/capture` | Capture onboarding snapshot from tracked ERP runs (`phase=baseline|current`) |
-| `GET` | `/v1/onboarding/sessions/{id}/report` | Build onboarding report with baseline/current deltas and expansion recommendation |
-| `POST` | `/v1/commercial/events` | Record commercial funnel event for a product |
-| `GET` | `/v1/commercial/kpis` | Retrieve funnel conversion and target progress KPIs (`product`, `since`) |
-| `GET` | `/v1/workflows/sla/status` | SLA status for `quote-to-order`, `lead-to-cash`, and `collections` |
-| `POST` | `/v1/workflows/sla/escalate` | Create SLA incidents for breached modules |
-| `GET` | `/v1/workflows/sla/incidents` | List SLA incidents (`product`, `status`, `limit`) |
-| `PATCH` | `/v1/workflows/sla/incidents/{id}` | Update incident lifecycle state (`acknowledged`, `resolved`) |
-| `POST` | `/v1/quote-to-order/workspaces/{id}/quotes/sync` | Sync quote lifecycle state into command center |
-| `POST` | `/v1/quote-to-order/workspaces/{id}/orders/sync` | Sync order conversion/fulfillment against quote |
-| `POST` | `/v1/quote-to-order/workspaces/{id}/approvals/{approvalId}/decision` | Apply approval decision and transition state |
-| `GET` | `/v1/quote-to-order/workspaces/{id}/pipeline` | Quote-to-order pipeline metrics and risk values |
-| `POST` | `/v1/erp/master-data/{entity}/sync` | Sync master data entity (`customer|product|price|tax`) |
-| `GET` | `/v1/erp/master-data/mappings` | List master-data field mappings |
-| `PUT` | `/v1/erp/master-data/mappings/{id}` | Update one mapping and mapping version |
-| `GET` | `/v1/analytics/executive` | Executive dashboard metrics |
-| `GET` | `/v1/analytics/ops` | Operations dashboard metrics |
-| `GET` | `/v1/analytics/onboarding/{sessionId}/report` | Onboarding baseline-vs-current analytics report |
-
-Auto-renew scheduler defaults: enabled, hourly sweep interval, up to 5-minute jitter. Override via env:
-`A2A_ERP_AUTO_RENEW_ENABLED`, `A2A_ERP_SWEEP_INTERVAL_MS`, `A2A_ERP_SWEEP_JITTER_MS`.
-
-Snapshot export scheduler defaults: disabled, 24-hour interval, 30-day retention. Override via env:
-`A2A_ERP_SNAPSHOT_EXPORT_ENABLED`, `A2A_ERP_SNAPSHOT_INTERVAL_MS`, `A2A_ERP_SNAPSHOT_RETENTION_DAYS`, `A2A_ERP_SNAPSHOT_OUTPUT_DIR`.
-
-Snapshot writes now include a `*.manifest.json` file with SHA-256 hashes, generation metadata (`generated_by`, period), and optional HMAC signature when `A2A_ERP_SNAPSHOT_SIGNING_KEY` is set.
-
-### Product Workflow APIs
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/workflows/{quote-to-order\|lead-to-cash\|collections}/run` | Run packaged product workflow asynchronously (returns task + workflow run IDs) |
-| `GET` | `/v1/kpis/{product}` | Product KPI snapshot (workflow success, sync stats, revenue proxy signal) |
-
-### Data Fields (sync entities)
-
-Lead/deal/invoice/quote/order sync records track:
-
-- `source_system`
-- `external_id`
-- `sync_state`
-- `last_synced_at`
-- `last_sync_error`
-
----
-
-## ACP Integration (Zed IDE)
-
-The ACP server (`src/acp-server.ts`) implements IBM's Agent Communication Protocol v0.11.0 for integration with Zed IDE:
-
-- **Transport**: NDJSON JSON-RPC 2.0 over stdin/stdout
-- **Methods**: `initialize`, `initialized`, `agent/execute`, `agent/cancel`, `$/cancelRequest`
-- **Streaming**: Token-level streaming via `textChunk` notifications
-- **Start**: `bun run start:acp`
-
-All orchestrator skills are automatically exposed as ACP-compatible tools.
-
----
-
-## Skills System
-
-Skills are the atomic units of capability. The orchestrator routes tasks to skills via three strategies:
-
-1. **Direct URL**: `delegate({ url: "http://localhost:8081/..." })`
-2. **Skill ID**: `delegate({ skillId: "run_shell" })`
-3. **Auto-route**: `delegate({ task: "read the config file" })` — the orchestrator uses Claude to determine the best skill
-
-### Built-in Skills (9 base skills)
-
-| Skill ID | Description | Validation |
-|----------|-------------|------------|
-| `run_shell` | Execute shell commands | `command: string`, optional `timeout`, `cwd` |
-| `read_file` | Read file contents | `path: string` with sanitization |
-| `write_file` | Write file contents | `path: string`, `content: string` with sanitization |
-| `fetch_url` | Fetch a URL | `url: string` with SSRF protection |
-| `call_api` | HTTP API call | `url`, `method`, `headers`, `body` |
-| `ask_claude` | Query Claude | `prompt: string`, optional `persona`, `model`, `system` |
-| `search_files` | Glob file search | `pattern: string`, optional `cwd` |
-| `query_sqlite` | SQLite query | `db: string`, `sql: string` (SELECT only) |
-| `call_a2a_agent` | Call external A2A agent | `agentUrl: string`, `message: string` |
-
-### Skill Routing Flow
-
-```
-Task arrives → License gate check → RBAC permission check → Audit log
-  → Circuit breaker check → Cache lookup → Skill dispatch
-  → Metrics recording → Tracing span → Response
-```
-
-### Skill Caching
-
-Content-addressable LRU cache with SHA-256 keys. Configuration:
-
-- Default TTL: 5 minutes (per-skill TTL overrides supported)
-- Max entries: 500
-- Max size: 50 MB
-- Automatic eviction on size/count limits
-
-### Skill Composition
-
-Declarative skill chaining with `pipe()` syntax:
+**A2A task format:**
 
 ```json
 {
-  "tool": "compose_skills",
-  "args": {
-    "pipeline": [
-      { "skillId": "read_file", "args": { "path": "data.csv" } },
-      { "skillId": "ask_claude", "template": "Summarize this data: {{input}}" },
-      { "skillId": "write_file", "args": { "path": "summary.md" }, "template": "{{input}}" }
-    ],
-    "onError": "abort"
+  "jsonrpc": "2.0",
+  "method": "tasks/send",
+  "params": {
+    "skillId": "run_shell",
+    "args": { "command": "echo hello" },
+    "message": { "role": "user", "parts": [{ "text": "run echo hello" }] }
   }
 }
 ```
-
-Supports `when` conditions for conditional execution and `onError` modes: `abort`, `skip`, `fallback`.
 
 ---
 
 ## Workflow Engine
 
-DAG-based workflow execution with:
-
-- **Template resolution**: `{{context.key}}` syntax with security-aware sanitization (shell escaping for shell skills, XML wrapping for LLM prompts)
-- **Substitution limit**: 50 KB per resolved template
-- **Cycle detection**: DFS-based topological sorting
-- **Parallel execution**: Up to 5 concurrent steps (configurable)
-- **Conditional execution**: `when` field with template evaluation
-- **Retry**: Exponential backoff with configurable max retries
-- **Error modes**: `abort`, `skip`, `fallback`
+`workflow_execute` runs multi-step DAG-based workflows with maximum parallelism.
 
 ```json
 {
-  "tool": "run_workflow",
-  "args": {
-    "steps": [
-      { "id": "fetch", "skillId": "fetch_url", "args": { "url": "https://api.example.com/data" } },
-      { "id": "analyze", "skillId": "ask_claude", "dependsOn": ["fetch"],
-        "args": { "prompt": "Analyze: {{context.fetch}}" } },
-      { "id": "save", "skillId": "write_file", "dependsOn": ["analyze"],
-        "args": { "path": "report.md", "content": "{{context.analyze}}" } }
-    ]
-  }
+  "name": "my-workflow",
+  "steps": [
+    {
+      "id": "fetch",
+      "skillId": "fetch_url",
+      "args": { "url": "https://example.com/api" }
+    },
+    {
+      "id": "analyze",
+      "skillId": "ask_claude",
+      "dependsOn": ["fetch"],
+      "args": { "prompt": "Summarize: {{fetch.result}}" }
+    },
+    {
+      "id": "save",
+      "skillId": "create_note",
+      "dependsOn": ["analyze"],
+      "args": { "title": "Summary", "content": "{{analyze.result}}" },
+      "onError": "skip"
+    }
+  ]
 }
 ```
+
+**Features:**
+- Topological sort with max parallelism
+- Template references: `{{stepId.result}}`, `{{input.fieldName}}`
+- Per-step error strategies: `fail` (default), `skip`, `retry`
+- Conditional execution via `when` expressions
 
 ---
 
 ## Multi-Agent Collaboration
 
-4 collaboration strategies via the `collaborate` tool:
+`collaborate` runs the same query across multiple agents and merges results using configurable strategies.
 
-| Strategy | Description |
-|----------|-------------|
-| `fan_out` | Send task to multiple agents in parallel, collect all results |
-| `consensus` | Send to multiple agents, use an AI judge to score responses (1–10), select highest |
-| `debate` | Multi-round debate between agents with configurable round count |
-| `map_reduce` | Split input, distribute to agents, aggregate results via AI reducer |
+| Strategy | Behavior |
+|---|---|
+| `fan_out` | Parallel query to all agents; results concatenated or merged |
+| `consensus` | AI-scored voting across agent responses |
+| `debate` | Iterative critique and refinement rounds |
+| `map_reduce` | Distribute sub-tasks across agents, then aggregate |
+
+**Merge strategies:** `concat`, `best_score`, `majority_vote`, `custom` (LLM merge prompt).
 
 ```json
 {
-  "tool": "collaborate",
-  "args": {
-    "strategy": "consensus",
-    "task": "Design a REST API for a todo app",
-    "agents": ["http://localhost:8083", "http://localhost:8084"],
-    "options": { "rounds": 3 }
-  }
+  "strategy": "consensus",
+  "agents": ["http://localhost:8083", "http://localhost:8082"],
+  "skillId": "ask_claude",
+  "args": { "prompt": "What is the risk level of X?" },
+  "mergeStrategy": "best_score"
 }
 ```
 
----
-
-## Project Factory & Pipelines
-
-The factory worker (port 8087) provides end-to-end project generation from a natural language idea through 5 phases:
-
-1. **Template Matching** — Select the best pipeline for the idea
-2. **Intent Normalization** — Expand vague idea into a detailed JSON spec via Claude
-3. **Scaffold** — Generate project structure from file-based templates with `{{var}}` substitution
-4. **Code Generation** — Generate implementation files via Claude
-5. **Quality Gate ("Ralph Mode")** — Multi-dimensional quality review with iterative fix cycles
-
-### Available Pipelines
-
-| Pipeline | Stack | Quality Dimensions |
-|----------|-------|--------------------|
-| `app` | Expo, React Native, TypeScript | code_quality, type_safety, ux_completeness, error_handling, accessibility |
-| `website` | Next.js, React, Tailwind CSS | code_quality, responsive_design, seo, accessibility, performance |
-| `mcp-server` | MCP SDK, Bun, TypeScript | code_quality, type_safety, error_handling, mcp_compliance, security |
-| `agent` | Claude API, Fastify, TypeScript | code_quality, type_safety, tool_design, error_handling, security |
-| `api` | Fastify, SQLite, TypeScript | code_quality, type_safety, api_design, error_handling, security |
-| `cli` | Bun, Zod, TypeScript | code_quality, type_safety, cli_ux, error_handling, documentation |
-
-### Template Variants
-
-Each pipeline supports domain-specific variants (e.g., `saas-starter`, `e-commerce`, `social-app`) stored at `src/templates/variants/<pipelineId>/<variantId>/TEMPLATE.md`. Variants provide pre-configured features, prompt enhancement rules, and quality checklists.
-
-### Quality Gate
-
-The quality gate ("Ralph Mode") scores generated code across multiple dimensions (0–100). The pipeline iterates up to `maxIterations` times (default: 3) until the average score exceeds the `passThreshold` (default: 85–90).
+`collaborate` returns a `taskId` for async polling.
 
 ---
 
-## Memory & Knowledge
+## Skill Pipelines (Composer)
 
-### Dual-Write Memory
+`compose_pipeline` defines declarative skill chains with pipe() semantics. Each step's output feeds the next.
 
-Every `remember` call writes to both:
+```json
+{
+  "name": "research-and-save",
+  "steps": [
+    { "alias": "search", "skillId": "fetch_url", "args": { "url": "{{input.url}}" } },
+    { "alias": "summary", "skillId": "ask_claude", "args": { "prompt": "Summarize: {{steps.search.result}}" } },
+    { "alias": "note", "skillId": "create_note", "args": { "title": "{{input.title}}", "content": "{{prev.result}}" }, "onError": "fallback", "fallback": "Could not save note" }
+  ]
+}
+```
 
-1. **SQLite FTS5** (`~/.a2a-memory.db`) — Full-text search with BM25 ranking
-2. **Obsidian Vault** (`~/obsidian-vault/a2a-memory/`) — Markdown files for human-readable access
-
-`recall` retrieves by exact key match. `search_memory` uses FTS5 full-text search.
-
-### Knowledge Worker
-
-The knowledge worker (port 8085) provides full CRUD on an Obsidian vault with an FTS5 search index:
-
-- `create_note` / `read_note` / `update_note` — File-based CRUD
-- `search_notes` — Full-text search across all notes
-- `list_notes` — Directory listing
-- `summarize_notes` — AI-powered summarization via Claude
+Template references: `{{prev.result}}`, `{{input.*}}`, `{{steps.<alias>.result}}`
 
 ---
 
-## Search
+## Project Factory
 
-3-layer FTS5 search with progressive fallback:
+`factory_workflow` generates complete projects from a vague idea. It coordinates the ai, shell, and code workers through a multi-step pipeline:
 
-1. **Porter stemming** — Standard FTS5 full-text search
-2. **Trigram substring** — Character n-gram matching for partial matches
-3. **Levenshtein fuzzy** — Edit-distance correction for typos
+1. **Intent normalization** — parse and clarify the request
+2. **Template matching** — select the best pipeline type
+3. **Scaffolding** — write directory and file structure
+4. **Code generation** — fill files via Claude
+5. **Quality gate ("Ralph Mode")** — multi-dimension scoring with automatic fix loops
 
-The sandbox store (`~/.a2a-sandbox.db`) provides the same 3-layer search for sandbox variables, with automatic vocabulary extraction and content chunking.
+**Pipeline types** (defined in `src/pipelines/`):
+
+| Type | Output |
+|---|---|
+| `app` | Expo React Native mobile app |
+| `website` | Next.js site |
+| `mcp-server` | MCP server scaffold (Bun) |
+| `agent` | AI agent project |
+| `api` | REST API |
+| `cli` | CLI tool |
+
+**Template variants** (in `src/templates/`): e-commerce, saas-starter, social-app, portfolio, saas-landing, crud-service, marketplace, devtool, data-connector, dev-tools, api-integration, content-generator.
+
+```json
+{
+  "idea": "Build a SaaS landing page for a B2B invoicing tool",
+  "pipeline": "website",
+  "template": "saas-landing"
+}
+```
 
 ---
 
 ## Sandbox Execution
 
-The `sandbox_execute` tool runs TypeScript code in an isolated Bun subprocess with:
+`sandbox_execute` runs TypeScript in isolated Bun subprocesses. Code has access to all worker skills via a preloaded `skill()` helper.
 
-- **Environment filtering**: 30+ dangerous env vars blocked (NODE_OPTIONS, LD_PRELOAD, all credential vars), 5 regex patterns for secret detection
-- **IPC**: JSON lines over subprocess stdin/stdout
-- **Timeout**: Configurable (default from `A2A_SANDBOX_TIMEOUT`)
-- **`--smol` flag**: Reduced memory footprint
+```typescript
+// Inside a sandbox
+const result = await skill("ask_claude", { prompt: "Summarize recent news" });
+const prices = await skill("fetch_quote", { symbol: "AAPL" });
 
-### Prelude Helpers
+// Variables persist across calls (stored in SQLite)
+$vars.lastPrice = prices.close;
 
-Code running in the sandbox has access to these built-in functions:
+// Large results (>4KB) are auto-indexed for FTS5 search
+const big = await skill("fetch_url", { url: "https://example.com/huge.json" });
+const matches = await search("big", "quarterly revenue");
+```
 
-| Helper | Description |
-|--------|-------------|
-| `skill(id, args)` | Call any orchestrator skill from within the sandbox |
-| `search(varName, query)` | Full-text search across sandbox variables |
-| `adapters()` | List available data adapters |
-| `describe(skillId)` | Get a skill's description and schema |
-| `batch(items, fn, { concurrency })` | Parallel batch processing with concurrency control |
-| `pick(arr, ...keys)` | Project specific keys from an array of objects |
-| `sum(arr, key)` | Sum a numeric field across an array |
-| `count(arr, key)` | Count occurrences by field value |
-| `first(arr)` / `last(arr)` | Get first or last element |
-| `table(arr)` | Format array as a readable table string |
+**Features:**
+- Per-session variable persistence via `~/.a2a-sandbox.db`
+- FTS5 full-text search on large results (auto-indexed at >4KB)
+- Configurable timeout (default: 30 s)
+- `sandbox_vars` tool for managing persisted variables
 
 ---
 
-## Federation
+## Memory & Knowledge
 
-Federated peer discovery for multi-server deployments:
+All workers share a unified memory layer backed by:
+
+- **SQLite** — `~/.a2a-memory.db` for fast key/value recall
+- **Obsidian vault** — `~/Documents/Obsidian/a2a-knowledge/_memory/` for markdown notes
+
+Tools: `remember`, `recall`, `memory_list`, `memory_cleanup`
+
+The **knowledge worker** (port 8085) provides a full note-taking layer on top of the Obsidian vault: `create_note`, `read_note`, `update_note`, `search_notes`, `list_notes`. Override the vault path with `OBSIDIAN_VAULT`.
+
+---
+
+## Event Bus
+
+An in-process pub/sub system with topic wildcards.
+
+| Pattern | Matches |
+|---|---|
+| `agent.shell.completed` | Exact topic |
+| `agent.*.completed` | Any single segment |
+| `workflow.#` | Any multi-segment path |
+
+**Features:**
+- Event history with configurable retention
+- Replay from timestamp (`event_replay`)
+- Dead letter queue for failed deliveries
+- Auto-published on every agent completion and failure (integrated into the delegate flow)
+
+---
+
+## Distributed Tracing
+
+Every delegation creates an OpenTelemetry-style trace with child spans per worker call.
+
+```
+Trace: delegate → run_shell
+  ├─ span: skill-router        2 ms
+  ├─ span: cache-lookup        1 ms
+  ├─ span: circuit-breaker     0 ms
+  └─ span: shell:8081/tasks    45 ms
+```
+
+MCP tools: `list_traces`, `get_trace` (waterfall view), `search_traces`
+Resource: `a2a://traces`
+
+---
+
+## Skill Cache
+
+An LRU cache with per-skill TTL for idempotent skill results.
+
+- Content-addressable keys (deterministic hash of `skillId + args`)
+- Side-effect skills (`run_shell`, `write_file`, etc.) are excluded automatically
+- Per-skill TTL configuration
+
+MCP tools: `cache_stats`, `cache_invalidate`, `cache_configure`
+Resource: `a2a://cache`
+
+---
+
+## Capability Negotiation
+
+Version-aware skill routing with SemVer matching and multi-dimensional scoring.
+
+**Scoring dimensions:** version match, required features, preferred features, worker health, active load, user priority.
 
 ```json
 {
-  "tool": "manage_federation",
-  "args": {
-    "action": "add",
-    "peerUrl": "https://other-server.example.com"
-  }
+  "skillId": "ask_claude",
+  "version": ">=1.2.0",
+  "features": ["streaming"],
+  "preferredFeatures": ["vision"]
 }
 ```
 
-Features:
+MCP tools: `negotiate_capability`, `list_capabilities`, `capability_stats`
+Resource: `a2a://capabilities`
 
-- Auto-discovery via `/.well-known/agent.json`
-- Periodic health checks (default: 30 seconds)
-- Automatic skill aggregation from peers
-- Stale peer removal on consecutive health check failures
+---
+
+## Webhooks
+
+Register HTTP endpoints that trigger A2A tasks from external services.
+
+```json
+{
+  "id": "github-push",
+  "secret": "my-hmac-secret",
+  "skillId": "run_shell",
+  "fieldMap": { "command": "$.head_commit.message" }
+}
+```
+
+Incoming requests hit `POST /webhooks/:id` on the A2A HTTP server. HMAC-SHA256 signature verification is performed before the payload is forwarded.
+
+MCP tools: `webhook_register`, `webhook_list`, `webhook_delete`
 
 ---
 
 ## Output Filtering & Token Savings
 
-RTK-style output filtering reduces token usage by intelligently filtering and truncating tool outputs before they reach the LLM context window.
+The output filter runs on every worker response before it reaches the MCP client.
 
-**Modules:**
+**Default filters:**
+- Strip ANSI escape codes
+- Collapse git verbose output
+- Compress npm/bun install logs
+- Trim test runner noise
 
-| Module | Description |
-|--------|-------------|
-| `src/output-filter.ts` | RTK-style output filtering — strips noise, truncates large payloads, preserves essential content |
-| `src/token-tracker.ts` | Tracks token savings statistics per skill and globally |
-| `src/tee.ts` | Records raw unfiltered outputs to tee files for debugging and audit |
-| `src/truncate.ts` | Smart truncation for large responses with configurable limits |
-| `src/env-filter.ts` | Filters dangerous environment variables from sandbox and shell contexts |
+**Config:**
 
-**MCP tools:**
-- `token_savings` — View savings statistics (total saved, rate, top skills by savings)
-- `read_raw_output` — Read raw pre-filter output from tee files
+```json
+{
+  "outputFilter": {
+    "enabled": true,
+    "stripAnsi": true,
+    "builtinFilters": true,
+    "customFiltersPath": "~/.a2a-mcp/filters.json",
+    "teeEnabled": true,
+    "teeMaxAgeMins": 1440,
+    "tokenTrackingEnabled": true,
+    "tokenRetentionDays": 90
+  }
+}
+```
 
----
-
-## Security
-
-### Prompt Injection Protection
-
-Comprehensive 6-pattern detection:
-
-- Instruction override attempts ("ignore previous instructions")
-- Role manipulation ("you are now")
-- Context stuffing detection (>10 KB user input, >50 KB template content)
-- Special character sequences and encoding tricks
-- Delimiter injection attempts
-- XML-wrapped user input isolation
-
-### Path Sanitization
-
-All file operations use `sanitizePath()`:
-
-- Character whitelist: `[a-zA-Z0-9_.\/~-]`
-- Traversal rejection: `..` sequences blocked
-- Base directory containment check
-- LLM-generated paths reject absolute paths
-
-### Template Variable Sanitization
-
-`sanitizeVar()` strips:
-
-- All ASCII control characters and null bytes
-- String delimiters and template characters (`` ` `` `$` `\` `"` `'`)
-- Path separators (`/`) and double-dot sequences
-- Shell metacharacters (`; & | < > ( ) { } [ ] ! # * ?`)
-
-### SSRF Protection
-
-- URL validation on all outbound requests
-- Redirect rejection
-- Worker URL allowlist validation
-
-### RBAC & Authentication
-
-Three roles: `admin`, `operator`, `viewer`. API keys are SHA-256 hashed and stored with `a2a_k_` prefix. Workspace-scoped access control.
-
-### License Gating (Open Core)
-
-Three tiers: `free`, `pro`, `enterprise`. Each skill is tagged with a minimum tier. License loaded from file (`~/.a2a-mcp/license.key`) or environment variable (`A2A_LICENSE_KEY`, base64-encoded).
-
-### Audit Logging
-
-Immutable SQLite audit trail (`~/.a2a-mcp/audit.db`) with:
-
-- ISO-8601 timestamps
-- Actor identification
-- Action and resource tracking
-- Indexed queries by actor, action, and time range
-- 90-day automatic retention cleanup
-
-### Circuit Breaker
-
-Per-worker circuit breakers with three states:
-
-| State | Behavior |
-|-------|----------|
-| `CLOSED` | Normal operation, counting failures |
-| `OPEN` | All calls rejected immediately (after 5 failures) |
-| `HALF_OPEN` | Single test call allowed (after 30s cooldown) |
-
-Configuration: `failureThreshold: 5`, `cooldownMs: 30s`, `callTimeoutMs: 30s`, `successThreshold: 2` (to re-close).
+The "tee" system preserves raw output alongside filtered output. Token savings are tracked and available via `agency_roi_snapshot`.
 
 ---
 
-## Plugin System
+## Federation
 
-Two plugin sources with hot-reload:
+The orchestrator can federate with peer A2A servers for cross-instance skill routing.
 
-### TypeScript Plugins
+```json
+{
+  "federation": {
+    "peers": ["https://peer1.example.com", "https://peer2.example.com"],
+    "healthIntervalMs": 60000,
+    "discoveryTimeoutMs": 5000
+  }
+}
+```
 
-Place plugins at `src/plugins/<name>/index.ts` exporting a `skills: Skill[]` array. The orchestrator auto-discovers and registers them.
+Remote workers (not federation peers) are added under `remoteWorkers` in config — no local process is spawned; the orchestrator discovers them via their agent card URL.
 
-### Declarative Vault Plugins
+```json
+{
+  "remoteWorkers": [
+    { "name": "my-remote", "url": "https://my-agent.example.com", "apiKey": "optional" }
+  ]
+}
+```
 
-Place plugin definitions at `<vault>/_plugins/<name>/plugin.md` with YAML frontmatter defining skill name, description, and prompt template. These become `ask_claude`-backed skills with `{{input}}` template substitution and automatic prompt sanitization.
+---
 
-Both plugin directories are watched for changes and hot-reloaded.
+## Security & RBAC
+
+**API key management** (`src/auth.ts`):
+
+```bash
+bun src/cli.ts auth-create-key   # prints key + id
+bun src/cli.ts auth-list-keys
+bun src/cli.ts auth-revoke-key --target <id>
+```
+
+**Roles:** `admin`, `operator`, `viewer`
+
+**Per-key skill allow/deny lists:**
+
+```json
+{
+  "role": "operator",
+  "allowedSkills": ["ask_claude", "fetch_url"],
+  "deniedSkills": ["run_shell"]
+}
+```
+
+**SSRF prevention:** All worker URLs are validated against an allowlist (ports 8081–8094). Remote worker URLs are auto-whitelisted on registration.
+
+**Prompt sanitization:** `src/prompt-sanitizer.ts` strips injection patterns before forwarding to Claude.
+
+**Sandbox isolation:** Each `sandbox_execute` call spawns a fresh Bun subprocess with stdin/stdout IPC and an enforced timeout.
+
+---
+
+## Audit Logging
+
+Every skill invocation is written to an immutable SQLite database at `~/.a2a-mcp/audit.db`.
+
+```json
+{
+  "actor": "key-abc123",
+  "skill": "run_shell",
+  "workspace": "team-alpha",
+  "args": { "command": "ls -la" },
+  "result": "success",
+  "durationMs": 42,
+  "timestamp": "2026-03-14T10:00:00Z"
+}
+```
+
+MCP tools: `audit_query`, `audit_stats`
+Resource: `a2a://audit`
+
+---
+
+## Skill Tiers & Licensing
+
+Skills are gated by tier: `free`, `pro`, `enterprise`.
+
+```bash
+export A2A_LICENSE_KEY="base64-encoded-license"
+# or
+cat ~/.a2a-mcp/license.json
+```
+
+MCP tool: `license_info`
+Resource: `a2a://license`
 
 ---
 
 ## Persona System
 
-Personas are Markdown files at `src/personas/<name>.md` with YAML frontmatter:
+Each worker can load a persona from `src/personas/<name>.md` that sets its system prompt, model selection, temperature, and max tokens. Personas are hot-reloaded via `watchPersonas()` — no restart required.
 
-```markdown
----
-model: claude-sonnet-4-6
-temperature: 0.7
 ---
 
-You are a senior software architect...
+## Plugin System
+
+Dynamic plugins loaded from `src/plugins/`:
+
+- `oauth.ts` — OAuth token refresh for external services
+- `timestamps.ts` — Automatic timestamping of skill results
+
+Add custom plugins by dropping a `.ts` file in `src/plugins/` that exports a `register(server)` function.
+
+---
+
+## ACP Integration (Zed IDE)
+
+Start the ACP server for Zed IDE integration:
+
+```bash
+bun run start:acp
 ```
 
-Personas are used by the `ask_claude` skill and MCP prompts. They support hot-reload via filesystem watch. Path traversal protection is enforced.
+The ACP server (`src/acp-server.ts`) speaks the stdin/stdout protocol expected by Zed, exposing the same skill routing as the MCP server.
 
 ---
 
-## MCP Registry & IDE Discovery
+## Agency Product Mode
 
-The MCP registry scans multiple IDE configurations to discover available MCP servers:
+The server ships with productized interfaces for agencies and consultancies running recurring client-delivery operations.
 
-| IDE | Config Path |
-|-----|-------------|
-| Claude Desktop | `~/.config/claude/claude_desktop_config.json` |
-| Cursor | `~/.cursor/mcp.json` |
-| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
-| Codex | `~/.codex/mcp.json` |
+**Packaged v1 workflows:**
+- Client reporting pipeline
+- Approval gate workflow
+- Client handoff sequence
 
-Features:
+**Commercial offer:** managed onboarding + managed cloud + weekly optimization
+**Price anchor:** EUR 1.5k–3k/month + one-time setup fee
 
-- Lazy-connect: MCP servers are only connected on first use
-- Manifest caching: 24-hour TTL to avoid repeated discovery
-- Automatic tool registration: discovered MCP tools become available as orchestrator skills
-- `list_mcp_servers` and `call_mcp_tool` MCP tools for runtime access
+**MCP tools:** `agency_workflow_templates`, `agency_roi_snapshot`
+**MCP resources:** `a2a://agency-workflows`, `a2a://agency-roi`
+
+Operational runbooks, sales playbooks, and onboarding materials live in [`docs/product/`](docs/product/).
+
+---
+
+## ERP Expansion APIs
+
+The ERP module (`src/erp/`) provides connector tools for quote-to-order, renewal automation, and snapshot export. These are enterprise-tier skills exposed as MCP tools alongside the standard fleet.
+
+Key capabilities: quote pipeline, renewal sweeper, followup writeback, snapshot export.
+
+Config:
+
+```json
+{
+  "erp": {
+    "autoRenewEnabled": true,
+    "renewalSweepIntervalMs": 86400000,
+    "snapshotExportEnabled": true,
+    "followupWritebackEnabled": true
+  }
+}
+```
 
 ---
 
 ## Configuration
 
-Configuration file at `~/.a2a-mcp/config.json`:
+Config file: `~/.a2a-mcp/config.json`
 
 ```json
 {
-  "port": 8080,
-  "logLevel": "info",
-  "workerProfile": "full",
-  "workers": {
-    "shell": { "port": 8081 },
-    "web": { "port": 8082 },
-    "ai": { "port": 8083 },
-    "code": { "port": 8084 },
-    "knowledge": { "port": 8085 },
-    "design": { "port": 8086 },
-    "factory": { "port": 8087 },
-    "data": { "port": 8088 }
+  "profile": "lite",
+  "server": {
+    "port": 8080,
+    "apiKey": "optional-shared-secret",
+    "healthPollInterval": 30000
   },
-  "memory": {
-    "vaultPath": "~/Documents/Obsidian/a2a-knowledge"
+  "workers": [
+    { "name": "shell", "port": 8081, "enabled": true }
+  ],
+  "remoteWorkers": [
+    { "name": "remote-agent", "url": "https://agent.example.com", "apiKey": "..." }
+  ],
+  "search": {
+    "maxResults": 50,
+    "rateLimit": 3,
+    "rateLimitBurst": 8
+  },
+  "sandbox": {
+    "timeout": 30000,
+    "maxResultSize": 25000,
+    "indexThreshold": 4096
+  },
+  "timeouts": {
+    "shell": 15000,
+    "fetch": 30000,
+    "codex": 120000,
+    "peer": 60000
+  },
+  "web": {
+    "rateLimit": 0,
+    "maxResponseBytes": 10485760
+  },
+  "truncation": {
+    "maxResponseSize": 25000,
+    "maxArrayItems": 100,
+    "headRatio": 0.6
+  },
+  "outputFilter": {
+    "enabled": true,
+    "stripAnsi": true,
+    "builtinFilters": true,
+    "tokenTrackingEnabled": true
   },
   "federation": {
     "peers": [],
-    "healthCheckIntervalMs": 30000
+    "healthIntervalMs": 60000
   }
 }
 ```
-
-All config values can be overridden via environment variables (see below).
 
 ---
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ANTHROPIC_API_KEY` | Anthropic API key (required for AI skills) | — |
-| `GOOGLE_API_KEY` | Google API key (for design worker, Gemini) | — |
-| `A2A_PORT` | HTTP server port | `8080` |
-| `A2A_API_KEY` | API key for HTTP endpoint authentication | — |
-| `A2A_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
-| `A2A_SANDBOX_TIMEOUT` | Sandbox execution timeout (ms) | `30000` |
-| `A2A_LICENSE_KEY` | Base64-encoded license key | — |
-| `A2A_WORKER_PROFILE` | Worker profile: `full`, `lite`, `data` | `full` |
-| `OBSIDIAN_VAULT` | Path to Obsidian vault for knowledge worker | `~/Documents/Obsidian/a2a-knowledge` |
+| Variable | Default | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | Claude API key (falls back to Claude Code OAuth) |
+| `GOOGLE_API_KEY` | — | Gemini key for design worker |
+| `A2A_API_KEY` | — | Shared API key for A2A HTTP server |
+| `A2A_PORT` | `8080` | Orchestrator HTTP port |
+| `A2A_LICENSE_KEY` | — | Base64 license key for tier gating |
+| `A2A_SANDBOX_TIMEOUT` | `30000` | Sandbox execution timeout (ms) |
+| `A2A_MAX_RESPONSE_SIZE` | `25000` | Max response size before truncation |
+| `A2A_MAX_RESPONSE_BYTES` | `10485760` | Max HTTP response body for web worker |
+| `A2A_ASK_CLAUDE_MAX_TOKENS` | `4096` | Max tokens for ask_claude |
+| `A2A_WEB_RATE_LIMIT` | `0` | Web worker rate limit (0 = unlimited) |
+| `A2A_LOG_LEVEL` | `info` | Log level |
+| `OBSIDIAN_VAULT` | `~/Documents/Obsidian/a2a-knowledge` | Override Obsidian vault path |
+| `NASA_FIRMS_KEY` | — | NASA FIRMS key for climate worker |
 
 ---
 
@@ -942,76 +905,105 @@ All config values can be overridden via environment variables (see below).
 
 ```bash
 docker build -t a2a-mcp-server .
-docker run -p 8080:8080 \
-  -e ANTHROPIC_API_KEY=your-key \
+docker run -p 8080-8094:8080-8094 \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
   -v a2a-data:/data \
   a2a-mcp-server
 ```
 
-### Docker Compose
+Or with Compose:
 
 ```bash
-docker compose up -d
+docker compose up
 ```
 
-The `docker-compose.yml` mounts a persistent volume for SQLite databases and config.
+The Dockerfile:
+- Base: `oven/bun:1`
+- Runs as non-root `bun` user
+- Exposes ports 8080–8094
+- SQLite databases mounted at `/data`
 
 ### Fly.io
 
 ```bash
-fly launch --copy-config
-fly secrets set A2A_API_KEY=your-secret ANTHROPIC_API_KEY=your-key
+fly launch   # uses fly.toml
 fly deploy
 ```
 
-Configuration: IAD region, force HTTPS, auto-stop/start machines, min 1 running, shared-cpu-1x with 512 MB.
+Config: `primary_region = iad`, `shared-cpu-1x` with 1024 MB RAM, HTTPS enforced, soft concurrency limit 200.
 
 ### Railway
 
 ```bash
-railway up
+railway up   # uses railway.json
 ```
 
-Uses Dockerfile build, `/healthz` health check, ON_FAILURE restart with 3 retries.
+Config: `Dockerfile` build, `/healthz` health check, restart on failure.
 
-### Health Endpoints
+### Cloud health endpoints
 
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /healthz` | Basic liveness — `{ ok: true }` |
-| `GET /readyz` | Readiness — all workers responding |
-| `GET /livez` | Liveness — server process running |
+| Path | Purpose |
+|---|---|
+| `/healthz` | Basic liveness |
+| `/readyz` | Readiness (all workers up) |
+| `/health` | Detailed (per-worker circuit-breaker state) |
 
 ---
 
 ## Development
 
 ```bash
-# Install dependencies
-bun install
-
-# Run in development mode (hot-reload)
+# Run with watch mode
 bun run dev
 
-# Type check
-bun build src/server.ts --target=bun --outdir=dist
+# Type-check (uses Bun bundler, no tsc required)
+bun build src/server.ts --target bun
 
 # Run tests
 bun test
+
+# Scaffold a new worker
+bun src/cli.ts create-worker <name> --port <port>
 ```
 
-### CI/CD
+**Key constraints for contributors:**
+- Never use `console.log` — stdout is reserved for MCP JSON-RPC. Use `process.stderr.write(...)` for all logging.
+- Use `.js` extensions on all local imports (ESM): `import { foo } from "../bar.js"`
+- No build step — Bun runs TypeScript directly.
 
-GitHub Actions workflow (`.github/workflows/ci.yml`) runs on push/PR to `main`:
+**Module map:**
 
-1. Checkout
-2. Setup Bun (latest)
-3. Install dependencies (frozen lockfile)
-4. Type check via `bun build`
-5. Run tests via `bun test`
+| Module | Purpose |
+|---|---|
+| `src/server.ts` | Orchestrator entry point (MCP + A2A + ACP) |
+| `src/a2a.ts` | `sendTask()` and `discoverAgent()` HTTP helpers |
+| `src/config.ts` | Config schema (Zod) + loading |
+| `src/memory.ts` | Dual-write memory (SQLite + Obsidian) |
+| `src/skills.ts` | Built-in skill registry |
+| `src/sandbox.ts` | Isolated Bun subprocess executor |
+| `src/sandbox-store.ts` | Variable persistence + FTS5 indexing |
+| `src/circuit-breaker.ts` | Per-worker circuit breaker |
+| `src/metrics.ts` | Execution metrics (p50/p95/p99) |
+| `src/workflow-engine.ts` | DAG workflow orchestrator |
+| `src/skill-composer.ts` | Declarative pipeline composer |
+| `src/agent-collaboration.ts` | Multi-agent collaboration protocols |
+| `src/tracing.ts` | OpenTelemetry-style tracing |
+| `src/skill-cache.ts` | LRU skill result cache |
+| `src/capability-negotiation.ts` | Version-aware skill routing |
+| `src/event-bus.ts` | Pub/sub event system |
+| `src/webhooks.ts` | Webhook registration and dispatch |
+| `src/auth.ts` | API key + RBAC |
+| `src/workspace.ts` | Team workspaces |
+| `src/audit.ts` | Immutable audit trail |
+| `src/skill-tier.ts` | License-based skill gating |
+| `src/output-filter.ts` | ANSI + token-saving filters |
+| `src/cloud.ts` | Health endpoints + graceful shutdown |
+| `src/worker-loader.ts` | User-space worker discovery (`~/.a2a-mcp/workers/`) |
+| `src/federation.ts` | Peer A2A server discovery |
+| `src/acp-server.ts` | Zed IDE ACP protocol server |
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)
