@@ -7,6 +7,7 @@
  *   - Price: cost volatility, commodity exposure
  *   - Lead Time: variability, buffer remaining
  *   - External: weather, freight, geopolitical, economic factors
+ *   - Quality: defect rates, certifications, inspection failures
  *
  * Score 0-100 per dimension (100 = highest risk).
  */
@@ -67,22 +68,24 @@ function scoreComponent(comp: BOMComponent, ctx: ScoringContext): RiskScore {
   const price = scorePrice(comp, ctx, flags);
   const leadTime = scoreLeadTime(comp, ctx, flags);
   const external = scoreExternal(comp, ctx, flags);
+  const quality = scoreQuality(comp, flags);
 
-  // Weighted average (availability and delivery are most critical)
-  const weights = { availability: 0.30, delivery: 0.25, price: 0.15, leadTime: 0.20, external: 0.10 };
+  // Rebalanced weights (total = 1.0, quality = 0.15)
+  const weights = { availability: 0.25, delivery: 0.20, price: 0.15, leadTime: 0.15, external: 0.10, quality: 0.15 };
   const overallScore = Math.round(
     availability * weights.availability +
     delivery * weights.delivery +
     price * weights.price +
     leadTime * weights.leadTime +
-    external * weights.external,
+    external * weights.external +
+    quality * weights.quality,
   );
 
   return {
     componentId: comp.itemNo,
     componentName: comp.itemName,
     overallScore,
-    dimensions: { availability, delivery, price, leadTime, external },
+    dimensions: { availability, delivery, price, leadTime, external, quality },
     flags,
   };
 }
@@ -251,6 +254,57 @@ function scoreLeadTime(comp: BOMComponent, ctx: ScoringContext, flags: string[])
   }
 
   return Math.min(100, score);
+}
+
+function scoreQuality(comp: BOMComponent, flags: string[]): number {
+  // If no quality data is available, return a neutral default and flag it
+  const hasAnyData =
+    comp.defectRatePct !== undefined ||
+    comp.hasQualityCertification !== undefined ||
+    comp.recentQualityFailures !== undefined;
+
+  if (!hasAnyData) {
+    flags.push("NO_QUALITY_DATA");
+    return 50; // neutral: unknown risk
+  }
+
+  let score = 0;
+
+  // Defect rate
+  if (comp.defectRatePct !== undefined) {
+    if (comp.defectRatePct > 5) {
+      score += 40;
+      flags.push("HIGH_DEFECT_RATE");
+    } else if (comp.defectRatePct > 1) {
+      score += 20;
+      flags.push("ELEVATED_DEFECT_RATE");
+    }
+  }
+
+  // Quality certification
+  if (comp.hasQualityCertification === false) {
+    score += 15;
+    flags.push("NO_QUALITY_CERTIFICATION");
+  }
+
+  // Recent failures / returns
+  if (comp.recentQualityFailures !== undefined) {
+    if (comp.recentQualityFailures >= 3) {
+      score += 25;
+      flags.push("REPEATED_QUALITY_FAILURES");
+    } else if (comp.recentQualityFailures >= 1) {
+      score += 10;
+      flags.push("QUALITY_FAILURES_RECORDED");
+    }
+  }
+
+  // No incoming inspection increases quality risk exposure
+  if (comp.incomingInspectionRequired === false) {
+    score += 10;
+    flags.push("NO_INCOMING_INSPECTION");
+  }
+
+  return Math.min(100, Math.round(score));
 }
 
 function scoreExternal(comp: BOMComponent, ctx: ScoringContext, flags: string[]): number {

@@ -249,7 +249,7 @@ export interface MRPRunResult {
 
 export interface MRPException {
   severity: "critical" | "warning" | "info";
-  type: "shortage" | "overload" | "late_order" | "excess" | "past_due" | "no_vendor";
+  type: "shortage" | "overload" | "late_order" | "excess" | "past_due" | "no_vendor" | "capacity_reschedule";
   itemNo?: string;
   itemName?: string;
   workCenterId?: string;

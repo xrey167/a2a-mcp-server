@@ -43,7 +43,7 @@ import { buildPlanningHorizon, buildDemandPlanWithExceptions, type DemandForecas
 import { buildSupplyPlan, calculateGrossToNet } from "./gross-to-net.js";
 import { policyName } from "./lot-sizing.js";
 import { buildPeggingTrees, buildPeggingTreesIncremental, type PeggingInput, type PeggingCache } from "./pegging.js";
-import { discoverWorkCenters, calculateCapacityLoads, detectCapacityExceptions } from "./capacity.js";
+import { discoverWorkCenters, calculateCapacityLoads, detectCapacityExceptions, reschedulePlannedOrders } from "./capacity.js";
 
 function log(msg: string) {
   process.stderr.write(`[mrp-engine] ${msg}\n`);
@@ -250,6 +250,37 @@ export function runMRP(input: MRPInput): MRPRunResult {
       });
       capacityExceptions = detectCapacityExceptions(capacityLoads);
       log(`capacity: ${workCenters.length} work centers, ${capacityExceptions.length} exceptions`);
+
+      // CRP → MRP feedback: reschedule planned orders in overloaded buckets
+      if (capacityExceptions.some((e) => e.type === "overload")) {
+        const { rescheduled, rescheduleExceptions } = reschedulePlannedOrders(
+          plannedOrders,
+          capacityLoads,
+          horizon,
+          routingMap.size > 0 ? routingMap : undefined,
+        );
+        if (rescheduled.length > 0) {
+          // Merge rescheduled orders back: replace in-place by id
+          const rescheduledById = new Map(rescheduled.map((o) => [o.id, o]));
+          for (let i = 0; i < plannedOrders.length; i++) {
+            const updated = rescheduledById.get(plannedOrders[i].id);
+            if (updated) plannedOrders[i] = updated;
+          }
+          // Re-compute capacity loads with updated dates
+          capacityLoads = calculateCapacityLoads({
+            productionOrders,
+            plannedOrders,
+            workCenters,
+            horizon,
+            routingMap: routingMap.size > 0 ? routingMap : undefined,
+          });
+          capacityExceptions = [
+            ...detectCapacityExceptions(capacityLoads),
+            ...rescheduleExceptions,
+          ];
+          log(`capacity after reschedule: ${rescheduled.length} orders shifted, ${capacityExceptions.length} exceptions`);
+        }
+      }
     }
   }
 
