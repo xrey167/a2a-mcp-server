@@ -109,8 +109,8 @@ const AGENT_CARD = {
 // NOTE: This uses Yahoo Finance's unofficial v8 chart API which is undocumented
 // and not covered by any public SLA. Yahoo may change, rate-limit, or remove
 // this endpoint without notice, breaking quote/history fetching.
-// TODO: Switch to an official market data provider (e.g. Alpha Vantage, Polygon.io,
-// Twelve Data, or IEX Cloud) for production reliability.
+// When ALPHAVANTAGE_API_KEY is set, Alpha Vantage is used as the primary provider
+// and Yahoo Finance is not called. Yahoo is only used when no official key is available.
 
 const FETCH_TIMEOUT = 15_000;
 const UA = "A2A-Market-Agent/1.0";
@@ -653,19 +653,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         const res = await fetch(customUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
         if (!res.ok) throw new Error(`Custom API HTTP ${res.status}`);
         quote = await res.json() as Record<string, unknown>;
+      } else if (process.env.ALPHAVANTAGE_API_KEY) {
+        // Alpha Vantage is the primary official provider when the key is set.
+        quote = await fetchAlphaVantageQuote(symbol);
       } else {
-        // Yahoo Finance (default) — uses undocumented API; falls back to
-        // Alpha Vantage automatically if Yahoo fails and ALPHAVANTAGE_API_KEY is set.
-        try {
-          quote = await fetchYahooQuote(symbol);
-        } catch (yahooErr) {
-          if (process.env.ALPHAVANTAGE_API_KEY) {
-            log(`Yahoo Finance failed (${yahooErr}), falling back to Alpha Vantage`);
-            quote = await fetchAlphaVantageQuote(symbol);
-          } else {
-            throw yahooErr;
-          }
-        }
+        // Yahoo Finance fallback — uses undocumented API; set ALPHAVANTAGE_API_KEY
+        // to use an official provider instead.
+        log("Warning: using unofficial Yahoo Finance API. Set ALPHAVANTAGE_API_KEY for a reliable official provider.");
+        quote = await fetchYahooQuote(symbol);
       }
       return safeStringify(quote, 2);
     }
@@ -680,20 +675,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         return safeStringify(data, 2);
       }
       let history: { timestamps: string[]; open: number[]; high: number[]; low: number[]; close: number[]; volume: number[] };
-      if (provider === "alphavantage") {
+      if (provider === "alphavantage" || process.env.ALPHAVANTAGE_API_KEY) {
+        // Alpha Vantage is the primary official provider when the key is set.
         history = await fetchAlphaVantageHistory(symbol, interval, range);
       } else {
-        // Yahoo Finance (default) — falls back to Alpha Vantage if available.
-        try {
-          history = await fetchYahooHistory(symbol, interval, range);
-        } catch (yahooErr) {
-          if (process.env.ALPHAVANTAGE_API_KEY) {
-            log(`Yahoo history failed (${yahooErr}), falling back to Alpha Vantage`);
-            history = await fetchAlphaVantageHistory(symbol, interval, range);
-          } else {
-            throw yahooErr;
-          }
-        }
+        // Yahoo Finance fallback — uses undocumented API; set ALPHAVANTAGE_API_KEY
+        // to use an official provider instead.
+        log("Warning: using unofficial Yahoo Finance API. Set ALPHAVANTAGE_API_KEY for a reliable official provider.");
+        history = await fetchYahooHistory(symbol, interval, range);
       }
       return safeStringify({
         symbol,
