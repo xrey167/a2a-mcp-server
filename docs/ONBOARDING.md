@@ -551,9 +551,9 @@ A2A_SANDBOX_TIMEOUT=60000 bun src/server.ts
    ls -la ~/Documents/Obsidian/a2a-knowledge
    ```
 
-2. Check for errors in server logs:
+2. Check for errors in server logs (redirect stderr first):
    ```bash
-   grep "memory" ~/.a2a-mcp/logs/server.log
+   grep "memory" ~/.a2a-mcp/server.log
    ```
 
 **Fix:**
@@ -672,7 +672,7 @@ In the Railway dashboard:
    - `ANTHROPIC_API_KEY`: sk-...
    - `GOOGLE_API_KEY`: AIzaSy...
    - `A2A_API_KEY`: prod-key-...
-   - `A2A_PROFILE`: lite
+   - *(Profile is set via `"profile": "lite"` in `~/.a2a-mcp/config.json`, not an env var)*
 
 #### Deploy
 Railway auto-deploys on push to main. Monitor in the dashboard.
