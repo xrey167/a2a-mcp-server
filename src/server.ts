@@ -1574,17 +1574,18 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
     case "event_subscribe": {
       const pattern = args.pattern as string;
       if (!pattern) throw new Error("event_subscribe requires pattern");
-      // MCP subscriptions store events for later retrieval — filter out sensitive metadata
+      // MCP subscriptions store events in a bounded ring buffer
+      const MAX_SUB_EVENTS = 1000;
       const events: AgentEvent[] = [];
       const subId = subscribe(pattern, (event) => {
-        // Strip internal metadata before exposing to MCP users
         const { meta: _meta, ...safeEvent } = event;
+        if (events.length >= MAX_SUB_EVENTS) events.shift();
         events.push(safeEvent as AgentEvent);
       }, {
         name: (args.name as string) ?? "mcp-subscriber",
         filter: args.filter as Record<string, unknown> | undefined,
       });
-      return JSON.stringify({ subscriptionId: subId, pattern });
+      return JSON.stringify({ subscriptionId: subId, pattern, maxBuffered: MAX_SUB_EVENTS });
     }
 
     case "event_unsubscribe": {
