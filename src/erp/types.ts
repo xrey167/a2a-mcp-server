@@ -47,6 +47,14 @@ export interface BOMComponent {
   truncated?: boolean;
   /** Item costing method from ERP (e.g. "FIFO", "Average", "Standard") */
   costingMethod?: string;
+  /** Defect / non-conformance rate as a percentage (0–100) */
+  defectRatePct?: number;
+  /** Whether supplier holds an active quality certification (ISO 9001, IATF, etc.) */
+  hasQualityCertification?: boolean;
+  /** Number of quality failures / returns recorded in the last 12 months */
+  recentQualityFailures?: number;
+  /** Whether incoming inspection / receiving QC is performed for this item */
+  incomingInspectionRequired?: boolean;
 }
 
 export interface RoutingStep {
@@ -292,6 +300,7 @@ export interface RiskScore {
     price: number;
     leadTime: number;
     external: number;
+    quality: number;
   };
   flags: string[];
 }

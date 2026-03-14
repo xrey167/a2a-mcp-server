@@ -91,7 +91,8 @@ interface SupplySlot {
   type: "on_hand" | "purchase_order" | "production_order" | "planned_order";
   sourceId: string;
   itemNo: string;
-  remainingQty: number;
+  totalQty: number;     // original slot capacity — never mutated
+  remainingQty: number; // decremented as demand is pegged
   date: string;
   vendorNo?: string;
 }
@@ -115,6 +116,7 @@ function buildSupplyIndex(input: PeggingInput): Map<string, SupplySlot[]> {
         type: "on_hand",
         sourceId: "INVENTORY",
         itemNo: avail.itemNo,
+        totalQty: avail.available,
         remainingQty: avail.available,
         date: new Date().toISOString().slice(0, 10),
       });
@@ -129,6 +131,7 @@ function buildSupplyIndex(input: PeggingInput): Map<string, SupplySlot[]> {
         type: "purchase_order",
         sourceId: po.number,
         itemNo: line.itemNo,
+        totalQty: line.quantity,
         remainingQty: line.quantity,
         date: line.expectedReceiptDate,
         vendorNo: po.vendorNo,
@@ -143,6 +146,7 @@ function buildSupplyIndex(input: PeggingInput): Map<string, SupplySlot[]> {
       type: "production_order",
       sourceId: prod.number,
       itemNo: prod.itemNo,
+      totalQty: prod.quantity,
       remainingQty: prod.quantity,
       date: prod.dueDate,
     });
@@ -154,6 +158,7 @@ function buildSupplyIndex(input: PeggingInput): Map<string, SupplySlot[]> {
       type: "planned_order",
       sourceId: po.id,
       itemNo: po.itemNo,
+      totalQty: po.quantity,
       remainingQty: po.quantity,
       date: po.dueDate,
     });
@@ -197,7 +202,7 @@ function pegItem(
       supplyItemNo: slot.itemNo,
       supplySourceType: slot.type,
       supplySourceId: slot.sourceId,
-      supplyQuantity: slot.remainingQty + pegQty,
+      supplyQuantity: slot.totalQty,
       supplyDate: slot.date,
       peggedQuantity: pegQty,
       isCovered: remaining <= 0,
