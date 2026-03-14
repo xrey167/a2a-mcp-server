@@ -21,7 +21,7 @@ export interface SOPDemandInput {
 }
 
 export interface SOPSupplyInput {
-  availableCapacity: Array<{ workCenterId: string; period: string; availableMinutes: number }>;
+  availableCapacity: Array<{ workCenterId: string; period: string; availableMinutes: number; requiredMinutes?: number }>;
   currentInventory: Array<{ itemNo: string; quantity: number; unitCost?: number }>;
   openPurchaseOrders: Array<{ itemNo: string; quantity: number; expectedDate: string }>;
   plannedOrders?: PlannedOrder[];
@@ -176,13 +176,15 @@ export function reconcileDemandSupply(
       items.push(item);
     }
 
-    // Capacity utilization from supply input
-    const capacityUtils = supply.availableCapacity
-      .filter((c) => c.period === period)
-      .map((c) => c.availableMinutes);
-    const avgCapUtil = capacityUtils.length > 0
-      ? Math.round(capacityUtils.reduce((a, b) => a + b, 0) / capacityUtils.length)
-      : 0;
+    // Capacity utilization from supply input: (requiredMinutes / availableMinutes) * 100
+    const periodCapacity = supply.availableCapacity.filter((c) => c.period === period);
+    let avgCapUtil = 0;
+    if (periodCapacity.length > 0) {
+      const utilizations = periodCapacity.map((c) =>
+        c.availableMinutes > 0 ? Math.min(100, (c.requiredMinutes ?? 0) / c.availableMinutes * 100) : 0,
+      );
+      avgCapUtil = Math.round(utilizations.reduce((a, b) => a + b, 0) / utilizations.length);
+    }
 
     results.push({
       period,

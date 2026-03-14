@@ -88,6 +88,15 @@ const IP_PROTECTION: Record<string, number> = {
   TH: 50, VN: 35, ID: 35, PH: 35, BD: 30, BG: 55, SK: 68,
 };
 
+// Geopolitical risk score 0-100 (higher = more risk)
+const GEOPOLITICAL_RISK: Record<string, number> = {
+  DE: 10, CH: 8, AT: 10, NL: 10, SE: 10, NO: 8, DK: 8,
+  FI: 12, FR: 15, US: 18, GB: 15, JP: 20, KR: 35, CN: 55,
+  IN: 35, BR: 40, MX: 45, PL: 20, CZ: 18, HU: 28, RO: 25,
+  BG: 22, TR: 55, TH: 30, VN: 38, ID: 35, PH: 40, BD: 45,
+  IT: 18, ES: 15, PT: 12, SK: 18, SI: 12, HR: 18, RS: 32,
+};
+
 // Approximate transport distances from Germany (km)
 const DISTANCE_FROM_DE: Record<string, number> = {
   PL: 600, CZ: 350, AT: 400, HU: 850, RO: 1500, BG: 1800,
@@ -128,7 +137,8 @@ export function evaluateNearshoring(
     const currentIP = IP_PROTECTION[currentSupplier.country] ?? 50;
 
     const esgScore = target.esgScore ?? 60;
-    const geopoliticalRisk = target.geopoliticalRisk ?? 30;
+    const geopoliticalRisk = target.geopoliticalRisk ?? GEOPOLITICAL_RISK[target.country] ?? 30;
+    const currentGeopoliticalRisk = GEOPOLITICAL_RISK[currentSupplier.country] ?? 30;
     const carbonFootprint = target.carbonFootprint ?? (distanceKm * 0.016 * 10); // rough estimate
 
     // TCO comparison (weighted)
@@ -141,8 +151,8 @@ export function evaluateNearshoring(
         (geopoliticalRisk / 100) * 0.1) * 100 - 100,
     );
 
-    // Risk comparison
-    const currentRisk = (100 - currentQuality) * 0.3 + geopoliticalRisk * 0.4 + (100 - currentIP) * 0.3;
+    // Risk comparison — use distinct geopolitical risk values for current vs proposed
+    const currentRisk = (100 - currentQuality) * 0.3 + currentGeopoliticalRisk * 0.4 + (100 - currentIP) * 0.3;
     const proposedRisk = (100 - quality) * 0.3 + geopoliticalRisk * 0.4 + (100 - ip) * 0.3;
     const riskComparison = Math.round(((currentRisk - proposedRisk) / Math.max(1, currentRisk)) * 100);
 
@@ -153,7 +163,7 @@ export function evaluateNearshoring(
       { dimension: "Transport Time (days)", current: currentTransportDays, proposed: transportTimeDays, delta: `${transportTimeDays - currentTransportDays} days`, advantage: transportTimeDays < currentTransportDays ? "proposed" : transportTimeDays > currentTransportDays ? "current" : "neutral" },
       { dimension: "Quality Index", current: currentQuality, proposed: quality, delta: `${quality - currentQuality}`, advantage: quality > currentQuality ? "proposed" : quality < currentQuality ? "current" : "neutral" },
       { dimension: "IP Protection", current: currentIP, proposed: ip, delta: `${ip - currentIP}`, advantage: ip > currentIP ? "proposed" : ip < currentIP ? "current" : "neutral" },
-      { dimension: "Geopolitical Risk", current: "varies", proposed: geopoliticalRisk, delta: `${geopoliticalRisk}%`, advantage: geopoliticalRisk < 30 ? "proposed" : geopoliticalRisk > 60 ? "current" : "neutral" },
+      { dimension: "Geopolitical Risk", current: currentGeopoliticalRisk, proposed: geopoliticalRisk, delta: `${geopoliticalRisk - currentGeopoliticalRisk > 0 ? "+" : ""}${geopoliticalRisk - currentGeopoliticalRisk}%`, advantage: geopoliticalRisk < currentGeopoliticalRisk ? "proposed" : geopoliticalRisk > currentGeopoliticalRisk ? "current" : "neutral" },
       { dimension: "ESG Score", current: "varies", proposed: esgScore, delta: `${esgScore}/100`, advantage: esgScore > 70 ? "proposed" : esgScore < 50 ? "current" : "neutral" },
     ];
 

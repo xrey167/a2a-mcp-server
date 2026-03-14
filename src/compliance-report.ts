@@ -2,6 +2,9 @@
 // Compliance reporting dashboard — aggregates data from audit, auth, and metrics
 // modules to produce a structured compliance report with scored sections.
 
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+
 // ── Types ────────────────────────────────────────────────────────
 
 export interface ComplianceSection {
@@ -240,8 +243,14 @@ function assessDataProtection(): ComplianceSection {
   let score = 85; // Base score — data protection is assessed conservatively
 
   // Check for environment-level protections
-  const hasEncryptionAtRest = true; // SQLite WAL mode provides basic integrity
-  findings.push("Data stored in SQLite with WAL journaling (integrity protected)");
+  const hasEncryptionAtRest = !!process.env.A2A_ENCRYPT_AT_REST;
+  if (hasEncryptionAtRest) {
+    findings.push("Encryption at rest is enabled via A2A_ENCRYPT_AT_REST");
+  } else {
+    findings.push("Data stored in SQLite with WAL journaling (durability/crash-consistency protected; no encryption at rest)");
+    recommendations.push("Enable encryption at rest for sensitive data (set A2A_ENCRYPT_AT_REST or use an encrypted filesystem)");
+    score -= 10;
+  }
 
   // Check if audit DB path is in a protected location
   const auditDbPath = process.env.A2A_AUDIT_DB;
