@@ -294,8 +294,11 @@ async function loadFirmedOrders(): Promise<void> {
       firmedOrders = parsed;
       log(`loaded ${firmedOrders.length} firmed orders from disk`);
     }
-  } catch {
-    // File doesn't exist yet or is invalid — start fresh
+  } catch (err) {
+    // File doesn't exist yet or is invalid — start fresh. Log unexpected errors.
+    if (!(err instanceof Error && "code" in err && err.code === "ENOENT")) {
+      log(`warning: could not load firmed orders from disk, starting fresh. Error: ${err}`);
+    }
   }
 }
 
