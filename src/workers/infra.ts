@@ -18,6 +18,9 @@
 
 import Fastify from "fastify";
 import { z } from "zod";
+import { readFileSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
@@ -108,6 +111,13 @@ const InfraSchemas = {
     }).optional().default({}),
   }).passthrough(),
 
+  load_infrastructure: z.object({
+    filter: z.object({
+      types: z.array(z.string()).optional(),
+      region: z.string().optional(),
+    }).optional().default({}),
+  }).passthrough(),
+
   dependency_graph: z.object({
     nodes: z.array(z.object({
       id: z.string(),
@@ -140,6 +150,7 @@ const AGENT_CARD = {
     { id: "chokepoint_assess", name: "Chokepoint Assess", description: "Assess strategic chokepoint vulnerability based on traffic, width, alternatives, and threats" },
     { id: "redundancy_score", name: "Redundancy Score", description: "Score infrastructure redundancy for a region across cables, ports, power, pipelines, etc." },
     { id: "dependency_graph", name: "Dependency Graph", description: "Build dependency graphs and query: critical nodes (high in-degree), single points of failure, impact analysis" },
+    { id: "load_infrastructure", name: "Load Infrastructure", description: "Load the static infrastructure database (chokepoints, bases, cables, pipelines, datacenters, ports) with optional type/region filtering" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -152,7 +163,7 @@ const AGENT_CARD = {
 // ── Infrastructure Node Type Constants ───────────────────────────
 
 /** The 5 canonical infrastructure node types with type-specific cascade behavior */
-const INFRA_NODE_TYPES = ["cable", "pipeline", "port", "chokepoint", "country"] as const;
+const INFRA_NODE_TYPES = ["cable", "pipeline", "port", "chokepoint", "country", "base", "datacenter"] as const;
 
 /**
  * Type-specific propagation factors: how strongly failure propagates through each node type.
@@ -168,6 +179,8 @@ const TYPE_PROPAGATION_FACTOR: Record<string, number> = {
   port: 0.65,
   chokepoint: 0.90,
   country: 0.50,
+  base: 0.55,
+  datacenter: 0.85,
 };
 
 /**
@@ -180,6 +193,8 @@ const TYPE_SIGNIFICANCE_FLOOR: Record<string, number> = {
   port: 0.04,
   chokepoint: 0.02,
   country: 0.05,
+  base: 0.05,
+  datacenter: 0.03,
 };
 
 /**
@@ -204,6 +219,18 @@ const CROSS_TYPE_COUPLING: Record<string, number> = {
   "country→pipeline": 0.40,
   "country→cable": 0.35,
   "country→chokepoint": 0.50,
+  "base→port": 0.40,
+  "base→chokepoint": 0.35,
+  "base→cable": 0.30,
+  "base→country": 0.45,
+  "datacenter→cable": 0.90,
+  "datacenter→port": 0.30,
+  "datacenter→country": 0.40,
+  "cable→datacenter": 0.85,
+  "port→base": 0.35,
+  "chokepoint→base": 0.40,
+  "country→base": 0.50,
+  "country→datacenter": 0.45,
 };
 
 /** Normalize user-supplied node type to canonical form */
@@ -214,6 +241,8 @@ function normalizeNodeType(type: string): string {
   if (t === "port" || t === "hafen" || t === "harbor" || t === "harbour") return "port";
   if (t === "chokepoint" || t === "strait" || t === "canal" || t === "bottleneck") return "chokepoint";
   if (t === "country" || t === "land" || t === "nation" || t === "state") return "country";
+  if (t === "base" || t === "militarybase" || t === "airbase" || t === "navalbase") return "base";
+  if (t === "datacenter" || t === "datacentre" || t === "dc" || t === "cloudregion") return "datacenter";
   return type; // non-canonical type: no special handling
 }
 
@@ -735,6 +764,26 @@ function analyzeGraph(
   }
 }
 
+// ── Infrastructure Database Loader ───────────────────────────────
+
+let infraDbCache: { nodes: InfraNode[]; edges: InfraEdge[] } | null = null;
+
+function loadInfrastructureDb(): { nodes: InfraNode[]; edges: InfraEdge[] } {
+  if (infraDbCache) return infraDbCache;
+  try {
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    const dbPath = join(thisDir, "..", "data", "infrastructure.json");
+    const raw = readFileSync(dbPath, "utf-8");
+    const data = JSON.parse(raw) as { nodes: InfraNode[]; edges: InfraEdge[] };
+    infraDbCache = data;
+    process.stderr.write(`[${NAME}] loaded infrastructure DB: ${data.nodes.length} nodes, ${data.edges.length} edges\n`);
+    return data;
+  } catch (err) {
+    process.stderr.write(`[${NAME}] failed to load infrastructure DB: ${err}\n`);
+    return { nodes: [], edges: [] };
+  }
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string {
@@ -786,6 +835,41 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       const { nodes, edges, query, targetNode } = InfraSchemas.dependency_graph.parse(args);
       const result = analyzeGraph(nodes, edges, query, targetNode);
       return safeStringify(result, 2);
+    }
+
+    case "load_infrastructure": {
+      const { filter } = InfraSchemas.load_infrastructure.parse(args);
+      const infraData = loadInfrastructureDb();
+      let nodes = infraData.nodes;
+      let edges = infraData.edges;
+
+      if (filter.types && filter.types.length > 0) {
+        const normalizedFilter = new Set(filter.types.map(t => normalizeNodeType(t)));
+        nodes = nodes.filter(n => normalizedFilter.has(normalizeNodeType(n.type)));
+        const nodeIds = new Set(nodes.map(n => n.id));
+        edges = edges.filter(e => nodeIds.has(e.from) || nodeIds.has(e.to));
+      }
+
+      if (filter.region) {
+        const regionLower = filter.region.toLowerCase();
+        nodes = nodes.filter(n => {
+          const meta = n.metadata as Record<string, unknown>;
+          const country = String(meta.country ?? meta.fromCountry ?? "").toLowerCase();
+          const landing = String(meta.landingPoints ?? "").toLowerCase();
+          const name = n.name.toLowerCase();
+          return country.includes(regionLower) || landing.includes(regionLower) || name.includes(regionLower);
+        });
+        const nodeIds = new Set(nodes.map(n => n.id));
+        edges = edges.filter(e => nodeIds.has(e.from) || nodeIds.has(e.to));
+      }
+
+      return safeStringify({
+        nodeCount: nodes.length,
+        edgeCount: edges.length,
+        typeBreakdown: nodes.reduce((acc, n) => { const t = normalizeNodeType(n.type); acc[t] = (acc[t] ?? 0) + 1; return acc; }, {} as Record<string, number>),
+        nodes,
+        edges,
+      }, 2);
     }
 
     default:

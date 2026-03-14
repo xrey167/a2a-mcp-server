@@ -27,6 +27,8 @@ import { round, haversineKm } from "../worker-utils.js";
 
 const PORT = 8092;
 const NAME = "monitor-agent";
+const FETCH_TIMEOUT = 20_000;
+const UA = "A2A-Monitor-Agent/1.0";
 
 // ── Zod Schemas ──────────────────────────────────────────────────
 
@@ -124,6 +126,25 @@ const MonitorSchemas = {
     watchlists: z.record(z.array(z.string())).optional().default({}),
     fuzzyMatch: z.boolean().optional().default(true),
   }).passthrough(),
+
+  // ── Live Data Ingestion Skills ──────────────────────────────────
+  fetch_conflicts: z.object({
+    source: z.enum(["acled", "gdelt"]).optional().default("gdelt"),
+    region: z.string().optional(),
+    country: z.string().optional(),
+    days: z.number().int().positive().optional().default(30),
+    limit: z.number().int().positive().optional().default(100),
+  }).passthrough(),
+
+  fetch_flights: z.object({
+    /** Bounding box: min lat, max lat, min lon, max lon */
+    lamin: z.number().optional(),
+    lamax: z.number().optional(),
+    lomin: z.number().optional(),
+    lomax: z.number().optional(),
+    /** Filter military aircraft only */
+    militaryOnly: z.boolean().optional().default(false),
+  }).passthrough(),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -141,6 +162,8 @@ const AGENT_CARD = {
     { id: "track_vessels", name: "Track Vessels", description: "Classify naval vessels by MMSI, detect dark ships, and identify vessel clusters" },
     { id: "check_freshness", name: "Check Freshness", description: "Monitor data source freshness: fresh, stale, very_stale, no_data status with essential source alerts" },
     { id: "watchlist_check", name: "Watchlist Check", description: "Screen entities against configurable watchlists with optional fuzzy matching" },
+    { id: "fetch_conflicts", name: "Fetch Conflicts", description: "Fetch live conflict data from GDELT or ACLED APIs with region/country filtering" },
+    { id: "fetch_flights", name: "Fetch Flights", description: "Fetch live ADS-B flight data from OpenSky Network with bounding box and military filtering" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -724,9 +747,203 @@ function screenWatchlists(
   return { hits, cleanEntities, hitCount: hits.length };
 }
 
+// ── Live Conflict Data (GDELT / ACLED) ──────────────────────────
+
+async function fetchGdeltConflicts(region?: string, country?: string, days: number = 30, limit: number = 100): Promise<Conflict[]> {
+  const query = country ?? region ?? "conflict";
+  const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(query)}%20sourcelang:eng&mode=ArtList&maxrecords=${limit}&format=json&timespan=${days}d`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
+  if (!res.ok) throw new Error(`GDELT HTTP ${res.status}: ${res.statusText}`);
+  const data = await res.json() as any;
+  const articles = data?.articles ?? [];
+
+  // Group by domain/title keyword → synthesize conflicts
+  const conflictMap = new Map<string, Conflict>();
+  for (const art of articles) {
+    const title = (art.title ?? "").slice(0, 100);
+    const source = art.domain ?? "unknown";
+    const dateStr = art.seendate ?? new Date().toISOString();
+    // Extract country from URL or title
+    const artCountry = country ?? (art.sourcecountry ?? "").slice(0, 50);
+
+    let severity: "critical" | "high" | "medium" | "low" = "medium";
+    const lowerTitle = title.toLowerCase();
+    if (/kill|dead|bomb|strike|attack|massacre/i.test(lowerTitle)) severity = "critical";
+    else if (/escalat|troops|deploy|missile|offensive/i.test(lowerTitle)) severity = "high";
+    else if (/tension|sanction|threat|warning/i.test(lowerTitle)) severity = "medium";
+    else severity = "low";
+
+    const key = artCountry || title.split(/\s+/).slice(0, 3).join(" ");
+    if (!conflictMap.has(key)) {
+      conflictMap.set(key, {
+        name: key,
+        region: region ?? "",
+        country: artCountry,
+        parties: [],
+        startDate: dateStr,
+        status: "active",
+        casualties: 0,
+        displaced: 0,
+        events: [],
+      });
+    }
+    conflictMap.get(key)!.events.push({
+      date: dateStr,
+      type: source,
+      description: title,
+      severity,
+    });
+  }
+
+  return [...conflictMap.values()].slice(0, limit);
+}
+
+async function fetchAcledConflicts(region?: string, country?: string, days: number = 30, limit: number = 100): Promise<Conflict[]> {
+  const apiKey = process.env.ACLED_API_KEY;
+  const email = process.env.ACLED_EMAIL;
+  if (!apiKey || !email) {
+    process.stderr.write(`[${NAME}] ACLED requires ACLED_API_KEY and ACLED_EMAIL env vars. Falling back to GDELT.\n`);
+    return fetchGdeltConflicts(region, country, days, limit);
+  }
+
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  let url = `https://api.acleddata.com/acled/read?key=${apiKey}&email=${encodeURIComponent(email)}&event_date=${since}|&event_date_where=BETWEEN&limit=${limit}`;
+  if (country) url += `&country=${encodeURIComponent(country)}`;
+  if (region) url += `&region_name=${encodeURIComponent(region)}`;
+
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
+  if (!res.ok) throw new Error(`ACLED HTTP ${res.status}: ${res.statusText}`);
+  const data = await res.json() as any;
+  const events = data?.data ?? [];
+
+  const conflictMap = new Map<string, Conflict>();
+  for (const ev of events) {
+    const key = ev.country ?? "Unknown";
+    if (!conflictMap.has(key)) {
+      conflictMap.set(key, {
+        name: ev.event_type ?? key,
+        region: ev.region ?? "",
+        country: ev.country ?? "",
+        parties: [ev.actor1 ?? "", ev.actor2 ?? ""].filter(Boolean),
+        startDate: ev.event_date ?? "",
+        status: "active",
+        casualties: ev.fatalities ?? 0,
+        displaced: 0,
+        events: [],
+      });
+    }
+    const c = conflictMap.get(key)!;
+    c.casualties += ev.fatalities ?? 0;
+    const severity = (ev.fatalities ?? 0) > 10 ? "critical" : (ev.fatalities ?? 0) > 0 ? "high" : "medium";
+    c.events.push({
+      date: ev.event_date ?? "",
+      type: ev.event_type ?? "",
+      description: ev.notes ?? "",
+      severity,
+    });
+  }
+
+  return [...conflictMap.values()];
+}
+
+// ── Live ADS-B Flight Tracking (OpenSky Network) ────────────────
+
+/** ICAO24 hex address prefixes for known military operators */
+const MILITARY_ICAO_PREFIXES: Array<{ prefix: string; operator: string }> = [
+  { prefix: "ae", operator: "US Military" },
+  { prefix: "af", operator: "US Military" },
+  { prefix: "43c", operator: "UK Military" },
+  { prefix: "3f", operator: "German Military" },
+  { prefix: "3e8", operator: "French Military" },
+  { prefix: "300", operator: "French Military" },
+  { prefix: "500", operator: "Australian Military" },
+  { prefix: "c0", operator: "Canadian Military" },
+  { prefix: "7c", operator: "Australian Military" },
+];
+
+interface FlightState {
+  icao24: string;
+  callsign: string;
+  originCountry: string;
+  lat: number;
+  lon: number;
+  altitude: number;
+  velocity: number;
+  heading: number;
+  onGround: boolean;
+  squawk: string;
+  isMilitary: boolean;
+  operator: string;
+  timestamp: string;
+}
+
+async function fetchOpenSkyFlights(
+  lamin?: number, lamax?: number, lomin?: number, lomax?: number,
+  militaryOnly: boolean = false,
+): Promise<FlightState[]> {
+  let url = "https://opensky-network.org/api/states/all";
+  const params: string[] = [];
+  if (lamin !== undefined) params.push(`lamin=${lamin}`);
+  if (lamax !== undefined) params.push(`lamax=${lamax}`);
+  if (lomin !== undefined) params.push(`lomin=${lomin}`);
+  if (lomax !== undefined) params.push(`lomax=${lomax}`);
+  if (params.length > 0) url += `?${params.join("&")}`;
+
+  const headers: Record<string, string> = { "User-Agent": UA };
+  const user = process.env.OPENSKY_USER;
+  const pass = process.env.OPENSKY_PASS;
+  if (user && pass) {
+    headers["Authorization"] = `Basic ${btoa(`${user}:${pass}`)}`;
+  }
+
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers });
+  if (!res.ok) throw new Error(`OpenSky HTTP ${res.status}: ${res.statusText}`);
+  const data = await res.json() as any;
+  const states: any[] = data?.states ?? [];
+
+  const flights: FlightState[] = [];
+  for (const s of states) {
+    if (!s[6] || !s[5]) continue; // skip if no lat/lon
+
+    const icao24 = (s[0] ?? "").toLowerCase();
+    let isMilitary = false;
+    let operator = "";
+    for (const mp of MILITARY_ICAO_PREFIXES) {
+      if (icao24.startsWith(mp.prefix)) {
+        isMilitary = true;
+        operator = mp.operator;
+        break;
+      }
+    }
+    // Also check squawk codes for military
+    const squawk = s[14] ?? "";
+    if (squawk === "7777" || squawk === "7600") isMilitary = true;
+
+    if (militaryOnly && !isMilitary) continue;
+
+    flights.push({
+      icao24,
+      callsign: (s[1] ?? "").trim(),
+      originCountry: s[2] ?? "",
+      lat: s[6],
+      lon: s[5],
+      altitude: s[7] ?? 0,
+      velocity: s[9] ?? 0,
+      heading: s[10] ?? 0,
+      onGround: s[8] ?? false,
+      squawk,
+      isMilitary,
+      operator,
+      timestamp: new Date((data?.time ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
+    });
+  }
+
+  return flights;
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
-function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string {
+async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
   if (memResult !== null) return memResult;
 
@@ -794,6 +1011,39 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       }, 2);
     }
 
+    case "fetch_conflicts": {
+      const { source, region, country, days, limit } = MonitorSchemas.fetch_conflicts.parse(args);
+      let conflicts: Conflict[];
+      if (source === "acled") {
+        conflicts = await fetchAcledConflicts(region, country, days, limit);
+      } else {
+        conflicts = await fetchGdeltConflicts(region, country, days, limit);
+      }
+      const scored = scoreConflicts(conflicts);
+      return safeStringify({
+        source,
+        totalConflicts: scored.length,
+        escalatingCount: scored.filter(c => c.escalationTrend === "escalating").length,
+        conflicts: scored,
+      }, 2);
+    }
+
+    case "fetch_flights": {
+      const { lamin, lamax, lomin, lomax, militaryOnly } = MonitorSchemas.fetch_flights.parse(args);
+      const flights = await fetchOpenSkyFlights(lamin, lamax, lomin, lomax, militaryOnly);
+      const militaryCount = flights.filter(f => f.isMilitary).length;
+      const byCountry: Record<string, number> = {};
+      for (const f of flights) {
+        byCountry[f.originCountry] = (byCountry[f.originCountry] ?? 0) + 1;
+      }
+      return safeStringify({
+        totalFlights: flights.length,
+        militaryFlights: militaryCount,
+        byCountry,
+        flights: flights.slice(0, 200), // Limit response size
+      }, 2);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
@@ -827,7 +1077,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const sid = skillId ?? "track_conflicts";
 
   try {
-    const result = handleSkill(sid, args ?? {}, text);
+    const result = await handleSkill(sid, args ?? {}, text);
     return buildA2AResponse(data.id, taskId, result);
   } catch (err) {
     reply.code(500);

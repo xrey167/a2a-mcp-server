@@ -66,7 +66,7 @@ export function buildOsintBriefWorkflow(
       id: "news_collect",
       skillId: "aggregate_feeds",
       label: "Collect news feeds",
-      args: { urls: ["https://feeds.bbci.co.uk/news/world/rss.xml", "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"], limit: 30, dedup: true },
+      args: { urls: ["https://feeds.bbci.co.uk/news/world/rss.xml", "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", "https://www.aljazeera.com/xml/rss/all.xml", "https://feeds.reuters.com/reuters/worldNews"], limit: 30, dedup: true },
       onError: "skip" as const,
     });
   }
@@ -84,19 +84,19 @@ export function buildOsintBriefWorkflow(
   if (sources.includes("monitor")) {
     steps.push({
       id: "conflicts",
-      skillId: "track_conflicts",
-      label: "Track active conflicts",
-      args: { conflicts: [], ...regionArg },
+      skillId: "fetch_conflicts",
+      label: "Fetch live conflict data",
+      args: { source: "gdelt", days: 7, limit: 50, ...(opts.region ? { country: opts.region } : {}) },
       onError: "skip" as const,
     });
   }
 
   if (sources.includes("infra")) {
     steps.push({
-      id: "infra_risk",
-      skillId: "redundancy_score",
-      label: "Score infrastructure redundancy",
-      args: { region: opts.region ?? "global", infrastructure: { submarineCables: 0, ports: 0, pipelines: 0, powerPlants: 0 }, thresholds: {} },
+      id: "infra_load",
+      skillId: "load_infrastructure",
+      label: "Load infrastructure database",
+      args: { filter: opts.region ? { region: opts.region } : {} },
       onError: "skip" as const,
     });
   }
@@ -223,16 +223,16 @@ export function buildAlertScanWorkflow(
       },
       {
         id: "conflicts",
-        skillId: "track_conflicts",
-        label: "Track active conflicts",
-        args: { conflicts: [], ...(opts.region ? { region: opts.region } : {}) },
+        skillId: "fetch_conflicts",
+        label: "Fetch live conflict data",
+        args: { source: "gdelt", days: 7, limit: 50, ...(opts.region ? { country: opts.region } : {}) },
         onError: "skip" as const,
       },
       {
-        id: "surge",
-        skillId: "detect_surge",
-        label: "Detect military surges",
-        args: { activities: [], baselineHours: 48, surgeMultiplier: 2, ...(opts.region ? { theater: opts.region } : {}) },
+        id: "flights",
+        skillId: "fetch_flights",
+        label: "Fetch flight activity",
+        args: { militaryOnly: true },
         onError: "skip" as const,
       },
       // Phase 2: Chained analysis (depends on Phase 1)
@@ -257,7 +257,7 @@ export function buildAlertScanWorkflow(
         id: "evaluate",
         skillId: "ask_claude",
         label: "Evaluate alerts against thresholds",
-        dependsOn: ["signals", "threats", "freshness", "conflicts", "surge", "correlate"],
+        dependsOn: ["signals", "threats", "freshness", "conflicts", "flights", "correlate"],
         args: {
           prompt: `You are an OSINT alert evaluator. Review the following data and extract items that meet or exceed severity threshold: ${opts.severityThreshold}.
 
@@ -265,7 +265,7 @@ Signals: {{signals.result}}
 Threats: {{threats.result}}
 Freshness: {{freshness.result}}
 Conflicts: {{conflicts.result}}
-Military Surges: {{surge.result}}
+Flight Activity: {{flights.result}}
 Correlation Patterns: {{correlate.result}}
 
 Return JSON: { "alerts": [{ "source": string, "severity": string, "title": string, "summary": string, "actionRequired": boolean }], "totalAlerts": number, "criticalCount": number, "highCount": number }`,
@@ -289,16 +289,16 @@ export function buildThreatAssessWorkflow(
     },
     {
       id: "conflicts",
-      skillId: "track_conflicts",
-      label: "Track conflicts in region",
-      args: { conflicts: [], region: opts.region },
+      skillId: "fetch_conflicts",
+      label: "Fetch live conflict data for region",
+      args: { source: "gdelt", days: 7, limit: 50, country: opts.region },
       onError: "skip" as const,
     },
     {
-      id: "surge",
-      skillId: "detect_surge",
-      label: "Detect military surges",
-      args: { activities: [], baselineHours: 48, surgeMultiplier: 2 },
+      id: "cyber",
+      skillId: "fetch_cyber_c2",
+      label: "Fetch cyber threat indicators",
+      args: { limit: 50 },
       onError: "skip" as const,
     },
     // Phase 2: Chained analysis (depends on Phase 1)
@@ -314,7 +314,7 @@ export function buildThreatAssessWorkflow(
       id: "instability",
       skillId: "instability_index",
       label: "Compute instability index",
-      dependsOn: ["signals", "conflicts", "surge"],
+      dependsOn: ["signals", "conflicts", "cyber"],
       args: { country: opts.region, indicators: { conflictEvents: 0, militaryActivity: 0, civilUnrest: 0, cyberThreats: 0, economicStress: 0, displacement: 0, naturalDisasters: 0, mediaCoverage: 0 } },
       onError: "skip" as const,
     },
@@ -330,17 +330,10 @@ export function buildThreatAssessWorkflow(
 
   if (opts.includeInfra) {
     steps.push({
-      id: "cascade",
-      skillId: "cascade_analysis",
-      label: "Analyze cascade failure risk",
-      args: { nodes: [], edges: [], failedNodes: [], maxDepth: 3 },
-      onError: "skip" as const,
-    });
-    steps.push({
-      id: "chokepoints",
-      skillId: "chokepoint_assess",
-      label: "Assess chokepoint vulnerability",
-      args: { chokepoints: [] },
+      id: "infra_load",
+      skillId: "load_infrastructure",
+      label: "Load infrastructure database",
+      args: { filter: { region: opts.region } },
       onError: "skip" as const,
     });
   }
@@ -559,10 +552,10 @@ export function getOsintDashboard(): Record<string, unknown> {
     },
     workers: {
       news: { port: 8089, skills: ["fetch_rss", "aggregate_feeds", "classify_news", "cluster_news", "detect_signals"] },
-      market: { port: 8090, skills: ["fetch_quote", "price_history", "technical_analysis", "screen_market", "detect_anomalies", "correlation"] },
-      signal: { port: 8091, skills: ["aggregate_signals", "classify_threat", "detect_convergence", "baseline_compare", "instability_index", "correlate_signals"] },
-      monitor: { port: 8092, skills: ["track_conflicts", "detect_surge", "theater_posture", "track_vessels", "check_freshness", "watchlist_check"] },
-      infra: { port: 8093, skills: ["cascade_analysis", "supply_chain_map", "chokepoint_assess", "redundancy_score", "dependency_graph"] },
+      market: { port: 8090, skills: ["fetch_quote", "price_history", "technical_analysis", "screen_market", "detect_anomalies", "correlation", "market_composite"] },
+      signal: { port: 8091, skills: ["aggregate_signals", "classify_threat", "detect_convergence", "baseline_compare", "instability_index", "correlate_signals", "fetch_cyber_c2", "fetch_malicious_urls", "fetch_outages"] },
+      monitor: { port: 8092, skills: ["track_conflicts", "detect_surge", "theater_posture", "track_vessels", "check_freshness", "watchlist_check", "fetch_conflicts", "fetch_flights"] },
+      infra: { port: 8093, skills: ["cascade_analysis", "supply_chain_map", "chokepoint_assess", "redundancy_score", "dependency_graph", "load_infrastructure"] },
       climate: { port: 8094, skills: ["fetch_earthquakes", "fetch_wildfires", "fetch_natural_events", "assess_exposure", "climate_anomalies", "event_correlate"] },
     },
     availableTools: [

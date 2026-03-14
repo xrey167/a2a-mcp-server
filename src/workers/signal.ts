@@ -26,6 +26,8 @@ import { round, haversineKm } from "../worker-utils.js";
 
 const PORT = 8091;
 const NAME = "signal-agent";
+const FETCH_TIMEOUT = 20_000;
+const UA_SIGNAL = "A2A-Signal-Agent/1.0";
 
 // ── Canonical Signal Types ───────────────────────────────────────
 
@@ -156,6 +158,22 @@ const SignalSchemas = {
       naturalDisasters: z.number().optional().default(0.05),
       mediaCoverage: z.number().optional().default(0.05),
     }).optional().default({}),
+    /** Geopolitical risk framework overlay */
+    framework: z.enum(["standard", "grand_chessboard", "prisoners_of_geography"]).optional().default("standard"),
+  }).passthrough(),
+
+  // ── Live Cyber Threat Feed Skills ────────────────────────────────
+  fetch_cyber_c2: z.object({
+    limit: z.number().int().positive().optional().default(100),
+  }).passthrough(),
+
+  fetch_malicious_urls: z.object({
+    limit: z.number().int().positive().optional().default(100),
+  }).passthrough(),
+
+  fetch_outages: z.object({
+    country: z.string().optional(),
+    days: z.number().int().positive().optional().default(7),
   }).passthrough(),
 
   correlate_signals: z.object({
@@ -190,6 +208,9 @@ const AGENT_CARD = {
     { id: "baseline_compare", name: "Baseline Compare", description: "Temporal baseline analysis: compare recent values against rolling baseline via z-score" },
     { id: "instability_index", name: "Instability Index", description: "Compute composite Country Instability Index from weighted multi-stream indicators" },
     { id: "correlate_signals", name: "Correlate Signals", description: "Detect 14 cross-domain correlation patterns (Silent Divergence, Conflict Escalation, Cyber-Infrastructure, etc.)" },
+    { id: "fetch_cyber_c2", name: "Fetch Cyber C2", description: "Fetch live botnet C2 server data from Feodo Tracker (abuse.ch)" },
+    { id: "fetch_malicious_urls", name: "Fetch Malicious URLs", description: "Fetch recent malicious URLs from URLhaus (abuse.ch)" },
+    { id: "fetch_outages", name: "Fetch Outages", description: "Fetch internet outage signals from IODA (Internet Outage Detection and Analysis)" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -662,6 +683,64 @@ interface InstabilityResult {
   dominantFactors: string[];
 }
 
+// ── Geopolitical Framework Overlays ──────────────────────────────
+
+/** Grand Chessboard (Brzezinski): Eurasian pivot states get boosted military/geopolitical weights */
+const GRAND_CHESSBOARD_COUNTRIES = new Set([
+  "ukraine", "georgia", "azerbaijan", "turkey", "iran", "afghanistan",
+  "kazakhstan", "uzbekistan", "turkmenistan", "pakistan", "india", "china",
+  "russia", "poland", "germany", "france", "japan", "south korea",
+]);
+
+/** Prisoners of Geography (Marshall): Geographically constrained nations */
+const PRISONERS_OF_GEOGRAPHY_COUNTRIES = new Set([
+  "russia", "china", "india", "pakistan", "iran", "turkey", "israel",
+  "egypt", "ethiopia", "nigeria", "brazil", "mexico", "japan",
+  "south korea", "north korea", "afghanistan", "iraq", "syria",
+]);
+
+function applyFrameworkWeights(
+  country: string,
+  baseWeights: Record<string, number>,
+  framework: string,
+): Record<string, number> {
+  if (framework === "standard") return baseWeights;
+
+  const countryLower = country.toLowerCase();
+  const weights = { ...baseWeights };
+
+  if (framework === "grand_chessboard") {
+    if (GRAND_CHESSBOARD_COUNTRIES.has(countryLower)) {
+      // Boost military and conflict weights for Eurasian pivot states
+      weights.militaryActivity = (weights.militaryActivity ?? 0.20) * 1.4;
+      weights.conflictEvents = (weights.conflictEvents ?? 0.25) * 1.3;
+      weights.cyberThreats = (weights.cyberThreats ?? 0.10) * 1.2;
+      // Reduce climate/media weights as less geopolitically relevant
+      weights.naturalDisasters = (weights.naturalDisasters ?? 0.05) * 0.7;
+      weights.mediaCoverage = (weights.mediaCoverage ?? 0.05) * 0.8;
+    }
+  } else if (framework === "prisoners_of_geography") {
+    if (PRISONERS_OF_GEOGRAPHY_COUNTRIES.has(countryLower)) {
+      // Boost infrastructure and climate for geographically constrained nations
+      weights.economicStress = (weights.economicStress ?? 0.10) * 1.3;
+      weights.naturalDisasters = (weights.naturalDisasters ?? 0.05) * 1.5;
+      weights.displacement = (weights.displacement ?? 0.10) * 1.3;
+      // Boost conflict for contested border nations
+      weights.conflictEvents = (weights.conflictEvents ?? 0.25) * 1.2;
+    }
+  }
+
+  // Renormalize weights to sum to 1.0
+  const total = Object.values(weights).reduce((s, w) => s + w, 0);
+  if (total > 0) {
+    for (const key of Object.keys(weights)) {
+      weights[key] = round(weights[key] / total, 4);
+    }
+  }
+
+  return weights;
+}
+
 function computeInstabilityIndex(
   country: string,
   indicators: Record<string, number>,
@@ -990,7 +1069,121 @@ function detectCorrelationPatterns(
 
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
-function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string {
+// ── Live Cyber Threat Feeds ───────────────────────────────────────
+
+async function fetchFeodoC2(limit: number): Promise<Record<string, unknown>> {
+  const url = "https://feodotracker.abuse.ch/downloads/ipblocklist_aggressive.csv";
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA_SIGNAL } });
+  if (!res.ok) throw new Error(`Feodo Tracker HTTP ${res.status}: ${res.statusText}`);
+  const text = await res.text();
+  const lines = text.split("\n").filter(l => l && !l.startsWith("#"));
+
+  const entries: Array<{ ip: string; port?: number; status?: string; firstSeen?: string }> = [];
+  for (const line of lines.slice(0, limit)) {
+    const parts = line.split(",").map(s => s.trim());
+    if (parts[0]) {
+      entries.push({
+        ip: parts[0],
+        port: parts[1] ? parseInt(parts[1], 10) : undefined,
+        status: parts[2] || undefined,
+        firstSeen: parts[3] || undefined,
+      });
+    }
+  }
+
+  return {
+    source: "feodo_tracker",
+    description: "Active botnet C2 servers (Feodo Tracker)",
+    totalEntries: entries.length,
+    entries,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+async function fetchUrlhaus(limit: number): Promise<Record<string, unknown>> {
+  const url = "https://urlhaus-api.abuse.ch/v1/urls/recent/";
+  const res = await fetch(url, {
+    method: "POST",
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    headers: { "User-Agent": UA_SIGNAL, "Content-Type": "application/x-www-form-urlencoded" },
+    body: `limit=${limit}`,
+  });
+  if (!res.ok) throw new Error(`URLhaus HTTP ${res.status}: ${res.statusText}`);
+  const data = await res.json() as any;
+  const urls = (data?.urls ?? []).slice(0, limit);
+
+  const entries = urls.map((u: any) => ({
+    url: u.url ?? "",
+    urlStatus: u.url_status ?? "",
+    threat: u.threat ?? "",
+    tags: u.tags ?? [],
+    dateAdded: u.date_added ?? "",
+    reporter: u.reporter ?? "",
+  }));
+
+  const threatCounts: Record<string, number> = {};
+  for (const e of entries) {
+    if (e.threat) threatCounts[e.threat] = (threatCounts[e.threat] ?? 0) + 1;
+  }
+
+  return {
+    source: "urlhaus",
+    description: "Recent malicious URLs (URLhaus)",
+    totalEntries: entries.length,
+    threatBreakdown: threatCounts,
+    entries,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+async function fetchIodaOutages(country?: string, days: number = 7): Promise<Record<string, unknown>> {
+  // IODA API for internet outage detection
+  const until = Math.floor(Date.now() / 1000);
+  const from = until - days * 86400;
+  let url = `https://api.ioda.inetintel.cc.gatech.edu/v2/signals/raw/country?from=${from}&until=${until}`;
+  if (country) url += `&entityCode=${encodeURIComponent(country.toUpperCase())}`;
+
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA_SIGNAL } });
+    if (!res.ok) throw new Error(`IODA HTTP ${res.status}: ${res.statusText}`);
+    const data = await res.json() as any;
+
+    const signals = Array.isArray(data?.data) ? data.data : [];
+    const entries = signals.slice(0, 50).map((s: any) => ({
+      entityType: s.entityType ?? "",
+      entityCode: s.entityCode ?? "",
+      entityName: s.entityName ?? "",
+      datasource: s.datasource ?? "",
+      from: s.from ? new Date(s.from * 1000).toISOString() : "",
+      until: s.until ? new Date(s.until * 1000).toISOString() : "",
+      level: s.level ?? "",
+    }));
+
+    return {
+      source: "ioda",
+      description: "Internet outage signals (IODA)",
+      country: country ?? "global",
+      days,
+      totalEntries: entries.length,
+      entries,
+      fetchedAt: new Date().toISOString(),
+    };
+  } catch (err) {
+    // IODA API may be unreliable; return graceful degradation
+    return {
+      source: "ioda",
+      description: "Internet outage signals (IODA)",
+      error: err instanceof Error ? err.message : String(err),
+      country: country ?? "global",
+      days,
+      totalEntries: 0,
+      entries: [],
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+}
+
+async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
   if (memResult !== null) return memResult;
 
@@ -1042,9 +1235,28 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
     }
 
     case "instability_index": {
-      const { country, indicators, weights } = SignalSchemas.instability_index.parse(args);
-      const result = computeInstabilityIndex(country, indicators, weights);
-      return safeStringify(result, 2);
+      const { country, indicators, weights, framework } = SignalSchemas.instability_index.parse(args);
+      const adjustedWeights = applyFrameworkWeights(country, weights, framework);
+      const result = computeInstabilityIndex(country, indicators, adjustedWeights);
+      return safeStringify({ ...result, framework }, 2);
+    }
+
+    case "fetch_cyber_c2": {
+      const { limit } = SignalSchemas.fetch_cyber_c2.parse(args);
+      const c2Data = await fetchFeodoC2(limit);
+      return safeStringify(c2Data, 2);
+    }
+
+    case "fetch_malicious_urls": {
+      const { limit } = SignalSchemas.fetch_malicious_urls.parse(args);
+      const urlData = await fetchUrlhaus(limit);
+      return safeStringify(urlData, 2);
+    }
+
+    case "fetch_outages": {
+      const { country, days } = SignalSchemas.fetch_outages.parse(args);
+      const outageData = await fetchIodaOutages(country, days);
+      return safeStringify(outageData, 2);
     }
 
     case "correlate_signals": {
@@ -1089,7 +1301,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const sid = skillId ?? "aggregate_signals";
 
   try {
-    const result = handleSkill(sid, args ?? {}, text);
+    const result = await handleSkill(sid, args ?? {}, text);
     return buildA2AResponse(data.id, taskId, result);
   } catch (err) {
     reply.code(500);
