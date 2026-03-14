@@ -2,7 +2,7 @@
  * Supply Chain Risk Agent — production order analysis, critical path detection,
  * global risk assessment, and intervention recommendations.
  *
- * Port: 8089
+ * Port: 8095
  *
  * Connects to Business Central or Odoo to analyze production orders, sales orders,
  * BOM structures, and procurement methods. Evaluates components against global
