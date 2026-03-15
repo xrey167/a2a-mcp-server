@@ -18,6 +18,12 @@ import { Database } from "bun:sqlite";
 import { join } from "path";
 import { homedir } from "os";
 
+// ── Helpers ──────────────────────────────────────────────────────
+
+function safeJsonParse(s: string, fallback: unknown = {}): unknown {
+  try { return JSON.parse(s); } catch { return fallback; }
+}
+
 // ── Types ────────────────────────────────────────────────────────
 
 export interface WebhookConfig {
@@ -119,8 +125,8 @@ export function getWebhook(id: string): WebhookConfig | null {
     name: row.name,
     secret: row.secret ?? undefined,
     skillId: row.skill_id,
-    staticArgs: JSON.parse(row.static_args),
-    fieldMappings: JSON.parse(row.field_mappings),
+    staticArgs: safeJsonParse(row.static_args) as Record<string, unknown>,
+    fieldMappings: safeJsonParse(row.field_mappings) as Record<string, string>,
     async: row.async === 1,
     createdAt: row.created_at,
     enabled: row.enabled === 1,
@@ -139,8 +145,8 @@ export function listWebhooks(): WebhookConfig[] {
     name: row.name,
     secret: row.secret ?? undefined,
     skillId: row.skill_id,
-    staticArgs: JSON.parse(row.static_args),
-    fieldMappings: JSON.parse(row.field_mappings),
+    staticArgs: safeJsonParse(row.static_args) as Record<string, unknown>,
+    fieldMappings: safeJsonParse(row.field_mappings) as Record<string, string>,
     async: row.async === 1,
     createdAt: row.created_at,
     enabled: row.enabled === 1,
@@ -180,7 +186,9 @@ export function transformPayload(
 }
 
 function getNestedValue(obj: unknown, path: string): unknown {
+  const MAX_PATH_DEPTH = 10;
   const parts = path.split(".");
+  if (parts.length > MAX_PATH_DEPTH) return undefined;
   let current = obj;
   for (const part of parts) {
     if (current === null || current === undefined) return undefined;
