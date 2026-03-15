@@ -227,8 +227,8 @@ export class BusinessCentralConnector implements ERPConnector {
     let raw: Record<string, unknown>[];
     try {
       raw = await this.odata<Record<string, unknown>>("bomComponents", params);
-    } catch {
-      // BOM endpoint may not exist or item has no BOM
+    } catch (err) {
+      log(`BOM components unavailable for item ${params.$filter ?? ""}: ${err}`);
       return [];
     }
 
@@ -293,8 +293,8 @@ export class BusinessCentralConnector implements ERPConnector {
         }
       }
       log(`enriched vendor lead times from ${vendorLeadTimes.size} vendors in item vendor catalog`);
-    } catch {
-      log("itemVendors entity not available — vendor lead times will be 0");
+    } catch (err) {
+      log(`itemVendors fetch failed (vendor lead times will be 0): ${err}`);
     }
 
     return raw.map((r) => {
@@ -459,8 +459,8 @@ export class BusinessCentralConnector implements ERPConnector {
         waitTimeMinutes: Number(r.waitTime ?? 0),
         moveTimeMinutes: Number(r.moveTime ?? 0),
       }));
-    } catch {
-      // Routing lines endpoint may not be available
+    } catch (err) {
+      log(`routing lines unavailable: ${err}`);
       return [];
     }
   }
@@ -481,8 +481,8 @@ export class BusinessCentralConnector implements ERPConnector {
           $select: "no,name,workCenterNo,capacity,efficiency,blocked,directUnitCost,setupTime",
         });
         log(`fetched ${machineCentersRaw.length} machine centers`);
-      } catch {
-        log("machine centers entity not available — skipping");
+      } catch (err) {
+        log(`machine centers fetch failed — skipping: ${err}`);
       }
 
       // Group machine centers by work center
