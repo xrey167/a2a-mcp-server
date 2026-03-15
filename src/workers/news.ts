@@ -649,13 +649,17 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       let failedFeeds = 0;
       for (const feedUrl of REGULATORY_FEEDS) {
         try {
-          validateUrlNotInternal(feedUrl);
           const articles = await fetchRss(feedUrl, 50, 10000);
           allArticles.push(...articles);
         } catch (err) {
           failedFeeds++;
-          process.stderr.write(`[${NAME}] regulatory_scan: feed failed ${feedUrl}: ${err}\n`);
+          const errMsg = err instanceof Error ? err.message.replace(/\n/g, " ") : String(err);
+          process.stderr.write(`[${NAME}] regulatory_scan: feed failed ${feedUrl}: ${errMsg}\n`);
         }
+      }
+      // Log summary if there were failures
+      if (failedFeeds > 0) {
+        process.stderr.write(`[${NAME}] regulatory_scan: ${failedFeeds}/${REGULATORY_FEEDS.length} feeds failed\n`);
       }
       // Also classify any articles passed via args
       if (args.articles && Array.isArray(args.articles)) {
