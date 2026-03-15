@@ -797,7 +797,7 @@ const OrchestratorSchemas = {
   erp_connector_renew: z.object({
     type: z.enum(["business-central"]),
     webhookExpiresAt: z.string().optional(),
-    notificationUrl: z.string().url().optional(),
+    notificationUrl: z.url().optional(),
     resource: z.string().optional(),
   }).strict(),
   erp_connector_renew_due: z.object({
@@ -2101,7 +2101,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "SOP_MATCH_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "SOP_MATCH_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2140,7 +2140,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "SOP_SCENARIO_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "SOP_SCENARIO_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2181,7 +2181,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "ESG_SCORE_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "ESG_SCORE_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);

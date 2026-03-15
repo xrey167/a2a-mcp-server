@@ -540,7 +540,7 @@ async function main() {
 
   // Graceful shutdown
   const cleanup = () => {
-    clearInterval(sessionPruneInterval);
+    if (sessionPruneInterval) clearInterval(sessionPruneInterval);
     log("shutting down...");
     closeTransport();
     shutdownWorkers();
