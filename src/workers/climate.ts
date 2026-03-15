@@ -762,7 +762,13 @@ async function generateClimateReport(
 
   const quakeList = quakes.status === "fulfilled" ? quakes.value : [];
   const fireList = fires.status === "fulfilled" ? fires.value : [];
-  const eventList = events.status === "fulfilled" ? events.value : [];
+  const rawEventList = events.status === "fulfilled" ? events.value : [];
+
+  const dataQuality = {
+    earthquakes: quakes.status === "fulfilled" ? "ok" : `failed: ${quakes.reason}`,
+    wildfires: fires.status === "fulfilled" ? "ok" : `failed: ${fires.reason}`,
+    naturalEvents: events.status === "fulfilled" ? "ok" : `failed: ${events.reason}`,
+  };
 
   if (quakes.status === "rejected") {
     process.stderr.write(`[${NAME}] climate_report: fetchEarthquakes failed: ${quakes.reason}\n`);
@@ -774,9 +780,14 @@ async function generateClimateReport(
     process.stderr.write(`[${NAME}] climate_report: fetchNaturalEvents failed: ${events.reason}\n`);
   }
 
-  // Build summary for the AI prompt
+  // Geo-filter EONET events by haversine when coordinates are provided
+  const eventList = (lat !== undefined && lon !== undefined)
+    ? rawEventList.filter(e => e.lat !== 0 && e.lon !== 0 && haversineKm(lat, lon, e.lat, e.lon) <= 500)
+    : rawEventList;
+
+  // Build summary for the AI prompt — use toSorted to avoid mutating quakeList in place
   const topQuakes = quakeList
-    .sort((a, b) => b.magnitude - a.magnitude)
+    .toSorted((a, b) => b.magnitude - a.magnitude)
     .slice(0, 5)
     .map(q => `M${q.magnitude} at ${q.place} (depth ${q.depth}km${q.tsunami ? ", TSUNAMI ALERT" : ""})`)
     .join("; ");
@@ -822,10 +833,11 @@ Cover: notable seismic activity, wildfire situation, other active hazards, and a
   return safeStringify({
     location,
     period: `last ${days} days`,
+    dataQuality,
     earthquakeCount: quakeList.length,
     wildfireHotspots: fireCount,
     activeNaturalEvents: eventList.length,
-    topEarthquakes: quakeList.slice(0, 5),
+    topEarthquakes: quakeList.toSorted((a, b) => b.magnitude - a.magnitude).slice(0, 5),
     eventsByCategory,
     analysis,
   }, 2);

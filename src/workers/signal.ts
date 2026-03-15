@@ -25,7 +25,6 @@ import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round, haversineKm } from "../worker-utils.js";
 import { callPeer } from "../peer.js";
 import { sanitizeForPrompt } from "../prompt-sanitizer.js";
-import { safeParse } from "../safe-json.js";
 
 const PORT = 8091;
 const NAME = "signal-agent";
@@ -1238,7 +1237,14 @@ Produce a concise threat brief with these sections:
 4. **Correlation Patterns** (any cross-domain patterns visible in the data)
 5. **Recommended Actions** (2-4 concrete steps)`;
 
-  return callPeer("ask_claude", { prompt }, prompt, THREAT_BRIEF_TIMEOUT);
+  let brief: string;
+  try {
+    brief = await callPeer("ask_claude", { prompt }, prompt, THREAT_BRIEF_TIMEOUT);
+  } catch (err) {
+    process.stderr.write(`[${NAME}] threat_brief: callPeer ask_claude failed: ${err}\n`);
+    throw new Error(`threat_brief: AI synthesis failed: ${err}`);
+  }
+  return brief;
 }
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
@@ -1341,6 +1347,16 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
         const liveSignals: Array<{ type: string; source: string; title: string; severity: string; country: string; timestamp: string }> = [];
 
+        if (c2Raw.status === "rejected") {
+          process.stderr.write(`[${NAME}] threat_brief: fetchFeodoC2 failed: ${c2Raw.reason}\n`);
+        }
+        if (urlsRaw.status === "rejected") {
+          process.stderr.write(`[${NAME}] threat_brief: fetchUrlhaus failed: ${urlsRaw.reason}\n`);
+        }
+        if (outagesRaw.status === "rejected") {
+          process.stderr.write(`[${NAME}] threat_brief: fetchIodaOutages failed: ${outagesRaw.reason}\n`);
+        }
+
         if (c2Raw.status === "fulfilled") {
           for (const entry of c2Raw.value.entries.slice(0, 20)) {
             liveSignals.push({
@@ -1378,18 +1394,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           }
         }
 
-        if (liveSignals.length === 0) return "Error: no signals available — live feeds returned no data and no signals were supplied";
+        if (liveSignals.length === 0) {
+          throw new Error("threat_brief: no signals available — all live feeds failed and no signals were supplied");
+        }
         signals = liveSignals;
       }
 
       const selected = signals.slice(0, maxSignals);
-
-      try {
-        return await generateThreatBrief(selected, context);
-      } catch (err) {
-        process.stderr.write(`[${NAME}] threat_brief: generateThreatBrief failed: ${err instanceof Error ? err.message : String(err)}\n`);
-        return `Error: AI brief generation failed — ${err instanceof Error ? err.message : String(err)}`;
-      }
+      return await generateThreatBrief(selected, context);
     }
 
     default:
