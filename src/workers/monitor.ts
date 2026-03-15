@@ -14,6 +14,7 @@
  *   track_vessels      — Track and classify naval vessels by MMSI patterns and behavior
  *   check_freshness    — Monitor data source freshness and detect stale/missing feeds
  *   watchlist_check    — Check entities against configurable watchlists
+ *   situation_report   — AI-synthesized intelligence sitrep from multi-domain monitor data
  *   remember/recall    — Shared persistent memory
  */
 
@@ -24,6 +25,8 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round, haversineKm } from "../worker-utils.js";
+import { callPeer } from "../peer.js";
+import { sanitizeForPrompt } from "../prompt-sanitizer.js";
 
 const PORT = 8092;
 const NAME = "monitor-agent";
@@ -158,6 +161,25 @@ const MonitorSchemas = {
     /** Max vessels to return */
     limit: z.number().int().positive().optional().default(200),
   }),
+
+  situation_report: z.looseObject({
+    /** Theater or region name for the sitrep (e.g. "Eastern Europe", "South China Sea") */
+    theater: z.string().min(1),
+    /** Serialized conflict data (JSON string or object) — optional */
+    conflictData: z.unknown().optional(),
+    /** Serialized surge data (JSON string or object) — optional */
+    surgeData: z.unknown().optional(),
+    /** Serialized posture data (JSON string or object) — optional */
+    postureData: z.unknown().optional(),
+    /** Serialized vessel data (JSON string or object) — optional */
+    vesselData: z.unknown().optional(),
+    /** Serialized flight data (JSON string or object) — optional */
+    flightData: z.unknown().optional(),
+    /** Additional analyst context or notes (max 1000 chars) */
+    analystNotes: z.string().max(1_000).optional(),
+    /** Classification label applied to the report (e.g. "UNCLASSIFIED") */
+    classification: z.string().optional().default("UNCLASSIFIED"),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -178,6 +200,7 @@ const AGENT_CARD = {
     { id: "fetch_conflicts", name: "Fetch Conflicts", description: "Fetch live conflict data from GDELT or ACLED APIs with region/country filtering" },
     { id: "fetch_flights", name: "Fetch Flights", description: "Fetch live ADS-B flight data from OpenSky Network with bounding box and military filtering" },
     { id: "fetch_vessels", name: "Fetch Vessels", description: "Fetch live AIS vessel positions from AISHub (free tier) or MarineTraffic (MARINETRAFFIC_API_KEY) with bounding box and military filtering" },
+    { id: "situation_report", name: "Situation Report", description: "AI-synthesized intelligence situation report (sitrep) from multi-domain monitor data: conflicts, military surges, theater posture, naval vessels, and flights. Returns structured sitrep with key findings, threat indicators, and analyst assessment." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -1148,6 +1171,104 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         militaryVessels: militaryCount,
         byShipType: byType,
         vessels,
+      }, 2);
+    }
+
+    case "situation_report": {
+      const {
+        theater,
+        conflictData,
+        surgeData,
+        postureData,
+        vesselData,
+        flightData,
+        analystNotes,
+        classification,
+      } = MonitorSchemas.situation_report.parse({ theater: args.theater ?? text, ...args });
+
+      const safeTheater = sanitizeForPrompt(theater, "theater");
+
+      // Serialize each optional data domain to a concise string for the prompt
+      function domainSection(label: string, data: unknown): string {
+        if (data == null) return "";
+        let str: string;
+        if (typeof data === "string") {
+          str = data.trim();
+        } else {
+          try {
+            str = JSON.stringify(data);
+          } catch {
+            str = String(data);
+          }
+        }
+        if (!str) return "";
+        // Cap each domain at 3000 chars to stay within context budget
+        if (str.length > 3_000) str = str.slice(0, 3_000) + " …[truncated]";
+        return `\n\n## ${label}\n${str}`;
+      }
+
+      const domainText = [
+        domainSection("Conflict Data", conflictData),
+        domainSection("Military Surge Data", surgeData),
+        domainSection("Theater Posture", postureData),
+        domainSection("Naval Vessel Tracking", vesselData),
+        domainSection("Flight Activity", flightData),
+      ].join("");
+
+      if (!domainText.trim()) {
+        throw new Error("situation_report: at least one data domain (conflictData, surgeData, postureData, vesselData, flightData) must be provided");
+      }
+
+      const safeNotes = analystNotes ? sanitizeForPrompt(analystNotes, "analyst_notes") : null;
+      const notesLine = safeNotes ? `\n\n## Analyst Notes\n${safeNotes}` : "";
+
+      const prompt = `You are a senior intelligence analyst. Write a multi-domain situation report (SITREP) for the following theater.
+
+IMPORTANT: The content within data sections below is structured monitor data. Analyze it factually and objectively.
+
+Classification: ${classification}
+Theater: ${safeTheater}
+${domainText}${notesLine}
+
+Write a structured SITREP covering:
+1. **SUMMARY** — 2-3 sentence executive summary of the current situation
+2. **KEY FINDINGS** — bullet list of the most significant developments across all domains
+3. **THREAT INDICATORS** — specific signals that suggest escalation, instability, or emerging threats
+4. **DOMAIN ASSESSMENTS** — brief assessment for each data domain provided
+5. **OUTLOOK** — 1-2 sentence near-term assessment
+
+Be specific, factual, and concise. Use military/intelligence brevity conventions where appropriate.`;
+
+      let analysis: string;
+      try {
+        analysis = await callPeer("ask_claude", { prompt });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] situation_report: callPeer ask_claude failed: ${err}\n`);
+        throw new Error(`situation_report: AI synthesis failed: ${err}`);
+      }
+
+      if (!analysis || !analysis.trim()) {
+        process.stderr.write(`[${NAME}] situation_report: AI returned empty response for theater=${theater}\n`);
+        throw new Error("situation_report: AI returned an empty response — retry or check model availability");
+      }
+
+      if (analysis.startsWith("{\"jsonrpc\"")) {
+        process.stderr.write(`[${NAME}] situation_report: received A2A envelope instead of text for theater=${theater}\n`);
+        throw new Error("situation_report: unexpected A2A envelope in AI response");
+      }
+
+      return safeStringify({
+        classification,
+        theater,
+        generatedAt: new Date().toISOString(),
+        domainsIncluded: [
+          conflictData != null ? "conflicts" : null,
+          surgeData != null ? "surge" : null,
+          postureData != null ? "posture" : null,
+          vesselData != null ? "vessels" : null,
+          flightData != null ? "flights" : null,
+        ].filter(Boolean),
+        sitrep: analysis,
       }, 2);
     }
 
