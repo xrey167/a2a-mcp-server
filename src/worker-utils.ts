@@ -34,7 +34,16 @@ export function validateUrlNotInternal(urlStr: string): void {
   const hostname = parsed.hostname.toLowerCase();
 
   // Block localhost variants
-  if (hostname === "localhost" || hostname === "[::1]" || hostname === "0.0.0.0") {
+  // Note: URL.hostname strips brackets from IPv6 literals (e.g., "::1" not "[::1]")
+  if (
+    hostname === "localhost" ||
+    hostname === "::1" ||           // IPv6 loopback
+    hostname === "::ffff:127.0.0.1" || // IPv4-mapped loopback
+    hostname === "0.0.0.0" ||
+    /^fc[0-9a-f]{2}:/i.test(hostname) || // fc00::/7 unique local IPv6
+    /^fd[0-9a-f]{2}:/i.test(hostname) || // fd00::/8 unique local IPv6
+    /^fe80:/i.test(hostname)            // link-local IPv6
+  ) {
     throw new Error(`SSRF blocked: private/internal address "${hostname}"`);
   }
 

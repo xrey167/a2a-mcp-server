@@ -179,8 +179,8 @@ export function getBreaker(name: string, options?: Partial<CircuitBreakerOptions
 }
 
 /** Get stats for all circuit breakers. */
-export function getAllBreakerStats(): Record<string, ReturnType<CircuitBreaker["stats"]>> {
-  const result: Record<string, ReturnType<CircuitBreaker["stats"]>> = {};
+export function getAllBreakerStats(): Record<string, CircuitBreaker["stats"]> {
+  const result: Record<string, CircuitBreaker["stats"]> = {};
   for (const [name, breaker] of breakers) {
     result[name] = breaker.stats;
   }

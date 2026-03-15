@@ -33,7 +33,7 @@ const NAME = "infra-agent";
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const InfraSchemas = {
-  cascade_analysis: z.object({
+  cascade_analysis: z.looseObject({
     nodes: z.array(z.object({
       id: z.string(),
       type: z.string(),
@@ -52,9 +52,9 @@ const InfraSchemas = {
     failedNodes: z.array(z.string()).min(1),
     maxDepth: z.number().int().positive().optional().default(3),
     significanceThreshold: z.number().min(0).max(1).optional().default(0.05),
-  }).passthrough(),
+  }),
 
-  supply_chain_map: z.object({
+  supply_chain_map: z.looseObject({
     routes: z.array(z.object({
       id: z.string().optional(),
       name: z.string(),
@@ -70,9 +70,9 @@ const InfraSchemas = {
       commodity: z.string().optional().default(""),
       volumePerYear: z.number().optional().default(0),
     })).min(1),
-  }).passthrough(),
+  }),
 
-  chokepoint_assess: z.object({
+  chokepoint_assess: z.looseObject({
     chokepoints: z.array(z.object({
       name: z.string(),
       lat: z.number().optional(),
@@ -85,9 +85,9 @@ const InfraSchemas = {
       threats: z.array(z.string()).optional().default([]),
       controllingEntities: z.array(z.string()).optional().default([]),
     })).min(1),
-  }).passthrough(),
+  }),
 
-  redundancy_score: z.object({
+  redundancy_score: z.looseObject({
     region: z.string(),
     infrastructure: z.object({
       submarineCables: z.number().optional().default(0),
@@ -109,16 +109,16 @@ const InfraSchemas = {
       railConnections: z.number().optional().default(2),
       datacenters: z.number().optional().default(2),
     }).optional().default({}),
-  }).passthrough(),
+  }),
 
-  load_infrastructure: z.object({
+  load_infrastructure: z.looseObject({
     filter: z.object({
       types: z.array(z.string()).optional(),
       region: z.string().optional(),
     }).optional().default({}),
-  }).passthrough(),
+  }),
 
-  dependency_graph: z.object({
+  dependency_graph: z.looseObject({
     nodes: z.array(z.object({
       id: z.string(),
       type: z.string(),
@@ -133,7 +133,7 @@ const InfraSchemas = {
     })),
     query: z.enum(["stats", "critical_nodes", "single_points_of_failure", "impact_of", "depends_on"]).optional().default("stats"),
     targetNode: z.string().optional(),
-  }).passthrough(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -847,7 +847,7 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
         const normalizedFilter = new Set(filter.types.map(t => normalizeNodeType(t)));
         nodes = nodes.filter(n => normalizedFilter.has(normalizeNodeType(n.type)));
         const nodeIds = new Set(nodes.map(n => n.id));
-        edges = edges.filter(e => nodeIds.has(e.from) || nodeIds.has(e.to));
+        edges = edges.filter(e => nodeIds.has(e.from) && nodeIds.has(e.to));
       }
 
       if (filter.region) {
@@ -860,7 +860,7 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
           return country.includes(regionLower) || landing.includes(regionLower) || name.includes(regionLower);
         });
         const nodeIds = new Set(nodes.map(n => n.id));
-        edges = edges.filter(e => nodeIds.has(e.from) || nodeIds.has(e.to));
+        edges = edges.filter(e => nodeIds.has(e.from) && nodeIds.has(e.to));
       }
 
       return safeStringify({

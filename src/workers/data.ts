@@ -25,19 +25,19 @@ const NAME = "data-agent";
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const DataSchemas = {
-  parse_csv: z.object({
+  parse_csv: z.looseObject({
     csv: z.string().min(1),
     delimiter: z.string().optional().default(","),
     hasHeader: z.boolean().optional().default(true),
     limit: z.number().int().positive().optional(),
-  }).passthrough(),
+  }),
 
-  parse_json: z.object({
+  parse_json: z.looseObject({
     json: z.string().min(1),
     query: z.string().optional(),
-  }).passthrough(),
+  }),
 
-  transform_data: z.object({
+  transform_data: z.looseObject({
     data: z.unknown(),
     operations: z.array(z.object({
       op: z.enum(["map", "filter", "sort", "group", "aggregate", "flatten", "unique", "take", "skip", "rename", "pick", "omit"]),
@@ -47,21 +47,21 @@ const DataSchemas = {
       direction: z.enum(["asc", "desc"]).optional().default("asc"),
       fn: z.enum(["sum", "avg", "min", "max", "count", "concat"]).optional(),
     })),
-  }).passthrough(),
+  }),
 
-  analyze_data: z.object({
+  analyze_data: z.looseObject({
     data: z.unknown(),
     fields: z.array(z.string()).optional(),
     percentiles: z.array(z.number()).optional().default([25, 50, 75, 90, 95, 99]),
-  }).passthrough(),
+  }),
 
-  pivot_table: z.object({
+  pivot_table: z.looseObject({
     data: z.unknown(),
     rowField: z.string(),
     colField: z.string().optional(),
     valueField: z.string(),
     aggregation: z.enum(["sum", "avg", "count", "min", "max"]).optional().default("sum"),
-  }).passthrough(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -244,6 +244,7 @@ function applyOperations(data: unknown, operations: Array<{
         break;
       }
       case "unique": {
+        if (current.length > 50_000) throw new Error("unique: input exceeds 50,000 rows");
         if (op.field) {
           const seen = new Set<string>();
           current = current.filter(row => {
