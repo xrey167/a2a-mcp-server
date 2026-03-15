@@ -93,6 +93,23 @@ const NewsSchemas = {
     /** Max articles to include in summary (default 20) */
     maxArticles: z.number().int().positive().optional().default(20),
   }),
+  trending_topics: z.looseObject({
+    /** RSS feed URLs to fetch articles from (alternative to articles) */
+    urls: z.array(z.url()).max(20).optional(),
+    /** Pre-fetched articles to analyze (alternative to urls) */
+    articles: z.array(z.object({
+      title: z.string(),
+      description: z.string().optional().default(""),
+      source: z.string().optional().default(""),
+      link: z.string().optional().default(""),
+      pubDate: z.string().optional().default(""),
+    })).optional(),
+    /** Return top N topics (default 10) */
+    topN: z.number().int().min(1).max(50).optional().default(10),
+    /** Minimum article count for a topic to appear in results (default 2) */
+    minCount: z.number().int().min(1).optional().default(2),
+  }),
+
   news_brief: z.looseObject({
     /** RSS feed URLs to fetch and analyze */
     urls: z.array(z.url()).max(20).optional(),
@@ -194,6 +211,7 @@ const AGENT_CARD = {
     { id: "detect_signals", name: "Detect Signals", description: "Detect anomalous patterns: topic velocity spikes, emerging stories, source concentration" },
     { id: "regulatory_scan", name: "Regulatory Scan", description: "Scan regulatory RSS feeds for changes in supply chain, ESG, automotive, data, and trade regulations. Returns classified alerts with impact levels." },
     { id: "summarize_news", name: "Summarize News", description: "Fetch RSS feeds or accept pre-fetched articles, then produce an AI-generated news briefing. Optional focus parameter narrows the summary to a specific topic or domain." },
+    { id: "trending_topics", name: "Trending Topics", description: "Identify the most frequently discussed topics across a set of news articles or RSS feeds. Uses token frequency analysis on titles and descriptions to rank topics, then returns the top N with supporting article counts and representative headlines. Pass urls to fetch live feeds or articles for pre-fetched data." },
     { id: "news_brief", name: "News Brief", description: "Fetch RSS feeds, classify articles, detect signals, and return an AI-written intelligence brief. Pass urls to fetch live feeds, optional topic to filter, and optional focus to steer the summary." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
@@ -380,6 +398,64 @@ function classifyArticle(title: string, description: string): { category: string
   }
 
   return { category: bestCategory, importance, score };
+}
+
+// ── Stop Words (for trending topics TF analysis) ─────────────────
+
+const STOP_WORDS = new Set([
+  "the","a","an","and","or","but","in","on","at","to","for","of","with","by","from",
+  "is","are","was","were","be","been","being","have","has","had","do","does","did",
+  "will","would","could","should","may","might","can","shall","not","it","its","this",
+  "that","these","those","they","them","their","he","she","his","her","we","our","you",
+  "your","as","so","if","then","than","when","where","who","how","what","which","also",
+  "said","says","say","after","before","into","over","about","more","up","out","new",
+  "all","both","each","few","more","most","other","some","such","no","nor","only",
+  "own","same","too","very","just","via",
+]);
+
+// ── Trending Topics (token-frequency analysis) ───────────────────
+
+interface TrendingTopic {
+  topic: string;
+  count: number;
+  articles: Array<{ title: string; source: string; link: string }>;
+}
+
+function extractTrendingTopics(
+  articles: Array<{ title: string; description?: string; source?: string; link?: string }>,
+  topN: number,
+  minCount: number,
+): TrendingTopic[] {
+  // Build token → article index (each article counted at most once per token)
+  const tokenArticles = new Map<string, Array<{ title: string; source: string; link: string }>>();
+
+  for (const article of articles) {
+    const text = `${article.title} ${article.description ?? ""}`;
+    const tokens = new Set(
+      text.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter(t => t.length > 3 && !STOP_WORDS.has(t))
+    );
+    for (const token of tokens) {
+      if (!tokenArticles.has(token)) tokenArticles.set(token, []);
+      (tokenArticles.get(token) as Array<{ title: string; source: string; link: string }>).push({
+        title: article.title,
+        source: article.source ?? "",
+        link: article.link ?? "",
+      });
+    }
+  }
+
+  return [...tokenArticles.entries()]
+    .filter(([, arts]) => arts.length >= minCount)
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, topN)
+    .map(([topic, arts]) => ({
+      topic,
+      count: arts.length,
+      articles: arts.slice(0, 3), // up to 3 representative headlines
+    }));
 }
 
 // ── Clustering (Jaccard Similarity) ──────────────────────────────
@@ -894,6 +970,44 @@ ${articleList}`;
         process.stderr.write(`[${NAME}] summarize_news: callPeer("ask_claude") failed (${selected.length} articles fetched): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
         return `Error: AI summarization failed — ${err instanceof Error ? err.message : String(err)}. The ${selected.length} articles were fetched successfully.`;
       }
+    }
+
+    case "trending_topics": {
+      const { urls, articles: argsArticles, topN, minCount } = NewsSchemas.trending_topics.parse(args);
+
+      // Gather articles: from feed URLs and/or pre-fetched array
+      let rawArticles: Article[] = [];
+      if (argsArticles && argsArticles.length > 0) {
+        rawArticles = argsArticles as Article[];
+      }
+      if (urls && urls.length > 0) {
+        const feedErrors: string[] = [];
+        const results = await Promise.allSettled(urls.map(url => fetchRss(url, 100, 15000)));
+        results.forEach((r, i) => {
+          if (r.status === "fulfilled") {
+            rawArticles.push(...r.value);
+          } else {
+            const reason = r.status === "rejected" ? r.reason : undefined;
+            const msg = `${urls[i]}: ${reason instanceof Error ? reason.message : String(reason)}`;
+            process.stderr.write(`[${NAME}] trending_topics: feed failed — ${msg}\n`);
+            feedErrors.push(msg);
+          }
+        });
+        if (rawArticles.length === 0) {
+          return safeStringify({ totalArticles: 0, topics: [], error: `All feeds failed: ${feedErrors.join("; ")}` }, 2);
+        }
+      }
+
+      if (rawArticles.length === 0) {
+        return safeStringify({ totalArticles: 0, topics: [], error: "No articles provided — pass urls or articles" }, 2);
+      }
+
+      // Deduplicate before analysis
+      const articles = deduplicateArticles(rawArticles);
+      const topics = extractTrendingTopics(articles, topN, minCount);
+
+      process.stderr.write(`[${NAME}] trending_topics: ${articles.length} articles → ${topics.length} topics (topN=${topN}, minCount=${minCount})\n`);
+      return safeStringify({ totalArticles: articles.length, topN, minCount, topics }, 2);
     }
 
     case "news_brief": {
