@@ -190,7 +190,6 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
         }
         const fileList = safeFiles.join(", ");
         const depthFlag = detail === "brief" ? "briefly (2-3 sentences)" : "in detail (purpose, components, data flow)";
-        const safeDetail = sanitizeUserInput(detail, "detail_level");
         const result = spawnSync(
           "codex", ["exec", "--full-auto", `Explain ${depthFlag} what these files do: ${fileList}`],
           { encoding: "utf-8", timeout: CODEX_TIMEOUT }
