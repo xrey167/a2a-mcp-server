@@ -7,6 +7,37 @@ import { z } from "zod";
 import { sendTask } from "./a2a.js";
 import { runClaudeCLI } from "./claude-cli.js";
 import { sanitizePath } from "./path-utils.js";
+import { validateUrlNotInternal } from "./worker-utils.js";
+
+// ── Helper Functions ───────────────────────────────────────────────
+
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10MB
+
+/** Read response body with a hard byte limit. Returns null if limit exceeded. */
+async function readBodyWithLimit(res: Response, maxBytes: number): Promise<string | null> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let chunks: string[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        reader.cancel();
+        return null;
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+    // Flush decoder
+    chunks.push(decoder.decode());
+    return chunks.join("");
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 export interface SkillArgs {
   [key: string]: unknown;
@@ -37,13 +68,13 @@ const WriteFileSchema = z.object({
 
 const FetchUrlSchema = z.object({
   url: z.string().url("invalid URL"),
-  format: z.enum(["text", "json"]).optional().default("text"),
+  format: z.enum(["text", "json"]).default("text"),
 }).strict();
 
 const CallApiSchema = z.object({
   url: z.string().url("invalid URL"),
   method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]),
-  headers: z.record(z.string()).optional().default({}),
+  headers: z.record(z.string()).default({}),
   body: z.record(z.unknown()).optional(),
 }).strict();
 
@@ -145,6 +176,22 @@ const writeFile: Skill = {
 
 // ── Web / HTTP ────────────────────────────────────────────────────
 
+/** Block private/internal hostnames to prevent SSRF in local skill fallbacks. */
+function blockPrivateUrl(url: string): string | null {
+  try {
+    const { hostname } = new URL(url);
+    const h = hostname.toLowerCase();
+    if (
+      h === "localhost" || /^127\./.test(h) || /^10\./.test(h) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /^192\.168\./.test(h) ||
+      /^169\.254\./.test(h) || h === "::1" || /^fd[0-9a-f]{2}:/i.test(h) || /^fe80:/i.test(h)
+    ) return `Blocked: private/internal URLs are not allowed (${hostname})`;
+    return null;
+  } catch {
+    return "Blocked: invalid URL";
+  }
+}
+
 const fetchUrl: Skill = {
   id: "fetch_url",
   name: "Fetch URL",
@@ -159,11 +206,30 @@ const fetchUrl: Skill = {
   },
   run: async (raw) => {
     const { url, format } = validate(FetchUrlSchema, raw);
-    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    // SSRF prevention
+    try {
+      validateUrlNotInternal(url);
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(30_000),
+      redirect: "manual",
+    });
     if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+    // Check content-length header
+    const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
+    if (contentLength > MAX_RESPONSE_BYTES) {
+      return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
+    }
+    // Stream body with byte limit
+    const body = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+    if (body === null) {
+      return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
+    }
     return format === "json"
-      ? JSON.stringify(await res.json(), null, 2)
-      : await res.text();
+      ? JSON.stringify(JSON.parse(body), null, 2)
+      : body;
   },
 };
 
@@ -183,13 +249,25 @@ const callApi: Skill = {
   },
   run: async (raw) => {
     const { url, method, headers, body } = validate(CallApiSchema, raw);
+    // SSRF prevention
+    try {
+      validateUrlNotInternal(url);
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
     const res = await fetch(url, {
       method,
       headers: { "Content-Type": "application/json", ...headers },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(30_000),
+      redirect: "manual",
     });
-    return `HTTP ${res.status}\n${await res.text()}`;
+    // Stream body with byte limit
+    const responseBody = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+    if (responseBody === null) {
+      return `HTTP ${res.status}\nResponse too large: exceeded ${MAX_RESPONSE_BYTES} byte limit`;
+    }
+    return `HTTP ${res.status}\n${responseBody}`;
   },
 };
 
@@ -220,6 +298,7 @@ const askClaude: Skill = {
         messages: [{ role: "user", content: prompt }],
       });
       const block = message.content[0];
+      if (!block) return "";
       return block.type === "text" ? block.text : JSON.stringify(block);
     } catch {
       return await runClaudeCLI(prompt, model);
