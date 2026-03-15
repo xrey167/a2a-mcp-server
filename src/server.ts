@@ -320,7 +320,7 @@ async function waitForWorker(w: typeof WORKERS[number], maxWaitMs = 10_000): Pro
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     try {
-      const res = await fetch(`http://localhost:${w.port}/healthz`);
+      const res = await fetch(`http://localhost:${w.port}/healthz`, { signal: AbortSignal.timeout(5_000) });
       if (res.ok) {
         workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
         return true;
@@ -2687,6 +2687,8 @@ function isSearchThrottled(sessionId: string): { allowed: boolean; remaining: nu
   }
 
   state.timestamps.push(now);
+  // Clean up map entries that are no longer active (after push so we don't delete a live entry)
+  if (state.timestamps.length === 0 && state.blocked === 0) { searchThrottle.delete(sessionId); }
   return { allowed: true, remaining: max - total - 1 };
 }
 
@@ -4710,6 +4712,7 @@ async function exchangeWizardMailboxOAuthCode(input: {
       "Accept": "application/json",
     },
     body: form.toString(),
+    signal: AbortSignal.timeout(10_000),
   });
   const data = await res.json().catch(() => ({})) as Record<string, unknown>;
   if (!res.ok) {

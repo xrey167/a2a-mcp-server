@@ -25,7 +25,12 @@ const log = createLogger("webhooks");
 
 function safeJsonParse(s: string, fallback: unknown = {}): unknown {
   try {
-    return JSON.parse(s);
+    const parsed: unknown = JSON.parse(s);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      log.warn("corrupted JSON in DB row (expected object)", { type: Array.isArray(parsed) ? "array" : typeof parsed, raw: s.slice(0, 100) });
+      return fallback;
+    }
+    return parsed;
   } catch (err) {
     log.warn("corrupted JSON in DB row", { raw: s.slice(0, 100), error: String(err) });
     return fallback;
