@@ -659,8 +659,9 @@ function startDesignWorkflow(args: Record<string, unknown>): string {
           }, { timeoutMs: 60_000 });
           conceptWithBrand = `${appConcept}\n\nBrand identity (use these tokens consistently across all screens):\n${brandRaw}`;
           lines.push(`Brand identity generated.\n`);
-        } catch {
+        } catch (err) {
           // Non-fatal: fall back to concept-only if brand generation fails
+          process.stderr.write(`[orchestrator] design_workflow: generate_brand failed (non-fatal, continuing without brand): ${err}\n`);
         }
       }
 
