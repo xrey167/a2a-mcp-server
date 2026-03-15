@@ -24,6 +24,13 @@ describe("URL validation (SSRF prevention)", () => {
     expect(isAllowedUrl("http://127.0.0.1:8081")).toBe(true);
   });
 
+  test("allows IPv6 loopback worker URLs", () => {
+    expect(isAllowedUrl("http://[::1]:8081")).toBe(true);
+    expect(isAllowedUrl("http://[::1]:8082")).toBe(true);
+    expect(isAllowedUrl("http://[::ffff:127.0.0.1]:8081")).toBe(true);
+    expect(isAllowedUrl("http://[::ffff:127.0.0.1]:8082")).toBe(true);
+  });
+
   test("blocks external URLs", () => {
     expect(isAllowedUrl("http://evil.com:8081")).toBe(false);
     expect(isAllowedUrl("https://api.example.com")).toBe(false);
@@ -36,6 +43,13 @@ describe("URL validation (SSRF prevention)", () => {
     expect(isAllowedUrl("http://localhost:3000")).toBe(false);
     expect(isAllowedUrl("http://localhost:9090")).toBe(false);
     expect(isAllowedUrl("http://localhost:80")).toBe(false);
+  });
+
+  test("blocks IPv6 loopback on non-worker ports", () => {
+    expect(isAllowedUrl("http://[::1]:22")).toBe(false);
+    expect(isAllowedUrl("http://[::1]:3000")).toBe(false);
+    expect(isAllowedUrl("http://[::ffff:127.0.0.1]:9090")).toBe(false);
+    expect(isAllowedUrl("http://[::ffff:127.0.0.1]:80")).toBe(false);
   });
 
   test("blocks malformed URLs", () => {
