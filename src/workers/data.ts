@@ -9,6 +9,8 @@
  *   transform_data — Apply map/filter/sort/group/aggregate operations on datasets
  *   analyze_data   — Compute statistics (mean, median, stddev, percentiles, correlations)
  *   pivot_table    — Create pivot table summaries from flat data
+ *   fetch_dataset  — Fetch a CSV or JSON dataset from a URL and parse it into structured records
+ *   explain_data   — Generate a plain-language AI explanation of a dataset or analysis result
  *   remember/recall — Shared persistent memory
  */
 
@@ -89,7 +91,7 @@ const DataSchemas = {
     context: z.string().max(500).optional(),
     /** Specific question to answer about the data */
     question: z.string().max(500).optional(),
-    /** Target audience for the explanation */
+    /** Target audience for the explanation — defaults to `analyst` */
     audience: z.enum(["analyst", "executive", "general"]).optional().default("analyst"),
   }),
 };
@@ -571,10 +573,19 @@ async function fetchDataset(
 
 // ── AI Synthesis ─────────────────────────────────────────────────
 
-const AI_WORKER_URL = process.env.A2A_WORKER_AI_URL ?? "http://localhost:8083";
-const EXPLAIN_TIMEOUT = 90_000;
+const EXPLAIN_TIMEOUT = 90_000; // allow extra time for large datasets; AI generation is the bottleneck
 
-/** Serialize a data section safely into an XML-escaped block for prompt injection. */
+/** Returns true if `s` is valid JSON that parses to an object or array — used to detect A2A envelope bleed-through. */
+function isJsonObject(s: string): boolean {
+  try {
+    const parsed = JSON.parse(s);
+    return parsed !== null && typeof parsed === "object";
+  } catch {
+    return false; // SyntaxError = plain text, which is what we want
+  }
+}
+
+/** Serialize a data section into an XML-escaped block safe for embedding in LLM prompts. */
 function buildDataSection(label: string, data: unknown): string {
   if (data === undefined || data === null) return "";
   try {
@@ -618,31 +629,27 @@ Write concisely. Avoid restating the raw numbers when a summary suffices. Tailor
 
   let result: string;
   try {
-    result = await callPeer(AI_WORKER_URL, "ask_claude", { prompt, ...(persona.model ? { model: persona.model } : {}) }, EXPLAIN_TIMEOUT);
+    result = await callPeer("ask_claude", { prompt, ...(persona.model ? { model: persona.model } : {}) }, "", EXPLAIN_TIMEOUT);
   } catch (err) {
     const isTimeout = err instanceof Error && (err.message.includes("timed out") || err.message.includes("AbortError") || err.constructor.name === "TimeoutError");
     const errMsg = err instanceof Error ? err.message : String(err);
     const msg = isTimeout
       ? "explain_data: AI call timed out after 90 s — model may be overloaded; retry or reduce input data"
       : `explain_data: AI call failed: ${errMsg}`;
+    process.stderr.write(`[${NAME}] ${msg}${err instanceof Error && err.stack ? `\n${err.stack}` : ""}\n`);
     throw new Error(msg, { cause: err });
   }
 
   if (!result || !result.trim()) {
-    process.stderr.write(`[${NAME}] explain_data: AI worker returned empty response\n`);
+    process.stderr.write(`[${NAME}] explain_data: AI worker returned empty response (raw length: ${result?.length ?? 0})\n`);
     throw new Error("explain_data: AI returned an empty response — retry or check model availability");
   }
 
-  // Guard against A2A envelope being returned instead of explanation text
-  try {
-    const parsed = JSON.parse(result);
-    if (parsed !== null && typeof parsed === "object") {
-      process.stderr.write(`[${NAME}] explain_data: AI worker returned structured JSON instead of explanation text\n`);
-      throw new Error("explain_data: AI worker returned structured JSON instead of explanation text");
-    }
-  } catch (e) {
-    if (!(e instanceof SyntaxError)) throw e;
-    // SyntaxError = not valid JSON = expected text response, continue
+  // Guard against A2A envelope being returned instead of explanation text.
+  // callPeer may surface the raw task response object if the AI worker returns structured JSON.
+  if (isJsonObject(result)) {
+    process.stderr.write(`[${NAME}] explain_data: AI worker returned structured JSON instead of explanation text\n`);
+    throw new Error("explain_data: AI worker returned structured JSON instead of explanation text");
   }
 
   return result.trim();
@@ -726,8 +733,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       try {
         parsed = DataSchemas.explain_data.parse({ data: args.data ?? text, ...args });
       } catch (err) {
-        process.stderr.write(`[${NAME}] explain_data: Zod parse error: ${err instanceof Error ? err.message : String(err)}\n`);
-        throw err;
+        const detail = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] explain_data: Zod parse error: ${detail}\n`);
+        throw new Error(`explain_data: invalid arguments — ${detail}`, { cause: err });
       }
       const { data, context, question, audience } = parsed;
       return generateDataExplanation(data, context, question, audience);
