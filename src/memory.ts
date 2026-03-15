@@ -32,7 +32,10 @@ END`);
 // Rebuild FTS index from existing data (idempotent, fast for small tables)
 try {
   db.run(`INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`);
-} catch {}
+} catch (e: unknown) {
+  const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+  process.stderr.write(`[memory] FTS5 rebuild failed, search may be degraded: ${msg}\n`);
+}
 
 /** Sanitize a path component to prevent directory traversal. */
 export function safeName(name: string): string {
@@ -61,13 +64,24 @@ function noteFile(agent: string, key: string) {
 }
 
 function safeUnlink(filePath: string) {
-  try { unlinkSync(filePath); } catch (e: any) { if (e?.code !== "ENOENT") process.stderr.write(`[memory] Obsidian sync failed: ${e}\n`); }
+  try {
+    unlinkSync(filePath);
+  } catch (e: unknown) {
+    if (e && typeof e === "object" && "code" in e && e.code === "ENOENT") return;
+    const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    process.stderr.write(`[memory] Obsidian sync failed: ${msg}\n`);
+  }
 }
 
 export const memory = {
   set(agent: string, key: string, value: string) {
     db.run(`INSERT OR REPLACE INTO memory VALUES (?,?,?,unixepoch())`, [agent, key, value]);
-    try { writeFileSync(noteFile(agent, key), `# ${key}\n\n${value}\n`); } catch (e) { process.stderr.write(`[memory] Obsidian sync failed: ${e}\n`); }
+    try {
+      writeFileSync(noteFile(agent, key), `# ${key}\n\n${value}\n`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+      process.stderr.write(`[memory] Obsidian sync failed: ${msg}\n`);
+    }
   },
   get(agent: string, key: string): string | null {
     return (db.query<{value:string},[string,string]>(
