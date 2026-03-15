@@ -13,6 +13,7 @@
  *   assess_exposure     — Assess population/infrastructure exposure to natural hazards
  *   climate_anomalies   — Detect climate anomalies from temperature/precipitation time series
  *   event_correlate     — Correlate natural events with infrastructure and conflict data
+ *   fetch_weather       — Fetch daily weather time series from OpenMeteo (free, no auth)
  *   remember/recall     — Shared persistent memory
  */
 
@@ -88,6 +89,19 @@ const ClimateSchemas = {
     zScoreThreshold: z.number().positive().optional().default(2),
   }),
 
+  fetch_weather: z.looseObject({
+    /** Latitude of the location */
+    lat: z.number().min(-90).max(90),
+    /** Longitude of the location */
+    lon: z.number().min(-180).max(180),
+    /** Historical days to include (1–92, default 30). Creates the baseline window for climate_anomalies */
+    pastDays: z.number().int().min(1).max(92).optional().default(30),
+    /** Forecast days to include (0–16, default 7) */
+    forecastDays: z.number().int().min(0).max(16).optional().default(7),
+    /** IANA timezone name for date alignment (default "auto" = infer from coordinates) */
+    timezone: z.string().optional().default("auto"),
+  }),
+
   event_correlate: z.looseObject({
     naturalEvents: z.array(z.object({
       type: z.string(),
@@ -126,6 +140,7 @@ const AGENT_CARD = {
     { id: "fetch_natural_events", name: "Fetch Natural Events", description: "Fetch natural events from NASA EONET: volcanoes, storms, floods, wildfires, etc." },
     { id: "assess_exposure", name: "Assess Exposure", description: "Assess population and infrastructure exposure to natural hazards by proximity" },
     { id: "climate_anomalies", name: "Climate Anomalies", description: "Detect temperature, precipitation, and wind anomalies using z-score against baseline" },
+    { id: "fetch_weather", name: "Fetch Weather", description: "Fetch daily weather time series (temperature, precipitation, wind) from OpenMeteo (free, no auth). Returns a series array directly compatible with climate_anomalies." },
     { id: "event_correlate", name: "Event Correlate", description: "Correlate natural events with infrastructure assets and conflict zones by proximity" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
@@ -640,6 +655,80 @@ function correlateEvents(
   };
 }
 
+// ── OpenMeteo Weather Fetcher ─────────────────────────────────────
+
+interface WeatherPoint {
+  date: string;
+  temperature: number;
+  precipitation: number;
+  windSpeed: number;
+  isForecast: boolean;
+}
+
+/**
+ * Fetch daily weather from OpenMeteo (free, no API key required).
+ * Returns a ClimateDataPoint-compatible series usable directly in climate_anomalies.
+ */
+async function fetchWeather(
+  lat: number,
+  lon: number,
+  pastDays: number,
+  forecastDays: number,
+  timezone: string,
+): Promise<{ location: { lat: number; lon: number; timezone: string }; series: WeatherPoint[]; units: Record<string, string> }> {
+  const params = new URLSearchParams({
+    latitude: String(lat),
+    longitude: String(lon),
+    daily: "temperature_2m_max,precipitation_sum,wind_speed_10m_max",
+    past_days: String(pastDays),
+    forecast_days: String(forecastDays),
+    timezone,
+  });
+  const url = `https://api.open-meteo.com/v1/forecast?${params}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
+  if (!res.ok) throw new Error(`OpenMeteo HTTP ${res.status}: ${res.statusText}`);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await res.json() as Record<string, unknown>;
+  } catch (err) {
+    throw new Error(`OpenMeteo response is not valid JSON: ${(err as Error).message}`);
+  }
+
+  const daily = body.daily as Record<string, unknown[]> | undefined;
+  if (!daily) throw new Error("OpenMeteo returned no daily data");
+
+  const dates = (daily.time ?? []) as string[];
+  const temps = (daily.temperature_2m_max ?? []) as (number | null)[];
+  const precip = (daily.precipitation_sum ?? []) as (number | null)[];
+  const wind = (daily.wind_speed_10m_max ?? []) as (number | null)[];
+
+  // The boundary between history and forecast: past_days days before today
+  const historyEnd = new Date();
+  historyEnd.setHours(0, 0, 0, 0);
+  historyEnd.setDate(historyEnd.getDate() - 1); // yesterday = last confirmed historical day
+
+  const series: WeatherPoint[] = dates.map((date, i) => ({
+    date,
+    temperature: temps[i] ?? 0,
+    precipitation: precip[i] ?? 0,
+    windSpeed: wind[i] ?? 0,
+    isForecast: new Date(date) > historyEnd,
+  }));
+
+  const dailyUnits = (body.daily_units ?? {}) as Record<string, string>;
+
+  return {
+    location: { lat, lon, timezone: String(body.timezone ?? timezone) },
+    series,
+    units: {
+      temperature: dailyUnits.temperature_2m_max ?? "°C",
+      precipitation: dailyUnits.precipitation_sum ?? "mm",
+      windSpeed: dailyUnits.wind_speed_10m_max ?? "km/h",
+    },
+  };
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
@@ -699,6 +788,28 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { series, baselinePeriod, zScoreThreshold } = ClimateSchemas.climate_anomalies.parse(args);
       const result = detectClimateAnomalies(series, baselinePeriod, zScoreThreshold);
       return safeStringify(result, 2);
+    }
+
+    case "fetch_weather": {
+      const { lat, lon, pastDays, forecastDays, timezone } = ClimateSchemas.fetch_weather.parse(args);
+      const result = await fetchWeather(lat, lon, pastDays, forecastDays, timezone);
+      const historicalCount = result.series.filter(s => !s.isForecast).length;
+      const forecastCount = result.series.filter(s => s.isForecast).length;
+      // Compute summary stats
+      const historical = result.series.filter(s => !s.isForecast);
+      const avgTemp = historical.length ? round(historical.reduce((s, p) => s + p.temperature, 0) / historical.length, 1) : null;
+      const totalPrecip = historical.length ? round(historical.reduce((s, p) => s + p.precipitation, 0), 1) : null;
+      const maxWind = historical.length ? round(Math.max(...historical.map(p => p.windSpeed)), 1) : null;
+      return safeStringify({
+        location: result.location,
+        units: result.units,
+        totalDays: result.series.length,
+        historicalDays: historicalCount,
+        forecastDays: forecastCount,
+        summary: { avgTemperature: avgTemp, totalPrecipitation: totalPrecip, maxWindSpeed: maxWind },
+        // series is directly usable as climate_anomalies.series input
+        series: result.series,
+      }, 2);
     }
 
     case "event_correlate": {
