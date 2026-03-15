@@ -32,7 +32,7 @@ const AiSchemas = {
 
   score_sentiment: z.looseObject({
     /** Text to analyse — max 20,000 characters */
-    text: z.string().min(1).refine(s => s.trim().length > 0, "text must not be blank"),
+    text: z.string().min(1).max(20_000).refine(s => s.trim().length > 0, "text must not be blank"),
     /** "document" returns one score for the whole text; "sentence" returns per-sentence scores */
     granularity: z.enum(["document", "sentence"]).optional().default("document"),
     /** Optional domain hint to improve accuracy, e.g. "product reviews", "financial news" */
@@ -298,12 +298,22 @@ ${granularity === "sentence" ? '- sentences: array of objects, one per sentence,
 ${safeText}
 </text_to_analyse>`;
 
-      const raw = await handleSkill("ask_claude", { prompt }, prompt);
+      let raw: string | Record<string, unknown>;
+      try {
+        raw = await handleSkill("ask_claude", { prompt }, prompt);
+      } catch (err) {
+        process.stderr.write(`[${NAME}] score_sentiment: ask_claude threw: ${err instanceof Error ? err.message : String(err)}\n`);
+        throw err;
+      }
       if (!raw || (typeof raw === "string" && raw.trim().length === 0)) {
         process.stderr.write(`[${NAME}] score_sentiment: empty response from ask_claude (granularity=${granularity}, textLen=${rawText.length})\n`);
         return "Error: score_sentiment returned an empty response — retry or check model availability";
       }
-      const rawStr = typeof raw === "string" ? raw : safeStringify(raw);
+      const rawStr = typeof raw === "string" ? raw : (safeStringify(raw) ?? "");
+      if (!rawStr.trim()) {
+        process.stderr.write(`[${NAME}] score_sentiment: safeStringify returned empty for non-string result\n`);
+        return "Error: score_sentiment: internal serialization error — retry";
+      }
       const stripped = rawStr.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
 
       // Validate JSON and required fields
@@ -314,14 +324,37 @@ ${safeText}
         process.stderr.write(`[${NAME}] score_sentiment: Claude returned non-JSON output (${stripped.slice(0, 80)}...)\n`);
         return "Error: score_sentiment: model did not return valid JSON — retry or try a shorter input";
       }
+
+      // Type guard: JSON.parse can return null, array, or primitive
+      if (parsed2 === null || typeof parsed2 !== "object" || Array.isArray(parsed2)) {
+        process.stderr.write(`[${NAME}] score_sentiment: unexpected JSON structure (type=${parsed2 === null ? "null" : Array.isArray(parsed2) ? "array" : typeof parsed2})\n`);
+        return "Error: score_sentiment: model returned unexpected JSON structure — retry";
+      }
       const p = parsed2 as Record<string, unknown>;
+
       const validSentiment = ["positive", "negative", "neutral", "mixed"].includes(p.sentiment as string);
-      const hasScore = typeof p.score === "number";
-      const hasConf = typeof p.confidence === "number";
-      const hasSentences = granularity !== "sentence" || (Array.isArray(p.sentences) && (p.sentences as unknown[]).length > 0);
-      if (!validSentiment || !hasScore || !hasConf || !hasSentences) {
-        process.stderr.write(`[${NAME}] score_sentiment: invalid response shape — sentiment=${p.sentiment}, score=${p.score}, confidence=${p.confidence}\n`);
-        return "Error: score_sentiment: model returned incomplete result — retry or check model availability";
+      const hasScore = typeof p.score === "number" && (p.score as number) >= -1 && (p.score as number) <= 1;
+      const hasConf = typeof p.confidence === "number" && (p.confidence as number) >= 0 && (p.confidence as number) <= 1;
+      const hasSentences = granularity !== "sentence" || (
+        Array.isArray(p.sentences) &&
+        (p.sentences as unknown[]).length > 0 &&
+        (p.sentences as unknown[]).every(s =>
+          s !== null && typeof s === "object" && !Array.isArray(s) &&
+          typeof (s as Record<string, unknown>).text === "string" &&
+          ["positive", "negative", "neutral", "mixed"].includes((s as Record<string, unknown>).sentiment as string) &&
+          typeof (s as Record<string, unknown>).score === "number"
+        )
+      );
+
+      const missing: string[] = [];
+      if (!validSentiment) missing.push(`sentiment (got ${JSON.stringify(p.sentiment)})`);
+      if (!hasScore) missing.push(`score in [-1,1] (got ${JSON.stringify(p.score)})`);
+      if (!hasConf) missing.push(`confidence in [0,1] (got ${JSON.stringify(p.confidence)})`);
+      if (!hasSentences) missing.push("sentences array with valid elements");
+
+      if (missing.length > 0) {
+        process.stderr.write(`[${NAME}] score_sentiment: invalid response shape — missing/invalid: ${missing.join(", ")}\n`);
+        return `Error: score_sentiment: model returned incomplete result — missing/invalid: ${missing.join(", ")}`;
       }
 
       return stripped;
