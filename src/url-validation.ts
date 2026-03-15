@@ -14,7 +14,8 @@ export function configureAllowedUrls(ports: number[], remoteUrls: string[]): voi
     try {
       allowedRemoteOrigins.add(new URL(url).origin);
     } catch (e) {
-      process.stderr.write(`[url-validation] malformed allowedRemoteUrl in config "${url}": ${e}\n`);
+      const safeUrl = (() => { try { const u = new URL(url); return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ''}`; } catch { return '<invalid>'; } })();
+      process.stderr.write(`[url-validation] malformed allowedRemoteUrl in config "${safeUrl}": ${e instanceof Error ? e.message : String(e)}\n`);
     }
   }
 }
