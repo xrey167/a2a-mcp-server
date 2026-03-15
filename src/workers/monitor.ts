@@ -24,6 +24,8 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round, haversineKm } from "../worker-utils.js";
+import { callPeer } from "../peer.js";
+import { sanitizeForPrompt } from "../prompt-sanitizer.js";
 
 const PORT = 8092;
 const NAME = "monitor-agent";
@@ -158,6 +160,13 @@ const MonitorSchemas = {
     /** Max vessels to return */
     limit: z.number().int().positive().optional().default(200),
   }),
+
+  monitor_brief: z.looseObject({
+    region: z.string().min(1).max(200),
+    source: z.enum(["acled", "gdelt"]).optional().default("gdelt"),
+    days: z.number().int().min(1).max(90).optional().default(14),
+    focus: z.string().max(200).optional(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -178,6 +187,7 @@ const AGENT_CARD = {
     { id: "fetch_conflicts", name: "Fetch Conflicts", description: "Fetch live conflict data from GDELT or ACLED APIs with region/country filtering" },
     { id: "fetch_flights", name: "Fetch Flights", description: "Fetch live ADS-B flight data from OpenSky Network with bounding box and military filtering" },
     { id: "fetch_vessels", name: "Fetch Vessels", description: "Fetch live AIS vessel positions from AISHub (free tier) or MarineTraffic (MARINETRAFFIC_API_KEY) with bounding box and military filtering" },
+    { id: "monitor_brief", name: "Monitor Brief", description: "Fetch live conflict data, score and rank active conflicts, and generate an AI-written geopolitical situational briefing" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -1031,6 +1041,83 @@ async function fetchAisVessels(
   return vessels;
 }
 
+// ── AI Monitor Brief ─────────────────────────────────────────────
+
+async function generateMonitorBrief(
+  region: string,
+  source: string,
+  days: number,
+  focus?: string,
+): Promise<string> {
+  let conflicts: Conflict[];
+  try {
+    if (source === "acled") {
+      conflicts = await fetchAcledConflicts(region, undefined, days, 50);
+    } else {
+      conflicts = await fetchGdeltConflicts(region, undefined, days, 50);
+    }
+  } catch (err) {
+    process.stderr.write(`[${NAME}] monitor_brief: fetchConflicts (${source}) failed: ${err}\n`);
+    throw new Error(`monitor_brief: conflict fetch failed: ${err}`);
+  }
+
+  const scored = scoreConflicts(conflicts);
+  const escalating = scored.filter(c => c.escalationTrend === "escalating");
+  const totalCasualties = scored.reduce((s, c) => s + c.casualties, 0);
+  const totalDisplaced = scored.reduce((s, c) => s + c.displaced, 0);
+
+  const topConflicts = scored
+    .slice(0, 5)
+    .map(c => `${c.name} (${c.status}, intensity ${c.intensityScore}, trend: ${c.escalationTrend})`)
+    .join("; ");
+
+  const byStatus: Record<string, number> = {};
+  for (const c of scored) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
+  const statusSummary = Object.entries(byStatus).map(([s, n]) => `${n} ${s}`).join(", ");
+
+  const focusLine = focus ? `\nFocus area: ${sanitizeForPrompt(focus, "focus_area")}` : "";
+
+  const dataContext = `Region: ${sanitizeForPrompt(region, "region")}
+Period: last ${days} days
+Source: ${source}${focusLine}
+
+Active conflicts: ${scored.length} total
+By status: ${statusSummary || "none"}
+Escalating: ${escalating.length}
+Estimated casualties: ${totalCasualties.toLocaleString()}
+Displaced persons: ${totalDisplaced.toLocaleString()}
+
+Top conflicts by intensity:
+${topConflicts || "none"}`;
+
+  const prompt = `You are a geopolitical intelligence analyst. Write a concise situational briefing (3-5 paragraphs) based on this conflict monitoring data:
+
+${dataContext}
+
+Cover: most significant active conflicts, escalation dynamics, humanitarian impact, and key risk factors. Be analytical and specific. End with a one-sentence risk outlook for the next 30 days.`;
+
+  let analysis: string;
+  try {
+    analysis = await callPeer("ask_claude", { prompt });
+  } catch (err) {
+    process.stderr.write(`[${NAME}] monitor_brief: callPeer ask_claude failed: ${err}\n`);
+    throw new Error(`monitor_brief: AI synthesis failed: ${err}`);
+  }
+
+  return safeStringify({
+    region,
+    period: `last ${days} days`,
+    source,
+    totalConflicts: scored.length,
+    escalatingConflicts: escalating.length,
+    totalCasualties,
+    totalDisplaced,
+    byStatus,
+    topConflicts: scored.slice(0, 5),
+    analysis,
+  }, 2);
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
@@ -1099,6 +1186,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         totalEntities: entities.length,
         ...result,
       }, 2);
+    }
+
+    case "monitor_brief": {
+      const { region, source, days, focus } = MonitorSchemas.monitor_brief.parse({ region: args.region ?? text, ...args });
+      return generateMonitorBrief(region, source, days, focus);
     }
 
     case "fetch_conflicts": {
