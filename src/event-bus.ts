@@ -67,6 +67,7 @@ export interface DeadLetter {
 const MAX_HISTORY = 1000;
 const MAX_DEAD_LETTERS = 200;
 const HISTORY_TTL_MS = 60 * 60 * 1000; // 1 hour
+const STALE_SUB_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // ── State ────────────────────────────────────────────────────────
 
@@ -355,7 +356,6 @@ function pruneHistory(): void {
   if (removeCount > 0) eventHistory.splice(0, removeCount);
 
   // Prune stale subscriptions: created >24h ago and never matched any event
-  const STALE_SUB_TTL_MS = 24 * 60 * 60 * 1000;
   for (const [id, sub] of subscriptions) {
     if (sub.matchCount === 0 && now - sub.createdAt > STALE_SUB_TTL_MS) {
       subscriptions.delete(id);
