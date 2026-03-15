@@ -5333,8 +5333,13 @@ function getPersonalityFeedbackSummary(workspaceId: string, contactKey: string, 
     let scoreSum = 0;
     let replies = 0;
     let conversions = 0;
+    const VALID_OUTCOMES = new Set(["positive", "neutral", "negative", "ignored"]);
     for (const row of rows) {
-      if (Object.hasOwn(summary, row.outcome)) summary[row.outcome] += 1;
+      if (VALID_OUTCOMES.has(row.outcome) && Object.hasOwn(summary, row.outcome)) {
+        summary[row.outcome] += 1;
+      } else if (!VALID_OUTCOMES.has(row.outcome)) {
+        process.stderr.write(`[erp-platform] skipping unknown outcome key: "${row.outcome}"\n`);
+      }
       scoreSum += num(row.feedback_score);
       if (row.reply_received === 1) replies += 1;
       if (row.converted_to_order === 1) conversions += 1;
@@ -9664,11 +9669,10 @@ function tryGetCachedProfile(
   ).get(workspaceId, customerExternalId);
 
   if (!cached) return null;
+  if (typeof cached !== 'object' || cached === null) throw new Error('cache: unexpected non-object');
 
   const age = Date.now() - new Date(cached.computed_at).getTime();
   if (age >= 3600_000) return null;
-
-  if (typeof cached !== 'object' || cached === null) throw new Error('cache: unexpected non-object');
   const cacheObj = cached as Record<string, any>;
   const {
     contacts_json,
