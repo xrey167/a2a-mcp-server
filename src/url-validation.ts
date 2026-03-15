@@ -16,8 +16,15 @@ export function isAllowedUrl(url: string): boolean {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
 
-    // Local workers: localhost on allowed ports
-    if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+    // Local workers: localhost on allowed ports (IPv4 and IPv6 loopback)
+    if (
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      parsed.hostname === "[::1]" ||
+      parsed.hostname === "::1" ||
+      parsed.hostname === "[::ffff:127.0.0.1]" ||
+      parsed.hostname === "::ffff:127.0.0.1"
+    ) {
       const port = parseInt(parsed.port || "80", 10);
       return allowedPorts.has(port);
     }
