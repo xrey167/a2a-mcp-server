@@ -21,6 +21,8 @@ import { getPersona, watchPersonas } from "../persona-loader.js";
 
 const PORT = 8088;
 const NAME = "data-agent";
+const FETCH_TIMEOUT = 30_000;
+const UA = "A2A-Data-Agent/1.0";
 
 // ── Zod Schemas ──────────────────────────────────────────────────
 
@@ -62,6 +64,21 @@ const DataSchemas = {
     valueField: z.string(),
     aggregation: z.enum(["sum", "avg", "count", "min", "max"]).optional().default("sum"),
   }),
+
+  fetch_dataset: z.looseObject({
+    /** URL of a CSV or JSON resource to fetch */
+    url: z.string().url(),
+    /** Format hint — "auto" detects from Content-Type or file extension (default) */
+    format: z.enum(["csv", "json", "auto"]).optional().default("auto"),
+    /** CSV delimiter (default ",") */
+    delimiter: z.string().optional().default(","),
+    /** CSV has header row (default true) */
+    hasHeader: z.boolean().optional().default(true),
+    /** Max rows to return */
+    limit: z.number().int().positive().optional(),
+    /** Dot-notation path into JSON to extract the target array (e.g. "data.records") */
+    jsonPath: z.string().optional(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -78,6 +95,7 @@ const AGENT_CARD = {
     { id: "transform_data", name: "Transform Data", description: "Apply chained operations (map, filter, sort, group, aggregate, flatten, unique) on datasets" },
     { id: "analyze_data", name: "Analyze Data", description: "Compute statistical summaries: count, mean, median, stddev, min, max, percentiles, and value distributions" },
     { id: "pivot_table", name: "Pivot Table", description: "Create pivot table summaries from flat data with configurable row/column/value fields and aggregation" },
+    { id: "fetch_dataset", name: "Fetch Dataset", description: "Fetch a CSV or JSON dataset from a URL and parse it into structured records. Auto-detects format from Content-Type. Supports jsonPath drill-down for nested JSON APIs." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -477,9 +495,64 @@ function aggregate(values: number[], fn: string): number {
   }
 }
 
+// ── Live Data Ingestion ───────────────────────────────────────────
+
+async function fetchDataset(
+  url: string,
+  format: string,
+  delimiter: string,
+  hasHeader: boolean,
+  limit?: number,
+  jsonPath?: string,
+): Promise<{ format: string; rowCount: number; columns: string[]; data: unknown[] }> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+
+  // Detect format from Content-Type or URL extension when "auto"
+  let resolved = format;
+  if (resolved === "auto") {
+    const ct = res.headers.get("content-type") ?? "";
+    const urlLower = url.toLowerCase();
+    if (ct.includes("text/csv") || ct.includes("application/csv") || urlLower.endsWith(".csv") || urlLower.includes(".csv?")) {
+      resolved = "csv";
+    } else {
+      resolved = "json"; // default: treat as JSON
+    }
+  }
+
+  const body = await res.text();
+  let rows: unknown[];
+
+  if (resolved === "csv") {
+    const parsed = parseCsv(body, delimiter, hasHeader, limit);
+    rows = parsed as unknown[];
+  } else {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch (err) {
+      throw new Error(`Response is not valid JSON: ${(err as Error).message}`);
+    }
+    // Drill into nested path if requested
+    if (jsonPath) {
+      parsed = queryJson(parsed, jsonPath);
+    }
+    // Unwrap a single object into a 1-element array for consistency
+    rows = Array.isArray(parsed) ? parsed : [parsed];
+    if (limit) rows = rows.slice(0, limit);
+  }
+
+  // Extract column names from the first record
+  const columns = rows.length > 0 && typeof rows[0] === "object" && rows[0] !== null
+    ? Object.keys(rows[0] as Record<string, unknown>)
+    : [];
+
+  return { format: resolved, rowCount: rows.length, columns, data: rows };
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
-function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string {
+async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
   if (memResult !== null) return memResult;
 
@@ -544,6 +617,12 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       return safeStringify(result, 2);
     }
 
+    case "fetch_dataset": {
+      const { url, format, delimiter, hasHeader, limit, jsonPath } = DataSchemas.fetch_dataset.parse(args);
+      const result = await fetchDataset(url, format, delimiter, hasHeader, limit, jsonPath);
+      return safeStringify(result, 2);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
@@ -577,7 +656,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const sid = skillId ?? "parse_csv";
 
   try {
-    const result = handleSkill(sid, args ?? {}, text);
+    const result = await handleSkill(sid, args ?? {}, text);
     return buildA2AResponse(data.id, taskId, result);
   } catch (err) {
     reply.code(500);
