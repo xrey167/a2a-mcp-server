@@ -38,7 +38,7 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 **Worker agents** (standalone Fastify HTTP servers, each a separate process):
 | File | Port | Skills |
 |---|---|---|
-| `src/workers/shell.ts` | 8081 | run_shell, read_file, write_file + SSE streaming at `/stream` |
+| `src/workers/shell.ts` | 8081 | run_shell, read_file, write_file, list_dir + SSE streaming at `/stream` |
 | `src/workers/web.ts` | 8082 | fetch_url, call_api, scrape_page |
 | `src/workers/ai.ts` | 8083 | ask_claude, search_files, query_sqlite, summarize_file |
 | `src/workers/code.ts` | 8084 | codex_exec, codex_review (via `codex exec` subprocess) |
