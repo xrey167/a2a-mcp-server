@@ -143,7 +143,7 @@ function safeRealpathSync(p: string): string {
 function notePath(title: string): string {
   const p = resolve(VAULT, `${title}.md`);
   const real = safeRealpathSync(p);
-  if (!real.startsWith(VAULT_REAL + "/")) throw new Error(`Invalid note title: "${title}"`);
+  if (!real.startsWith(VAULT_REAL + "/") && real !== VAULT_REAL) throw new Error(`Invalid note title: "${title}"`);
   return p;
 }
 
