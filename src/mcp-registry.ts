@@ -285,8 +285,9 @@ export async function refreshManifest(): Promise<number> {
 // ── Helpers ──────────────────────────────────────────────────────
 
 function extractText(result: Awaited<ReturnType<Client["callTool"]>>): string {
-  if (!result.content || result.content.length === 0) return "(no output)";
-  return result.content
-    .map((c: any) => (c.type === "text" ? c.text : JSON.stringify(c)))
+  const content = (result as { content?: Array<{ type: string; text?: string }> }).content;
+  if (!content || content.length === 0) return "(no output)";
+  return content
+    .map((c) => (c.type === "text" ? (c.text ?? "") : JSON.stringify(c)))
     .join("\n");
 }

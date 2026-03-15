@@ -343,6 +343,14 @@ function generatePlannedOrders(
       counter++;
       const dueBucket = horizon.buckets[bucket.bucketIndex];
       const releaseBucket = horizon.buckets[bucket.plannedOrderRelease] ?? horizon.buckets[0];
+      if (!dueBucket || !releaseBucket) {
+        log(
+          `WARNING: Dropped planned order for ${itemNo} (${nr.itemName}): ` +
+          `bucketIndex=${bucket.bucketIndex}, plannedOrderRelease=${bucket.plannedOrderRelease}, ` +
+          `horizonLength=${horizon.buckets.length}, quantity=${bucket.plannedOrderReceipt}`
+        );
+        continue;
+      }
 
       const orderType = meta?.replenishmentMethod === "production" || meta?.replenishmentMethod === "assembly"
         ? "production" as const

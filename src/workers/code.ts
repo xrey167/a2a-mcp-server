@@ -10,12 +10,12 @@ import { sanitizeUserInput } from "../prompt-sanitizer.js";
 import { sanitizePath } from "../path-utils.js";
 
 const CodeSchemas = {
-  codex_exec: z.object({ prompt: z.string().min(1) }).passthrough(),
-  codex_review: z.object({
+  codex_exec: z.looseObject({ prompt: z.string().min(1) }),
+  codex_review: z.looseObject({
     code: z.string().optional(),
     files: z.array(z.string()).optional(),
     scope: z.string().optional().default("general"),
-  }).passthrough(),
+  }),
 };
 
 const PORT = 8084;
