@@ -98,7 +98,7 @@ function indexNote(relativePath: string, content: string) {
 /** Watch vault for changes and update index */
 function watchVault() {
   try {
-    watch(VAULT, { recursive: true }, (event, filename) => {
+    watch(VAULT, { recursive: true }, (_event, filename) => {
       if (!filename || !filename.endsWith(".md")) return;
       const fullPath = join(VAULT, filename);
       if (existsSync(fullPath)) {
