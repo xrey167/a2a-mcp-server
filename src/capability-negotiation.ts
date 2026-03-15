@@ -84,6 +84,10 @@ const capabilities = new Map<string, Map<string, AgentCapability>>();
 // agentName → healthy?
 const healthStatus = new Map<string, boolean>();
 
+// ── Constants ────────────────────────────────────────────────────
+
+const MAX_AGENTS_PER_SKILL = 50;
+
 // ── SemVer Utilities ─────────────────────────────────────────────
 
 function parseSemVer(version: string): { major: number; minor: number; patch: number } | null {
@@ -143,6 +147,16 @@ export function registerCapability(
   };
 
   skillMap.set(agentName, cap);
+
+  // Size guard: cap at 50 agents per skill to prevent unbounded Map growth
+  if (skillMap.size > MAX_AGENTS_PER_SKILL) {
+    const oldest = skillMap.keys().next().value;
+    if (oldest !== undefined) {
+      skillMap.delete(oldest);
+      process.stderr.write(`[capability] evicted oldest entry "${oldest}" for skill "${skillId}" (size cap ${MAX_AGENTS_PER_SKILL})\n`);
+    }
+  }
+
   process.stderr.write(`[capability] registered ${agentName}:${skillId} v${cap.version} (features: ${cap.features.join(",")})\n`);
   return cap;
 }
@@ -300,6 +314,20 @@ export function getCapabilityStats(): {
     agentsWithCapabilities: agents.size,
     skillsWithMultipleProviders: multiProvider,
   };
+}
+
+/**
+ * Prune capabilities: remove any skill entry where ALL registered agents have enabled: false.
+ * Call this after each bulk discovery cycle to keep the Map tidy.
+ */
+export function pruneCapabilities(): void {
+  for (const [skillId, skillMap] of capabilities) {
+    const allDisabled = [...skillMap.values()].every(cap => !cap.enabled);
+    if (allDisabled) {
+      capabilities.delete(skillId);
+      process.stderr.write(`[capability] pruned skill "${skillId}" — all agents disabled\n`);
+    }
+  }
 }
 
 /** Reset all capabilities (for testing). */

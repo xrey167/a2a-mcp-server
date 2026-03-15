@@ -354,7 +354,7 @@ export class BusinessCentralConnector implements ERPConnector {
           $top: "1",
         });
         if (raw.length > 0) {
-          const r = raw[0];
+          const r = raw[0]!;
           results.push({
             itemNo,
             itemName: String(r.displayName ?? ""),
