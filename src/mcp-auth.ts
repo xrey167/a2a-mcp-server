@@ -60,7 +60,8 @@ function readAuthFile(): Record<string, McpAuth> {
   if (!existsSync(AUTH_FILE)) return {};
   try {
     return JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
-  } catch {
+  } catch (e) {
+    process.stderr.write(`[mcp-auth] failed to read ${AUTH_FILE}, returning empty auth: ${e}\n`);
     return {};
   }
 }
