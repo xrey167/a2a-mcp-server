@@ -74,8 +74,8 @@ const AiSchemas = {
   }),
 
   rewrite_text: z.looseObject({
-    /** Text to rewrite — max 20,000 characters */
-    text: z.string().min(1).max(20_000).refine(s => s.trim().length > 0, "text must not be blank"),
+    /** Text to rewrite — max 20,000 characters (enforced by runtime size guard) */
+    text: z.string().min(1).refine(s => s.trim().length > 0, "text must not be blank"),
     /** Target style/tone, e.g. "formal", "casual", "concise", "eli5", "bullet points", "executive summary" */
     style: z.string().min(1).max(200),
     /** Optional instruction to preserve, e.g. "keep all technical terms", "keep bullet structure" */
