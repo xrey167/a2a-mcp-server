@@ -289,6 +289,7 @@ function aggregateSignals(signals: Signal[], windowHours: number, dedup: boolean
   severityCounts: Record<string, number>;
   totalSignals: number;
   uniqueCountries: number;
+  normalizedTypeCounts: Record<string, number>;
 } {
   const now = Date.now();
   const cutoff = now - windowHours * 60 * 60 * 1000;
@@ -435,16 +436,16 @@ function classifyThreat(title: string, description: string, source: string, type
   let threatLevel = "low";
   let confidence = 0.3;
 
-  for (const term of THREAT_ESCALATION_TERMS.critical) {
+  for (const term of (THREAT_ESCALATION_TERMS.critical ?? [])) {
     if (text.includes(term)) { threatLevel = "critical"; confidence = 0.9; break; }
   }
   if (threatLevel === "low") {
-    for (const term of THREAT_ESCALATION_TERMS.high) {
+    for (const term of (THREAT_ESCALATION_TERMS.high ?? [])) {
       if (text.includes(term)) { threatLevel = "high"; confidence = 0.7; break; }
     }
   }
   if (threatLevel === "low") {
-    for (const term of THREAT_ESCALATION_TERMS.medium) {
+    for (const term of (THREAT_ESCALATION_TERMS.medium ?? [])) {
       if (text.includes(term)) { threatLevel = "medium"; confidence = 0.5; break; }
     }
   }
@@ -496,8 +497,8 @@ function detectConvergence(signals: GeoSignal[], radiusKm: number, minTypes: num
 
   const grid = new Map<string, number[]>();
   for (let i = 0; i < signals.length; i++) {
-    const cellX = Math.floor(signals[i].lon / cellSizeDeg);
-    const cellY = Math.floor(signals[i].lat / cellSizeDeg);
+    const cellX = Math.floor(signals[i]!.lon / cellSizeDeg);
+    const cellY = Math.floor(signals[i]!.lat / cellSizeDeg);
     const key = `${cellX},${cellY}`;
     if (!grid.has(key)) grid.set(key, []);
     grid.get(key)!.push(i);
@@ -524,16 +525,16 @@ function detectConvergence(signals: GeoSignal[], radiusKm: number, minTypes: num
     if (assigned.has(i)) continue;
 
     const cluster: Array<{ signal: GeoSignal; index: number; distance: number }> = [
-      { signal: signals[i], index: i, distance: 0 },
+      { signal: signals[i]!, index: i, distance: 0 },
     ];
 
     // Find all signals within radius using spatial hash
-    const candidates = getNearbyCandidates(signals[i]);
+    const candidates = getNearbyCandidates(signals[i]!);
     for (const j of candidates) {
       if (j <= i || assigned.has(j)) continue;
-      const dist = haversineKm(signals[i].lat, signals[i].lon, signals[j].lat, signals[j].lon);
+      const dist = haversineKm(signals[i]!.lat, signals[i]!.lon, signals[j]!.lat, signals[j]!.lon);
       if (dist <= radiusKm) {
-        cluster.push({ signal: signals[j], index: j, distance: dist });
+        cluster.push({ signal: signals[j]!, index: j, distance: dist });
       }
     }
 
@@ -626,9 +627,9 @@ function baselineCompare(series: DataPoint[], baselineHours: number, zScoreThres
   if (baselineValues.length < 3) {
     const splitIdx = Math.floor(series.length * 0.75);
     baselineValues.length = 0;
-    for (let i = 0; i < splitIdx; i++) baselineValues.push(series[i].value);
+    for (let i = 0; i < splitIdx; i++) baselineValues.push(series[i]!.value);
     recentPoints.length = 0;
-    for (let i = splitIdx; i < series.length; i++) recentPoints.push(series[i]);
+    for (let i = splitIdx; i < series.length; i++) recentPoints.push(series[i]!);
   }
 
   // Baseline statistics
@@ -734,7 +735,7 @@ function applyFrameworkWeights(
   const total = Object.values(weights).reduce((s, w) => s + w, 0);
   if (total > 0) {
     for (const key of Object.keys(weights)) {
-      weights[key] = round(weights[key] / total, 4);
+      weights[key] = round((weights[key] ?? 0) / total, 4);
     }
   }
 

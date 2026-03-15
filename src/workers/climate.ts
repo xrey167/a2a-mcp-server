@@ -282,6 +282,7 @@ async function fetchWildfires(
   const latIdx = headers.indexOf("latitude");
   const lonIdx = headers.indexOf("longitude");
   const brightIdx = headers.indexOf("bright_ti4") >= 0 ? headers.indexOf("bright_ti4") : headers.indexOf("brightness");
+  if (brightIdx < 0) return []; // skip entirely if no brightness column in CSV
   const confIdx = headers.indexOf("confidence");
   const dateIdx = headers.indexOf("acq_date");
   const timeIdx = headers.indexOf("acq_time");
