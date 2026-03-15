@@ -8,9 +8,9 @@ import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
 
 const AiSchemas = {
-  ask_claude: z.object({ prompt: z.string().min(1), model: z.string().optional(), max_tokens: z.number().int().positive().optional() }).passthrough(),
-  search_files: z.object({ pattern: z.string().min(1), directory: z.string().optional().default(".") }).passthrough(),
-  query_sqlite: z.object({ database: z.string().min(1), sql: z.string().min(1) }).passthrough(),
+  ask_claude: z.looseObject({ prompt: z.string().min(1), model: z.string().optional(), max_tokens: z.number().int().positive().optional() }),
+  search_files: z.looseObject({ pattern: z.string().min(1), directory: z.string().optional().default(".") }),
+  query_sqlite: z.looseObject({ database: z.string().min(1), sql: z.string().min(1) }),
 };
 import { resolve } from "node:path";
 import { runClaudeCLI } from "../claude-cli.js";

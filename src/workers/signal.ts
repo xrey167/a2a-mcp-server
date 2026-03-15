@@ -86,7 +86,7 @@ function normalizeSignalType(type: string): CanonicalSignalType | string {
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const SignalSchemas = {
-  aggregate_signals: z.object({
+  aggregate_signals: z.looseObject({
     signals: z.array(z.object({
       id: z.string().optional(),
       type: z.string(),
@@ -102,18 +102,18 @@ const SignalSchemas = {
     })).min(1),
     windowHours: z.number().positive().optional().default(24),
     dedup: z.boolean().optional().default(true),
-  }).passthrough(),
+  }),
 
-  classify_threat: z.object({
+  classify_threat: z.looseObject({
     events: z.array(z.object({
       title: z.string(),
       description: z.string().optional().default(""),
       source: z.string().optional().default(""),
       type: z.string().optional().default(""),
     })).min(1),
-  }).passthrough(),
+  }),
 
-  detect_convergence: z.object({
+  detect_convergence: z.looseObject({
     signals: z.array(z.object({
       type: z.string(),
       lat: z.number(),
@@ -124,9 +124,9 @@ const SignalSchemas = {
     })).min(1),
     radiusKm: z.number().positive().optional().default(150),
     minTypes: z.number().int().positive().optional().default(2),
-  }).passthrough(),
+  }),
 
-  baseline_compare: z.object({
+  baseline_compare: z.looseObject({
     series: z.array(z.object({
       timestamp: z.string(),
       value: z.number(),
@@ -134,9 +134,9 @@ const SignalSchemas = {
     })).min(2),
     baselineHours: z.number().positive().optional().default(48),
     zScoreThreshold: z.number().positive().optional().default(2),
-  }).passthrough(),
+  }),
 
-  instability_index: z.object({
+  instability_index: z.looseObject({
     country: z.string().min(1),
     indicators: z.object({
       conflictEvents: z.number().optional().default(0),
@@ -160,23 +160,23 @@ const SignalSchemas = {
     }).optional().default({}),
     /** Geopolitical risk framework overlay */
     framework: z.enum(["standard", "grand_chessboard", "prisoners_of_geography"]).optional().default("standard"),
-  }).passthrough(),
+  }),
 
   // ── Live Cyber Threat Feed Skills ────────────────────────────────
-  fetch_cyber_c2: z.object({
+  fetch_cyber_c2: z.looseObject({
     limit: z.number().int().positive().optional().default(100),
-  }).passthrough(),
+  }),
 
-  fetch_malicious_urls: z.object({
+  fetch_malicious_urls: z.looseObject({
     limit: z.number().int().positive().optional().default(100),
-  }).passthrough(),
+  }),
 
-  fetch_outages: z.object({
+  fetch_outages: z.looseObject({
     country: z.string().optional(),
     days: z.number().int().positive().optional().default(7),
-  }).passthrough(),
+  }),
 
-  correlate_signals: z.object({
+  correlate_signals: z.looseObject({
     signals: z.array(z.object({
       type: z.string(),
       source: z.string().optional().default(""),
@@ -190,7 +190,7 @@ const SignalSchemas = {
     })).min(1),
     windowHours: z.number().positive().optional().default(24),
     minConfidence: z.number().min(0).max(1).optional().default(0.3),
-  }).passthrough(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────

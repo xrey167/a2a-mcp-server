@@ -8,9 +8,9 @@ import { sanitizeUserInput } from "../prompt-sanitizer.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
 
 const DesignSchemas = {
-  enhance_ui_prompt: z.object({ description: z.string().min(1), deviceType: z.string().optional().default("mobile") }).passthrough(),
-  suggest_screens: z.object({ appConcept: z.string().min(1), deviceType: z.string().optional().default("mobile") }).passthrough(),
-  design_critique: z.object({ description: z.string().min(1) }).passthrough(),
+  enhance_ui_prompt: z.looseObject({ description: z.string().min(1), deviceType: z.string().optional().default("mobile") }),
+  suggest_screens: z.looseObject({ appConcept: z.string().min(1), deviceType: z.string().optional().default("mobile") }),
+  design_critique: z.looseObject({ description: z.string().min(1) }),
 };
 
 const PORT = 8086;

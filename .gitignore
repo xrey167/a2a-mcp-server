@@ -43,3 +43,9 @@ __pycache__/
 AGENTS.md
 server.log
 PRODUCT_MARKET_FIT.md
+
+# local scripts / generated docs
+create-github-issues.sh
+scripts/create-review-issues.sh
+docs/code-review-issues.md
+docs/pending-github-issues.md
