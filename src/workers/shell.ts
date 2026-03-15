@@ -13,6 +13,14 @@ const ShellSchemas = {
   read_file: z.looseObject({ path: z.string().min(1) }),
   write_file: z.looseObject({ path: z.string().min(1), content: z.string() }),
   list_dir: z.looseObject({ path: z.string().optional().default(".") }),
+  diff_files: z.looseObject({
+    /** Path to the original (old) file */
+    pathA: z.string().min(1),
+    /** Path to the modified (new) file */
+    pathB: z.string().min(1),
+    /** Number of context lines around each change (default 3, max 10) */
+    context: z.number().int().min(0).max(10).optional().default(3),
+  }),
 };
 
 const PORT = 8081;
@@ -29,6 +37,7 @@ const AGENT_CARD = {
     { id: "read_file", name: "Read File", description: "Read the contents of a file" },
     { id: "write_file", name: "Write File", description: "Write content to a file" },
     { id: "list_dir", name: "List Directory", description: "List files and subdirectories in a directory (non-recursive). Returns name and type (file/dir) for each entry." },
+    { id: "diff_files", name: "Diff Files", description: "Compare two files and return a unified diff. Shows added/removed lines with configurable context. Useful for code review and change detection. Returns unified diff text or 'Files are identical' if no differences." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -67,7 +76,7 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       return `Written ${content.length} bytes to ${safePath}`;
     }
     case "list_dir": {
-      const { path } = ShellSchemas.list_dir.parse({ path: args.path ?? text || ".", ...args });
+      const { path } = ShellSchemas.list_dir.parse({ path: args.path ?? (text || "."), ...args });
       const safePath = sanitizePath(path);
       if (!existsSync(safePath)) return `Directory not found: ${safePath}`;
       const entries = readdirSync(safePath);
@@ -81,9 +90,143 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       });
       return lines.length > 0 ? lines.join("\n") : "(empty directory)";
     }
+    case "diff_files": {
+      let dfParsed: ReturnType<typeof ShellSchemas.diff_files.parse>;
+      try {
+        dfParsed = ShellSchemas.diff_files.parse(args);
+      } catch (err) {
+        process.stderr.write(`[${NAME}] diff_files: Zod parse error: ${err instanceof Error ? err.message : String(err)}\n`);
+        throw err;
+      }
+      const { pathA, pathB, context: ctxLines } = dfParsed;
+
+      const safeA = sanitizePath(pathA);
+      const safeB = sanitizePath(pathB);
+
+      if (!existsSync(safeA)) return `File not found: ${safeA}`;
+      if (!existsSync(safeB)) return `File not found: ${safeB}`;
+
+      const MAX_FILE_BYTES = 500_000; // 500 KB per file
+      const statA = statSync(safeA);
+      const statB = statSync(safeB);
+      if (statA.size > MAX_FILE_BYTES) {
+        process.stderr.write(`[${NAME}] diff_files: file A too large (${statA.size} bytes): ${safeA}\n`);
+        return `Error: file A is ${statA.size} bytes — exceeds 500 KB limit for diff`;
+      }
+      if (statB.size > MAX_FILE_BYTES) {
+        process.stderr.write(`[${NAME}] diff_files: file B too large (${statB.size} bytes): ${safeB}\n`);
+        return `Error: file B is ${statB.size} bytes — exceeds 500 KB limit for diff`;
+      }
+
+      const linesA = readFileSync(safeA, "utf-8").split("\n");
+      const linesB = readFileSync(safeB, "utf-8").split("\n");
+
+      // Myers diff — builds edit script then renders unified diff
+      const diff = computeUnifiedDiff(linesA, linesB, safeA, safeB, ctxLines);
+      return diff.trim().length === 0 ? "Files are identical" : diff;
+    }
     default:
       return `Unknown skill: ${skillId}`;
   }
+}
+
+/**
+ * Compute a unified diff between two line arrays using an LCS-based algorithm.
+ * Returns unified diff text (with --- / +++ headers and @@ hunks).
+ */
+function computeUnifiedDiff(
+  linesA: string[],
+  linesB: string[],
+  labelA: string,
+  labelB: string,
+  ctxLines: number,
+): string {
+  const m = linesA.length;
+  const n = linesB.length;
+
+  // Build LCS DP table (row-major flat array)
+  const dp: number[][] = [];
+  for (let i = 0; i <= m; i++) {
+    dp.push(new Array<number>(n + 1).fill(0));
+  }
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      const rowI = dp[i];
+      const rowI1 = dp[i + 1];
+      if (rowI && rowI1 && linesA[i] === linesB[j]) {
+        rowI[j] = 1 + (rowI1[j + 1] ?? 0);
+      } else if (rowI && rowI1) {
+        rowI[j] = Math.max(rowI1[j] ?? 0, rowI[j + 1] ?? 0);
+      }
+    }
+  }
+
+  // Trace back to build edit list
+  type Edit = { op: "=" | "+" | "-"; lineA: number; lineB: number; text: string };
+  const edits: Edit[] = [];
+  let i = 0, j = 0;
+  while (i < m || j < n) {
+    const rowI = dp[i];
+    const rowI1 = dp[i + 1];
+    const dpIJ1 = rowI ? (rowI[j + 1] ?? 0) : 0;
+    const dpI1J = rowI1 ? (rowI1[j] ?? 0) : 0;
+    if (i < m && j < n && linesA[i] === linesB[j]) {
+      edits.push({ op: "=", lineA: i, lineB: j, text: linesA[i] ?? "" });
+      i++; j++;
+    } else if (j < n && (i >= m || dpIJ1 >= dpI1J)) {
+      edits.push({ op: "+", lineA: i, lineB: j, text: linesB[j] ?? "" });
+      j++;
+    } else {
+      edits.push({ op: "-", lineA: i, lineB: j, text: linesA[i] ?? "" });
+      i++;
+    }
+  }
+
+  // Find indices of all changed edits
+  const changedIdx: number[] = [];
+  for (let k = 0; k < edits.length; k++) {
+    if (edits[k]?.op !== "=") changedIdx.push(k);
+  }
+  if (changedIdx.length === 0) return "";
+
+  // Build hunk ranges: expand each change cluster by ctxLines and merge overlapping ranges
+  const ranges: Array<[number, number]> = [];
+  let rStart = Math.max(0, changedIdx[0]! - ctxLines);
+  let rEnd = Math.min(edits.length, changedIdx[0]! + 1 + ctxLines);
+
+  for (let ci = 1; ci < changedIdx.length; ci++) {
+    const idx = changedIdx[ci]!;
+    const expandedStart = Math.max(0, idx - ctxLines);
+    if (expandedStart <= rEnd) {
+      // Overlapping or adjacent — merge
+      rEnd = Math.min(edits.length, idx + 1 + ctxLines);
+    } else {
+      ranges.push([rStart, rEnd]);
+      rStart = expandedStart;
+      rEnd = Math.min(edits.length, idx + 1 + ctxLines);
+    }
+  }
+  ranges.push([rStart, rEnd]);
+
+  // Render hunks
+  const hunks: string[] = [];
+  for (const [hs, he] of ranges) {
+    const slice = edits.slice(hs, he);
+    const first = slice[0];
+    const aStart = (first?.lineA ?? 0) + 1;
+    const bStart = (first?.lineB ?? 0) + 1;
+    const aCount = slice.filter(e => e.op !== "+").length;
+    const bCount = slice.filter(e => e.op !== "-").length;
+    const hunkLines = [`@@ -${aStart},${aCount} +${bStart},${bCount} @@`];
+    for (const e of slice) {
+      if (e.op === "=") hunkLines.push(` ${e.text}`);
+      else if (e.op === "+") hunkLines.push(`+${e.text}`);
+      else hunkLines.push(`-${e.text}`);
+    }
+    hunks.push(hunkLines.join("\n"));
+  }
+
+  return [`--- ${labelA}`, `+++ ${labelB}`, ...hunks].join("\n") + "\n";
 }
 
 const app = Fastify({ logger: false });
@@ -114,7 +257,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   try {
     resultText = handleSkill(sid, args ?? { command: text }, text);
   } catch (err) {
-    resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[${NAME}] unhandled error in skill "${sid}": ${msg}\n`);
+    resultText = `Error: ${msg}`;
   }
 
   return buildA2AResponse(data.id, taskId, resultText);
