@@ -25,6 +25,11 @@ function log(msg: string) {
   process.stderr.write(`[bc-connector] ${msg}\n`);
 }
 
+/** Escape a string for use inside an OData single-quoted literal (doubles apostrophes). */
+function esc(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
 export class BusinessCentralConnector implements ERPConnector {
   readonly system = "bc" as const;
   private config: BCConnectionConfig;
@@ -49,6 +54,9 @@ export class BusinessCentralConnector implements ERPConnector {
     }
 
     const { clientId, clientSecret } = this.config.auth;
+    if (!clientId || !clientSecret) {
+      throw new Error("BC OAuth2 requires clientId and clientSecret — check ERP connection config");
+    }
     const tokenUrl = `https://login.microsoftonline.com/${this.config.tenantId}/oauth2/v2.0/token`;
 
     const body = new URLSearchParams({
@@ -62,6 +70,7 @@ export class BusinessCentralConnector implements ERPConnector {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: body.toString(),
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (!res.ok) {
@@ -98,6 +107,7 @@ export class BusinessCentralConnector implements ERPConnector {
         Accept: "application/json",
       },
       redirect: "manual",
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (res.status >= 300 && res.status < 400) {
@@ -133,10 +143,10 @@ export class BusinessCentralConnector implements ERPConnector {
     // OData v4 Edm.Date literals are bare YYYY-MM-DD (no quotes).
     // See: https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/webservices/use-filter-expressions-in-odata-uris
     const filterParts: string[] = [];
-    if (filters?.status) filterParts.push(`status eq '${filters.status}'`);
+    if (filters?.status) filterParts.push(`status eq '${esc(filters.status)}'`);
     if (filters?.dateFrom) filterParts.push(`dueDate ge ${filters.dateFrom}`);
     if (filters?.dateTo) filterParts.push(`dueDate le ${filters.dateTo}`);
-    if (filters?.itemFilter) filterParts.push(`contains(sourceNo, '${filters.itemFilter}')`);
+    if (filters?.itemFilter) filterParts.push(`contains(sourceNo, '${esc(filters.itemFilter)}')`);
 
     const params: Record<string, string> = { $top: "500" };
     if (filterParts.length > 0) params.$filter = filterParts.join(" and ");
@@ -176,7 +186,7 @@ export class BusinessCentralConnector implements ERPConnector {
     dateTo?: string;
   }): Promise<SalesOrder[]> {
     const filterParts: string[] = [];
-    if (filters?.status) filterParts.push(`status eq '${filters.status}'`);
+    if (filters?.status) filterParts.push(`status eq '${esc(filters.status)}'`);
     if (filters?.dateFrom) filterParts.push(`orderDate ge ${filters.dateFrom}`);
     if (filters?.dateTo) filterParts.push(`orderDate le ${filters.dateTo}`);
 
@@ -202,7 +212,7 @@ export class BusinessCentralConnector implements ERPConnector {
 
   async getBOMComponents(itemNo: string, depth = 3): Promise<BOMComponent[]> {
     const params: Record<string, string> = {
-      $filter: `parentItemNo eq '${itemNo}'`,
+      $filter: `parentItemNo eq '${esc(itemNo)}'`,
       $top: "200",
     };
 
@@ -305,7 +315,7 @@ export class BusinessCentralConnector implements ERPConnector {
     dateTo?: string;
   }): Promise<PurchaseOrder[]> {
     const filterParts: string[] = [];
-    if (filters?.vendorNo) filterParts.push(`buyFromVendorNumber eq '${filters.vendorNo}'`);
+    if (filters?.vendorNo) filterParts.push(`buyFromVendorNumber eq '${esc(filters.vendorNo)}'`);
     if (filters?.dateFrom) filterParts.push(`orderDate ge ${filters.dateFrom}`);
     if (filters?.dateTo) filterParts.push(`orderDate le ${filters.dateTo}`);
 
@@ -340,7 +350,7 @@ export class BusinessCentralConnector implements ERPConnector {
     for (const itemNo of itemNos) {
       try {
         const raw = await this.odata<Record<string, unknown>>("items", {
-          $filter: `number eq '${itemNo}'`,
+          $filter: `number eq '${esc(itemNo)}'`,
           $top: "1",
         });
         if (raw.length > 0) {
@@ -370,8 +380,8 @@ export class BusinessCentralConnector implements ERPConnector {
     limit?: number;
   }): Promise<PostedReceipt[]> {
     const filterParts: string[] = [];
-    if (filters?.itemNo) filterParts.push(`itemNo eq '${filters.itemNo}'`);
-    if (filters?.vendorNo) filterParts.push(`buyFromVendorNo eq '${filters.vendorNo}'`);
+    if (filters?.itemNo) filterParts.push(`itemNo eq '${esc(filters.itemNo)}'`);
+    if (filters?.vendorNo) filterParts.push(`buyFromVendorNo eq '${esc(filters.vendorNo)}'`);
     if (filters?.dateFrom) filterParts.push(`postingDate ge ${filters.dateFrom}`);
     if (filters?.dateTo) filterParts.push(`postingDate le ${filters.dateTo}`);
 

@@ -408,6 +408,15 @@ export async function executeWorkflow(
         } else {
           completed.add(step.id);
         }
+      }).catch((err) => {
+        // Defensive: executeStep should never reject, but guard anyway to
+        // prevent Promise.race() from propagating an unhandled rejection.
+        running.delete(step.id);
+        inFlight.delete(step.id);
+        failed.add(step.id);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        stepResults.set(step.id, { stepId: step.id, status: "failed" as const, error: errMsg, durationMs: 0 });
+        process.stderr.write(`[workflow] step "${step.id}" threw unexpectedly: ${errMsg}\n`);
       });
       inFlight.set(step.id, promise);
     }
