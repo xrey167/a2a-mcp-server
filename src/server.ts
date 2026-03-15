@@ -8092,7 +8092,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
       if (session && session.workspaceId) {
         try {
           await loadRevenuePanel(session.workspaceId);
-        } catch (err) { console.error("[server] loadRevenuePanel error: " + (getErrMsg(err))); }
+        } catch (err) { setMessage(actionMsg, "Failed to load revenue panel: " + (err && err.message || String(err)), "error"); }
       }
       renderBootstrap();
       setMessage(actionMsg, "Session loaded.", "ok");
