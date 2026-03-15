@@ -288,10 +288,13 @@ function evictLRU(): void {
   if (!oldestKey) return;
 
   const oldest = cache.get(oldestKey);
-  if (oldest) {
+  if (!oldest) {
+    process.stderr.write('[skill-cache] lruOrder desync detected: key not in cache\n');
     lruOrder.delete(oldestKey);
-    cache.delete(oldestKey);
-    totalSizeBytes -= oldest.sizeBytes;
-    totalEvictions++;
+    return;
   }
+  lruOrder.delete(oldestKey);
+  cache.delete(oldestKey);
+  totalSizeBytes -= oldest.sizeBytes;
+  totalEvictions++;
 }

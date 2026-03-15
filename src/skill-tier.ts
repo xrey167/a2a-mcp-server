@@ -159,7 +159,14 @@ function coerceLicense(raw: unknown): LicenseInfo {
 }
 
 export function loadLicense(): LicenseInfo {
-  if (cachedLicense) return cachedLicense;
+  if (cachedLicense !== null) {
+    // Evict expired cache so a new license file can take effect without restart
+    if (cachedLicense.expiresAt && Date.now() > cachedLicense.expiresAt) {
+      cachedLicense = null;
+    } else {
+      return cachedLicense;
+    }
+  }
 
   // Environment variable override (for CI/Docker)
   if (process.env.A2A_LICENSE_KEY) {

@@ -4,7 +4,9 @@
 let allowedPorts = new Set<number>();
 let allowedRemoteOrigins = new Set<string>();
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "[::ffff:7f00:1]", "0.0.0.0", "[::]"]);
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "[::ffff:7f00:1]"]);
+// Wildcard bind addresses — not true loopback; only permitted on configured worker ports.
+const BIND_ALL_HOSTS = new Set(["0.0.0.0", "[::]"]);
 
 /** Configure the allowed ports and remote URLs (called during server startup). */
 export function configureAllowedUrls(ports: number[], remoteUrls: string[]): void {
@@ -28,6 +30,12 @@ export function isAllowedUrl(url: string): boolean {
 
     // Local workers: localhost/loopback on allowed ports
     if (LOOPBACK_HOSTS.has(parsed.hostname)) {
+      const port = parseInt(parsed.port || "80", 10);
+      return allowedPorts.has(port);
+    }
+
+    // Wildcard bind addresses (0.0.0.0, [::]) — only allowed on explicitly configured worker ports
+    if (BIND_ALL_HOSTS.has(parsed.hostname)) {
       const port = parseInt(parsed.port || "80", 10);
       return allowedPorts.has(port);
     }
