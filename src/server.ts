@@ -8,7 +8,7 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import Fastify from "fastify";
+import Fastify, { type FastifyRequest, type FastifyReply } from "fastify";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { mkdirSync, readdirSync, statSync, unlinkSync } from "fs";
@@ -6667,7 +6667,7 @@ async function startHttpServer() {
     }
   });
 
-  app.post<{ Body: { product: string; stage: string; customerName: string; onboardingId?: string; valueEur?: number; notes?: string; occurredAt?: string } }>("/v1/commercial/events", async (request, reply) => {
+  app.post<{ Body: { product: string; stage: string; customerName: string; onboardingId?: string; valueEur?: number; notes?: string; occurredAt?: string } }>("/v1/commercial/events", async (request: FastifyRequest<{ Body: { product: string; stage: string; customerName: string; onboardingId?: string; valueEur?: number; notes?: string; occurredAt?: string } }>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6688,7 +6688,7 @@ async function startHttpServer() {
     }
   });
 
-  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/commercial/kpis", async (request, reply) => {
+  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/commercial/kpis", async (request: FastifyRequest<{ Querystring: { product?: string; since?: string } }>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6704,7 +6704,7 @@ async function startHttpServer() {
     }
   });
 
-  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/workflows/sla/status", async (request, reply) => {
+  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/workflows/sla/status", async (request: FastifyRequest<{ Querystring: { product?: string; since?: string } }>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6720,7 +6720,7 @@ async function startHttpServer() {
     }
   });
 
-  app.post<{ Body: { product?: string; since?: string; minIntervalMinutes?: number } }>("/v1/workflows/sla/escalate", async (request, reply) => {
+  app.post<{ Body: { product?: string; since?: string; minIntervalMinutes?: number } }>("/v1/workflows/sla/escalate", async (request: FastifyRequest<{ Body: { product?: string; since?: string; minIntervalMinutes?: number } }>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6737,7 +6737,7 @@ async function startHttpServer() {
     }
   });
 
-  app.get<{ Querystring: { product?: string; status?: string; limit?: string } }>("/v1/workflows/sla/incidents", async (request, reply) => {
+  app.get<{ Querystring: { product?: string; status?: string; limit?: string } }>("/v1/workflows/sla/incidents", async (request: FastifyRequest<{ Querystring: { product?: string; status?: string; limit?: string } }>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6756,7 +6756,7 @@ async function startHttpServer() {
     }
   });
 
-  app.patch<{ Params: { id: string }; Body: { status: string } }>("/v1/workflows/sla/incidents/:id", async (request, reply) => {
+  app.patch<{ Params: { id: string }; Body: { status: string } }>("/v1/workflows/sla/incidents/:id", async (request: FastifyRequest<{ Params: { id: string }; Body: { status: string } }>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
