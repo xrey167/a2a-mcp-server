@@ -400,7 +400,7 @@ const THREAT_CATEGORIES: Record<string, string[]> = {
   humanitarian: ["refugee", "displacement", "famine", "humanitarian", "aid", "crisis", "migration", "asylum"],
 };
 
-const THREAT_ESCALATION_TERMS: Record<string, string[]> = {
+const THREAT_ESCALATION_TERMS: Record<"critical" | "high" | "medium", string[]> = {
   critical: ["breaking", "urgent", "imminent", "nuclear strike", "mass casualty", "war declared", "coup underway", "invasion begun", "chemical weapon"],
   high: ["escalat", "mobiliz", "surge", "critical", "emergency", "alert", "threat level", "evacuate", "martial law", "sanctions imposed"],
   medium: ["tension", "concern", "increased", "reported", "incident", "warning", "monitor", "elevated"],
@@ -436,16 +436,16 @@ function classifyThreat(title: string, description: string, source: string, type
   let threatLevel = "low";
   let confidence = 0.3;
 
-  for (const term of (THREAT_ESCALATION_TERMS.critical ?? [])) {
+  for (const term of THREAT_ESCALATION_TERMS.critical) {
     if (text.includes(term)) { threatLevel = "critical"; confidence = 0.9; break; }
   }
   if (threatLevel === "low") {
-    for (const term of (THREAT_ESCALATION_TERMS.high ?? [])) {
+    for (const term of THREAT_ESCALATION_TERMS.high) {
       if (text.includes(term)) { threatLevel = "high"; confidence = 0.7; break; }
     }
   }
   if (threatLevel === "low") {
-    for (const term of (THREAT_ESCALATION_TERMS.medium ?? [])) {
+    for (const term of THREAT_ESCALATION_TERMS.medium) {
       if (text.includes(term)) { threatLevel = "medium"; confidence = 0.5; break; }
     }
   }
@@ -734,8 +734,8 @@ function applyFrameworkWeights(
   // Renormalize weights to sum to 1.0
   const total = Object.values(weights).reduce((s, w) => s + w, 0);
   if (total > 0) {
-    for (const key of Object.keys(weights)) {
-      weights[key] = round((weights[key] ?? 0) / total, 4);
+    for (const [key, val] of Object.entries(weights)) {
+      weights[key] = round(val / total, 4);
     }
   }
 
