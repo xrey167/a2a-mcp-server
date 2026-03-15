@@ -217,7 +217,7 @@ Rules:
     };
   } catch (err) {
     log(`template matching failed: ${err}`);
-    return { variantId: null, variantSpec: null, confidence: "none", reason: "Matching failed, using base template" };
+    return { variantId: null, variantSpec: null, confidence: "none", reason: `Matching failed for pipeline "${pipelineId}": ${err instanceof Error ? err.message : String(err)}, using base template` };
   }
 }
 
@@ -679,7 +679,7 @@ For each file, use this exact format:
       const dir = fullPath.substring(0, fullPath.lastIndexOf("/"));
       if (dir) {
         const safeDir = sanitizePath(dir);
-        await runShell(`mkdir -p ${JSON.stringify(safeDir)}`);
+        await runShell(`mkdir -p -- ${JSON.stringify(safeDir)}`);
       }
       await writeFile(fullPath, content);
       files.push(fullPath);
