@@ -356,7 +356,7 @@ function pruneHistory(): void {
   if (removeCount > 0) eventHistory.splice(0, removeCount);
 
   // Prune stale subscriptions: created >24h ago and never matched any event
-  for (const [id, sub] of subscriptions) {
+  for (const [id, sub] of Array.from(subscriptions)) {
     if (sub.matchCount === 0 && now - sub.createdAt > STALE_SUB_TTL_MS) {
       subscriptions.delete(id);
       process.stderr.write(`[event-bus] pruned stale subscription: ${id} (${sub.pattern})${sub.name ? ` [${sub.name}]` : ""}\n`);
