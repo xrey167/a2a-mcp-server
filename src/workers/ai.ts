@@ -3,20 +3,24 @@ import Anthropic from "@anthropic-ai/sdk";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
 import { z } from "zod";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
+import { runClaudeCLI } from "../claude-cli.js";
+import { getPersona, watchPersonas } from "../persona-loader.js";
+import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
+import { sanitizePath } from "../path-utils.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = dirname(__dirname);
 
 const AiSchemas = {
   ask_claude: z.looseObject({ prompt: z.string().min(1), model: z.string().optional(), max_tokens: z.number().int().positive().optional() }),
   search_files: z.looseObject({ pattern: z.string().min(1), directory: z.string().optional().default(".") }),
   query_sqlite: z.looseObject({ database: z.string().min(1), sql: z.string().min(1) }),
 };
-import { resolve } from "node:path";
-import { runClaudeCLI } from "../claude-cli.js";
-import { getPersona, watchPersonas } from "../persona-loader.js";
-import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
-import { sanitizePath } from "../path-utils.js";
 
 const PORT = 8083;
 const NAME = "ai-agent";
@@ -98,7 +102,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
     case "search_files": {
       const { pattern, directory } = AiSchemas.search_files.parse({ pattern: args.pattern ?? text, ...args });
-      const safeBase = process.cwd();
+      const safeBase = PROJECT_ROOT;
       const resolvedDir = resolve(safeBase, directory);
       if (resolvedDir !== safeBase && !resolvedDir.startsWith(safeBase + "/")) {
         return "Error: directory traversal outside working directory is not allowed";

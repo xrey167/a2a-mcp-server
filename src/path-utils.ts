@@ -26,12 +26,6 @@ export function sanitizePath(path: string, baseDir?: string): string {
     throw new Error("Path must be a non-empty string");
   }
 
-  // Only allow alphanumeric, hyphens, underscores, dots, slashes, and tildes
-  // This prevents shell metacharacters and control characters
-  if (!/^[a-zA-Z0-9_.\/~-]+$/.test(path)) {
-    throw new Error(`Unsafe path rejected: "${path}" — path contains disallowed characters`);
-  }
-
   // Reject explicit path traversal attempts
   if (path.includes("..")) {
     throw new Error(`Unsafe path rejected: "${path}" — path contains '..'`);
