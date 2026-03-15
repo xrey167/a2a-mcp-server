@@ -146,6 +146,18 @@ const MonitorSchemas = {
     /** Filter military aircraft only */
     militaryOnly: z.boolean().optional().default(false),
   }),
+
+  fetch_vessels: z.looseObject({
+    /** Bounding box: min lat, max lat, min lon, max lon */
+    lamin: z.number().optional(),
+    lamax: z.number().optional(),
+    lomin: z.number().optional(),
+    lomax: z.number().optional(),
+    /** Filter military vessels only */
+    militaryOnly: z.boolean().optional().default(false),
+    /** Max vessels to return */
+    limit: z.number().int().positive().optional().default(200),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -165,6 +177,7 @@ const AGENT_CARD = {
     { id: "watchlist_check", name: "Watchlist Check", description: "Screen entities against configurable watchlists with optional fuzzy matching" },
     { id: "fetch_conflicts", name: "Fetch Conflicts", description: "Fetch live conflict data from GDELT or ACLED APIs with region/country filtering" },
     { id: "fetch_flights", name: "Fetch Flights", description: "Fetch live ADS-B flight data from OpenSky Network with bounding box and military filtering" },
+    { id: "fetch_vessels", name: "Fetch Vessels", description: "Fetch live AIS vessel positions from AISHub (free tier) or MarineTraffic (MARINETRAFFIC_API_KEY) with bounding box and military filtering" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -500,6 +513,8 @@ const NAVAL_MID_PREFIXES = [
 
 /** AIS ship type codes indicating military/government */
 const MILITARY_SHIP_TYPES = new Set([35, 50, 51, 52, 53, 54, 55]);
+/** MMSI prefixes 00x = warships per ITU */
+const MILITARY_MMSI_PREFIXES = ["00"];
 
 interface Vessel {
   mmsi: string;
@@ -949,6 +964,69 @@ async function fetchOpenSkyFlights(
   return flights;
 }
 
+async function fetchAisVessels(
+  lamin?: number, lamax?: number, lomin?: number, lomax?: number,
+  militaryOnly: boolean = false,
+  limit: number = 200,
+): Promise<Vessel[]> {
+  const apiKey = process.env.MARINETRAFFIC_API_KEY;
+
+  let raw: Array<Record<string, unknown>>;
+
+  if (apiKey) {
+    // MarineTraffic v2 getVesselsInArea — requires API key
+    const params = new URLSearchParams({ v: "2", protocol: "jsono", msgtype: "simple" });
+    if (lamin !== undefined) params.set("MINLAT", String(lamin));
+    if (lamax !== undefined) params.set("MAXLAT", String(lamax));
+    if (lomin !== undefined) params.set("MINLON", String(lomin));
+    if (lomax !== undefined) params.set("MAXLON", String(lomax));
+    const url = `https://services.marinetraffic.com/api/getVesselsInArea/${apiKey}?${params}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
+    if (!res.ok) throw new Error(`MarineTraffic HTTP ${res.status}: ${res.statusText}`);
+    raw = await res.json() as Array<Record<string, unknown>>;
+  } else {
+    // AISHub free tier — no auth, 60 s cache, bounding box optional
+    const params = new URLSearchParams({ format: "1", output: "json" });
+    if (lamin !== undefined) params.set("latmin", String(lamin));
+    if (lamax !== undefined) params.set("latmax", String(lamax));
+    if (lomin !== undefined) params.set("lonmin", String(lomin));
+    if (lomax !== undefined) params.set("lonmax", String(lomax));
+    const url = `http://data.aishub.net/ws.php?${params}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
+    if (!res.ok) throw new Error(`AISHub HTTP ${res.status}: ${res.statusText}`);
+    // AISHub returns [metadata, [...vessels]]
+    const body = await res.json() as [unknown, Array<Record<string, unknown>>];
+    raw = Array.isArray(body[1]) ? body[1] : [];
+  }
+
+  const vessels: Vessel[] = [];
+  for (const v of raw.slice(0, limit)) {
+    // Normalise field names across both APIs
+    const mmsi = String(v["MMSI"] ?? v["mmsi"] ?? "");
+    const lat = parseFloat(String(v["LATITUDE"] ?? v["LAT"] ?? v["lat"] ?? "0"));
+    const lon = parseFloat(String(v["LONGITUDE"] ?? v["LON"] ?? v["lon"] ?? "0"));
+    if (!mmsi || !lat || !lon) continue;
+
+    const shipType = parseInt(String(v["SHIPTYPE"] ?? v["TYPE"] ?? v["type"] ?? "0"), 10);
+    const isMilitary = MILITARY_SHIP_TYPES.has(shipType) || MILITARY_MMSI_PREFIXES.some(p => mmsi.startsWith(p));
+    if (militaryOnly && !isMilitary) continue;
+
+    vessels.push({
+      mmsi,
+      name: String(v["SHIPNAME"] ?? v["NAME"] ?? v["name"] ?? ""),
+      shipType: isNaN(shipType) ? 0 : shipType,
+      lat,
+      lon,
+      speed: parseFloat(String(v["SPEED"] ?? v["SOG"] ?? "0")) || 0,
+      course: parseFloat(String(v["COURSE"] ?? v["COG"] ?? "0")) || 0,
+      destination: String(v["DESTINATION"] ?? v["destination"] ?? ""),
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  return vessels;
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
@@ -1049,6 +1127,23 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         militaryFlights: militaryCount,
         byCountry,
         flights: flights.slice(0, 200), // Limit response size
+      }, 2);
+    }
+
+    case "fetch_vessels": {
+      const { lamin, lamax, lomin, lomax, militaryOnly, limit } = MonitorSchemas.fetch_vessels.parse(args);
+      const vessels = await fetchAisVessels(lamin, lamax, lomin, lomax, militaryOnly, limit);
+      const militaryCount = vessels.filter(v => MILITARY_SHIP_TYPES.has(v.shipType) || MILITARY_MMSI_PREFIXES.some(p => v.mmsi.startsWith(p))).length;
+      const byType: Record<number, number> = {};
+      for (const v of vessels) {
+        byType[v.shipType] = (byType[v.shipType] ?? 0) + 1;
+      }
+      return safeStringify({
+        source: process.env.MARINETRAFFIC_API_KEY ? "marinetraffic" : "aishub",
+        totalVessels: vessels.length,
+        militaryVessels: militaryCount,
+        byShipType: byType,
+        vessels,
       }, 2);
     }
 

@@ -29,6 +29,8 @@ import { round } from "../worker-utils.js";
 
 const PORT = 8093;
 const NAME = "infra-agent";
+const FETCH_TIMEOUT = 20_000;
+const UA = "A2A-Infra-Agent/1.0";
 
 // ── Zod Schemas ──────────────────────────────────────────────────
 
@@ -118,6 +120,15 @@ const InfraSchemas = {
     }).optional().default({}),
   }),
 
+  fetch_cables: z.looseObject({
+    /** Optional region filter — matches cable name or landing point names (e.g. "pacific", "atlantic") */
+    region: z.string().optional(),
+    /** Only return cables with this status (e.g. "active", "planned", "decommissioned") */
+    status: z.string().optional(),
+    /** Max cable systems to return (default 100) */
+    limit: z.number().int().positive().optional().default(100),
+  }),
+
   dependency_graph: z.looseObject({
     nodes: z.array(z.object({
       id: z.string(),
@@ -151,6 +162,7 @@ const AGENT_CARD = {
     { id: "redundancy_score", name: "Redundancy Score", description: "Score infrastructure redundancy for a region across cables, ports, power, pipelines, etc." },
     { id: "dependency_graph", name: "Dependency Graph", description: "Build dependency graphs and query: critical nodes (high in-degree), single points of failure, impact analysis" },
     { id: "load_infrastructure", name: "Load Infrastructure", description: "Load the static infrastructure database (chokepoints, bases, cables, pipelines, datacenters, ports) with optional type/region filtering" },
+    { id: "fetch_cables", name: "Fetch Cables", description: "Fetch live submarine cable topology from TeleGeography (free, no auth). Returns cable systems as InfraNode+InfraEdge arrays ready for cascade_analysis or dependency_graph" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -764,6 +776,80 @@ function analyzeGraph(
   }
 }
 
+// ── Live Data Ingestion ───────────────────────────────────────────
+
+/** TeleGeography cable record shape (v3 API) */
+interface TeleGeoCable {
+  id: string;
+  name: string;
+  length?: string;
+  owners?: string[];
+  rfs?: string;
+  notes?: string;
+  landing_points?: Array<{ id?: string; name?: string; country?: string; lat?: number; lon?: number }>;
+}
+
+async function fetchSubmarineCables(
+  region?: string,
+  status?: string,
+  limit: number = 100,
+): Promise<{ nodes: InfraNode[]; edges: InfraEdge[]; cables: TeleGeoCable[] }> {
+  const url = "https://www.submarinecablemap.com/api/v3/cable/all.json";
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
+  if (!res.ok) throw new Error(`TeleGeography HTTP ${res.status}: ${res.statusText}`);
+  let cables = await res.json() as TeleGeoCable[];
+
+  // Optional filters
+  if (region) {
+    const r = region.toLowerCase();
+    cables = cables.filter(c =>
+      c.name.toLowerCase().includes(r) ||
+      (c.landing_points ?? []).some(lp => (lp.country ?? "").toLowerCase().includes(r) || (lp.name ?? "").toLowerCase().includes(r)),
+    );
+  }
+  if (status) {
+    const s = status.toLowerCase();
+    cables = cables.filter(c => (c.rfs ?? "").toLowerCase().includes(s) || (c.notes ?? "").toLowerCase().includes(s));
+  }
+  cables = cables.slice(0, limit);
+
+  // Map cables to InfraNode + InfraEdge format consumable by cascade_analysis / dependency_graph
+  const nodes: InfraNode[] = [];
+  const edges: InfraEdge[] = [];
+  const landingPointsSeen = new Set<string>();
+
+  for (const cable of cables) {
+    // Cable system itself → cable node
+    nodes.push({
+      id: cable.id,
+      type: "cable",
+      name: cable.name,
+      capacity: 1,
+      redundancy: 0.1, // submarine cables have low inherent redundancy
+      metadata: { owners: cable.owners ?? [], rfs: cable.rfs ?? "", length: cable.length ?? "" },
+    });
+
+    // Each landing point → country/port node + edge cable→landing_point
+    for (const lp of cable.landing_points ?? []) {
+      const lpId = lp.id ?? `lp-${lp.name}-${lp.country}`.replace(/\s+/g, "-").toLowerCase();
+      if (!landingPointsSeen.has(lpId)) {
+        landingPointsSeen.add(lpId);
+        nodes.push({
+          id: lpId,
+          type: "port",
+          name: lp.name ?? lpId,
+          capacity: 1,
+          redundancy: 0.3,
+          metadata: { country: lp.country ?? "", lat: lp.lat, lon: lp.lon },
+        });
+      }
+      edges.push({ from: cable.id, to: lpId, type: "lands_at", strength: 1, redundancy: 0 });
+    }
+  }
+
+  return { nodes, edges, cables };
+}
+
 // ── Infrastructure Database Loader ───────────────────────────────
 
 let infraDbCache: { nodes: InfraNode[]; edges: InfraEdge[] } | null = null;
@@ -786,7 +872,7 @@ function loadInfrastructureDb(): { nodes: InfraNode[]; edges: InfraEdge[] } {
 
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
-function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string {
+async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
   if (memResult !== null) return memResult;
 
@@ -872,6 +958,29 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       }, 2);
     }
 
+    case "fetch_cables": {
+      const { region, status, limit } = InfraSchemas.fetch_cables.parse(args);
+      const { nodes, edges, cables } = await fetchSubmarineCables(region, status, limit);
+      const landingPointCount = nodes.filter(n => n.type === "port").length;
+      const byCountry: Record<string, number> = {};
+      for (const n of nodes) {
+        if (n.type === "port") {
+          const country = String((n.metadata as Record<string, unknown>).country ?? "unknown");
+          byCountry[country] = (byCountry[country] ?? 0) + 1;
+        }
+      }
+      return safeStringify({
+        totalCables: cables.length,
+        totalNodes: nodes.length,
+        totalEdges: edges.length,
+        landingPoints: landingPointCount,
+        byCountry,
+        // nodes/edges ready to pipe into cascade_analysis or dependency_graph
+        nodes,
+        edges,
+      }, 2);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
@@ -905,7 +1014,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const sid = skillId ?? "cascade_analysis";
 
   try {
-    const result = handleSkill(sid, args ?? {}, text);
+    const result = await handleSkill(sid, args ?? {}, text);
     return buildA2AResponse(data.id, taskId, result);
   } catch (err) {
     reply.code(500);
