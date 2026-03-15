@@ -277,8 +277,8 @@ function createWorkerCommand() {
     process.stderr.write(`  1. Edit ${dir}/index.ts to add your skills\n`);
     process.stderr.write(`  2. Start the server: bun src/server.ts\n`);
     process.stderr.write(`  3. Your worker will be auto-discovered and spawned\n\n`);
-  } catch (err: any) {
-    process.stderr.write(`Error: ${err.message}\n`);
+  } catch (e: unknown) {
+    process.stderr.write(`Error: ${e instanceof Error ? e.message : String(e)}\n`);
     process.exit(1);
   }
 }
@@ -356,8 +356,8 @@ function installCommand() {
     process.stderr.write(`     (or clone the repo: git clone ${entry.repo} ${dir})\n`);
     process.stderr.write(`  2. Install deps if needed: cd ${dir} && bun install\n`);
     process.stderr.write(`  3. Start the server: bun src/server.ts\n\n`);
-  } catch (err: any) {
-    process.stderr.write(`Error: ${err.message}\n`);
+  } catch (e: unknown) {
+    process.stderr.write(`Error: ${e instanceof Error ? e.message : String(e)}\n`);
     process.exit(1);
   }
 }

@@ -109,8 +109,8 @@ function loadManifestCache(): ToolDef[] {
     const cached: CachedManifest = JSON.parse(raw);
     const age = Date.now() - cached.updatedAt;
     if (age < 24 * 60 * 60 * 1000) return cached.tools; // use if < 24h old
-  } catch (e: any) {
-    if (e?.code !== "ENOENT") process.stderr.write(`[mcp-registry] failed to load manifest cache: ${e}\n`);
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") process.stderr.write(`[mcp-registry] failed to load manifest cache: ${e}\n`);
   }
   return [];
 }
