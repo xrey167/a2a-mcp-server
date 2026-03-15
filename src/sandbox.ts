@@ -106,6 +106,11 @@ export async function executeSandbox(opts: SandboxOptions): Promise<SandboxResul
   }
 }
 
+function logStreamError(err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`[sandbox] stream read error: ${msg}\n`);
+}
+
 async function runSubprocess(
   tmpFile: string,
   sessionId: string,
@@ -157,7 +162,7 @@ async function runSubprocess(
           process.stderr.write(`[sandbox] ${text}`);
         }
       } catch (err) {
-        process.stderr.write(`[sandbox] stream read error: ${err instanceof Error ? err.message : String(err)}\n`);
+        logStreamError(err);
       }
     })();
 
@@ -188,7 +193,7 @@ async function runSubprocess(
           }
         }
       } catch (err) {
-        process.stderr.write(`[sandbox] stream read error: ${err instanceof Error ? err.message : String(err)}\n`);
+        logStreamError(err);
       }
     }
 

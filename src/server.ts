@@ -204,6 +204,10 @@ const WEBHOOK_BLOCKED_SKILLS = new Set([
   "regulatory_scan",
 ]);
 
+function getErrMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 function sanitizeUrlForLog(url: string): string {
   try {
     const parsed = new URL(url);
@@ -525,7 +529,7 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
       return res;
     } catch (err) {
       decrementActive(params.skillId ?? "unknown", workerName);
-      endTimer(err instanceof Error ? err.message : String(err));
+      endTimer(getErrMsg(err));
       span.setTag("error", String(err)).end("error");
       safePublish(`agent.${workerName}.failed`, { skillId: params.skillId, error: String(err) }, { source: workerName, correlationId: trace.traceId });
       throw err;
@@ -1102,7 +1106,7 @@ async function dispatchSkill(skillId: string, args: Record<string, unknown>, tex
       ...auditBase,
       success: false,
       durationMs: Date.now() - auditStart,
-      error: err instanceof Error ? err.message : String(err),
+      error: getErrMsg(err),
     });
     throw err;
   }
@@ -1406,7 +1410,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
           updateWorkflowRun(workflowRunId, "completed");
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = getErrMsg(err);
           try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
           updateWorkflowRun(workflowRunId, "failed", msg);
         }
@@ -1967,7 +1971,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           osintTrace.end("error");
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = getErrMsg(err);
           safePublish("workflow.osint_brief.failed", { taskId: task.id, error: msg });
           try { markFailed(task.id, { code: "OSINT_BRIEF_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
@@ -1995,7 +1999,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           osintTrace.end("error");
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = getErrMsg(err);
           safePublish("workflow.osint_alert_scan.failed", { taskId: task.id, error: msg });
           try { markFailed(task.id, { code: "OSINT_ALERT_SCAN_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
@@ -2023,7 +2027,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           osintTrace.end("error");
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = getErrMsg(err);
           safePublish("workflow.osint_threat_assess.failed", { taskId: task.id, region: opts.region, error: msg });
           try { markFailed(task.id, { code: "OSINT_THREAT_ASSESS_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
@@ -2051,7 +2055,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           osintTrace.end("error");
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = getErrMsg(err);
           safePublish("workflow.osint_market_snapshot.failed", { taskId: task.id, error: msg });
           try { markFailed(task.id, { code: "OSINT_MARKET_SNAPSHOT_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
@@ -2102,7 +2106,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const result = reconcileDemandSupply(demand, supply, periods);
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = getErrMsg(err);
           try { markFailed(task.id, { code: "SOP_MATCH_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
@@ -2141,7 +2145,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const result = simulateScenario(baseline, opts.adjustment as { type: string; percentage: number; items?: string[] });
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = getErrMsg(err);
           try { markFailed(task.id, { code: "SOP_SCENARIO_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
@@ -2182,7 +2186,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const result = calculateESGScore(opts.entityId, opts.entityType ?? "supplier", opts.entityName, agentData);
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = getErrMsg(err);
           try { markFailed(task.id, { code: "ESG_SCORE_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
@@ -2220,8 +2224,8 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const result = calculateCarbonFootprint(opts.itemNo, bomComponents, routes, { includeScenarios: opts.includeScenarios });
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "CARBON_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
+          const msg = getErrMsg(err);
+          try { markFailed(task.id, { code: "CARBON_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${getErrMsg(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2238,8 +2242,8 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const summary = await dispatchSkill("delegate", { skillId: "ask_claude", message: `Summarize these regulatory alerts into an executive brief with impact assessment and recommended actions:\n\n${scanResult}` }, text);
           markCompleted(task.id, JSON.stringify({ scan: safeParseJSON(scanResult), executiveBrief: summary }, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "REGULATORY_BRIEF_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
+          const msg = getErrMsg(err);
+          try { markFailed(task.id, { code: "REGULATORY_BRIEF_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${getErrMsg(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2273,8 +2277,8 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const result = evaluateNearshoring(currentSupplier, targetCountries);
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "NEARSHORING_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
+          const msg = getErrMsg(err);
+          try { markFailed(task.id, { code: "NEARSHORING_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${getErrMsg(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2314,8 +2318,8 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const result = analyzeWinLoss(quotes);
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "WIN_LOSS_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
+          const msg = getErrMsg(err);
+          try { markFailed(task.id, { code: "WIN_LOSS_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${getErrMsg(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2334,8 +2338,8 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const result = optimizePricing(quotes);
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "PRICE_OPTIMIZE_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
+          const msg = getErrMsg(err);
+          try { markFailed(task.id, { code: "PRICE_OPTIMIZE_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${getErrMsg(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2354,8 +2358,8 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const result = forecastRevenue(history, opts.horizonMonths ?? 6);
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "REVENUE_FORECAST_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
+          const msg = getErrMsg(err);
+          try { markFailed(task.id, { code: "REVENUE_FORECAST_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${getErrMsg(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2377,8 +2381,8 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const rawMarket = marketRaw.status === "fulfilled" ? (() => { const p = safeParseJSON(marketRaw.value); return Array.isArray(p) ? p : (p as Record<string, unknown>)?.items ?? []; })() : [];
           markCompleted(task.id, JSON.stringify({ competitor: opts.name, newsSignals: (rawNews as unknown[]).length, marketSignals: (rawMarket as unknown[]).length, rawNews, rawMarket }, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "COMPETITOR_MONITOR_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
+          const msg = getErrMsg(err);
+          try { markFailed(task.id, { code: "COMPETITOR_MONITOR_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${getErrMsg(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2401,8 +2405,8 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           const brief = buildCompetitorBrief(competitor, newsData, marketData);
           markCompleted(task.id, JSON.stringify(brief, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "COMPETITOR_BRIEF_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
+          const msg = getErrMsg(err);
+          try { markFailed(task.id, { code: "COMPETITOR_BRIEF_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${getErrMsg(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2432,8 +2436,8 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           );
           markCompleted(task.id, JSON.stringify({ playbook: playbook.metadata, result }, null, 2));
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "PLAYBOOK_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
+          const msg = getErrMsg(err);
+          try { markFailed(task.id, { code: "PLAYBOOK_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${getErrMsg(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id, playbook: playbook.metadata }, null, 2);
@@ -4822,7 +4826,7 @@ function startFollowupWritebackScheduler(): () => void {
         `[q2o-writeback] run complete: workspaces=${result.workspaceCount} processed=${result.processedCount} failed=${result.failedCount} durationMs=${Date.now() - startedAt}\n`,
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = getErrMsg(err);
       process.stderr.write(`[q2o-writeback] run failed: ${msg}\n`);
     } finally {
       inFlight = false;
@@ -4885,7 +4889,7 @@ function startConnectorRenewalScheduler(): () => void {
       if (err instanceof CircuitOpenError) {
         process.stderr.write(`[erp-renewal] sweep blocked by circuit breaker (retryAfterMs=${err.retryAfterMs})\n`);
       } else {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = getErrMsg(err);
         process.stderr.write(`[erp-renewal] sweep failed: ${msg}\n`);
       }
     } finally {
@@ -5533,7 +5537,7 @@ async function launchPilot(input: {
       salesPacket: packet,
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = getErrMsg(err);
     updatePilotLaunchRun(launchRunId, {
       status: "delivery_failed",
       delivery: { channel: "email", delivered: false },
@@ -5569,7 +5573,7 @@ function startConnectorRenewalSnapshotScheduler(): () => void {
       const out = await writeConnectorRenewalSnapshot();
       process.stderr.write(`[erp-snapshot] exported renewal snapshot rows=${out.rowCount} failed=${out.failedCount} csv=${out.csvPath} manifest=${out.manifestPath}\n`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = getErrMsg(err);
       process.stderr.write(`[erp-snapshot] snapshot export failed: ${msg}\n`);
     } finally {
       inFlight = false;
@@ -5717,7 +5721,7 @@ async function startHttpServer() {
       };
     } catch (err) {
       const code = err instanceof AgentError ? err.code : "INTERNAL_ERROR";
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = getErrMsg(err);
       process.stderr.write(`[orchestrator] A2A dispatch error: ${code} — ${msg}\n`);
       return {
         jsonrpc: "2.0", id: data.id,
@@ -5881,7 +5885,7 @@ async function startHttpServer() {
         return { status: "completed", result };
       }
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
+      const errMsg = getErrMsg(err);
       logWebhookCall(webhookId, "error", undefined, errMsg, payloadSize);
       reply.code(500);
       return { error: errMsg };
@@ -5929,7 +5933,7 @@ async function startHttpServer() {
       };
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6002,7 +6006,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6015,7 +6019,7 @@ async function startHttpServer() {
       return payload;
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6031,7 +6035,7 @@ async function startHttpServer() {
       return { status: "connected", connector, session: updatedSession };
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6045,7 +6049,7 @@ async function startHttpServer() {
       return await runWizardConnectorTest(request.params.id, connectorType, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6058,7 +6062,7 @@ async function startHttpServer() {
       return runWizardMasterDataAutoSync(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6071,7 +6075,7 @@ async function startHttpServer() {
       return runWizardQuoteToOrderDryRun(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6087,7 +6091,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6100,7 +6104,7 @@ async function startHttpServer() {
       return launchWizardSession(request.params.id, { mode: request.body?.mode });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6113,7 +6117,7 @@ async function startHttpServer() {
       return getWizardSessionReport(request.params.id);
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6179,7 +6183,7 @@ async function startHttpServer() {
         };
       } catch (err) {
         reply.code(400);
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: getErrMsg(err) };
       }
     },
   );
@@ -6290,7 +6294,7 @@ async function startHttpServer() {
         return renderWizardMailboxOAuthPage({
           ok: false,
           title: "OAuth exchange failed",
-          message: err instanceof Error ? err.message : String(err),
+          message: getErrMsg(err),
           payload: {
             status: "error",
             provider: tx.provider,
@@ -6314,7 +6318,7 @@ async function startHttpServer() {
       return { status: "connected", connector: status };
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6328,7 +6332,7 @@ async function startHttpServer() {
       return result;
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6341,7 +6345,7 @@ async function startHttpServer() {
       return getConnectorStatus(request.params.type);
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6366,7 +6370,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6379,7 +6383,7 @@ async function startHttpServer() {
       return await renewDueConnectors({ dryRun: request.body?.dryRun === true });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6392,7 +6396,7 @@ async function startHttpServer() {
       return getConnectorKpis({ since: request.query?.since });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6413,7 +6417,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6437,7 +6441,7 @@ async function startHttpServer() {
       return csv;
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6454,7 +6458,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6467,7 +6471,7 @@ async function startHttpServer() {
       return await verifyConnectorRenewalManifest(request.body?.manifestPath);
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6489,7 +6493,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6523,7 +6527,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6553,7 +6557,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6574,7 +6578,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6593,7 +6597,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6611,7 +6615,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6629,7 +6633,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6646,7 +6650,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6665,7 +6669,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6687,7 +6691,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6704,7 +6708,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6721,7 +6725,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6739,7 +6743,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6759,7 +6763,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6773,7 +6777,7 @@ async function startHttpServer() {
       return updateWorkflowSlaIncidentStatus(request.params.id, request.body?.status);
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6786,7 +6790,7 @@ async function startHttpServer() {
       return syncQuoteToOrderQuote(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6799,7 +6803,7 @@ async function startHttpServer() {
       return syncQuoteToOrderOrder(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6812,7 +6816,7 @@ async function startHttpServer() {
       return decideQuoteToOrderApproval(request.params.id, request.params.approvalId, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6825,7 +6829,7 @@ async function startHttpServer() {
       return getQuoteToOrderPipeline(request.params.id, { since: request.query?.since });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6838,7 +6842,7 @@ async function startHttpServer() {
       return syncRevenueGraphWorkspace(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6865,7 +6869,7 @@ async function startHttpServer() {
         );
       } catch (err) {
         reply.code(400);
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: getErrMsg(err) };
       }
     },
   );
@@ -6879,7 +6883,7 @@ async function startHttpServer() {
       return ingestQuoteCommunication(request.params.id, request.params.quoteId, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6892,7 +6896,7 @@ async function startHttpServer() {
       return importQuoteMailboxCommunications(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6905,7 +6909,7 @@ async function startHttpServer() {
       return upsertQuoteMailboxConnection(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6921,7 +6925,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6941,7 +6945,7 @@ async function startHttpServer() {
         return await refreshQuoteMailboxConnection(request.params.id, request.params.provider, body);
       } catch (err) {
         reply.code(400);
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: getErrMsg(err) };
       }
     },
   );
@@ -6959,7 +6963,7 @@ async function startHttpServer() {
         });
       } catch (err) {
         reply.code(400);
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: getErrMsg(err) };
       }
     },
   );
@@ -6973,7 +6977,7 @@ async function startHttpServer() {
       return await pullQuoteMailboxCommunications(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -6986,7 +6990,7 @@ async function startHttpServer() {
       return await syncQuoteCommunicationThreads(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7010,7 +7014,7 @@ async function startHttpServer() {
         });
       } catch (err) {
         reply.code(400);
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: getErrMsg(err) };
       }
     },
   );
@@ -7024,7 +7028,7 @@ async function startHttpServer() {
       return runQuoteFollowupEngine(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7043,7 +7047,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7056,7 +7060,7 @@ async function startHttpServer() {
       return updateQuoteFollowupAction(request.params.id, request.params.actionId, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7069,7 +7073,7 @@ async function startHttpServer() {
       return await writebackQuoteFollowupAction(request.params.id, request.params.actionId, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7082,7 +7086,7 @@ async function startHttpServer() {
       return await writebackQuoteFollowupBatch(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7095,7 +7099,7 @@ async function startHttpServer() {
       return await runScheduledFollowupWritebacks(request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7115,7 +7119,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7141,7 +7145,7 @@ async function startHttpServer() {
         });
       } catch (err) {
         reply.code(400);
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: getErrMsg(err) };
       }
     },
   );
@@ -7170,7 +7174,7 @@ async function startHttpServer() {
         });
       } catch (err) {
         reply.code(400);
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: getErrMsg(err) };
       }
     },
   );
@@ -7186,7 +7190,7 @@ async function startHttpServer() {
         return recordQuotePersonalityFeedback(request.params.id, request.body ?? {});
       } catch (err) {
         reply.code(400);
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: getErrMsg(err) };
       }
     },
   );
@@ -7200,7 +7204,7 @@ async function startHttpServer() {
       return createQuoteNextActionRecommendation(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7213,7 +7217,7 @@ async function startHttpServer() {
       return createQuotePersonalityReplyRecommendation(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7233,7 +7237,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7246,7 +7250,7 @@ async function startHttpServer() {
       return await approveQuoteAutopilotProposal(request.params.id, request.params.proposalId, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7259,7 +7263,7 @@ async function startHttpServer() {
       return rejectQuoteAutopilotProposal(request.params.id, request.params.proposalId, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7272,7 +7276,7 @@ async function startHttpServer() {
       return runQuoteDealRescue(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7287,7 +7291,7 @@ async function startHttpServer() {
       return syncMasterDataEntity(workspaceId, entity, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7308,7 +7312,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7321,7 +7325,7 @@ async function startHttpServer() {
       return updateMasterDataMapping(request.params.id, request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7337,7 +7341,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7350,7 +7354,7 @@ async function startHttpServer() {
       return getOpsAnalytics({ since: request.query?.since });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7366,7 +7370,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7385,7 +7389,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7405,7 +7409,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7418,7 +7422,7 @@ async function startHttpServer() {
       return updateTrustConsent(request.body ?? {});
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7434,7 +7438,7 @@ async function startHttpServer() {
       });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7462,7 +7466,7 @@ async function startHttpServer() {
           markCompleted(task.id, JSON.stringify(result, null, 2));
           updateWorkflowRun(workflowRunId, "completed");
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = getErrMsg(err);
           try { markFailed(task.id, { code: "ERP_WORKFLOW_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
           updateWorkflowRun(workflowRunId, "failed", msg);
         }
@@ -7471,7 +7475,7 @@ async function startHttpServer() {
       return { status: "accepted", product, workflowRunId, taskId: task.id };
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -7485,7 +7489,7 @@ async function startHttpServer() {
       return getProductKpis(product, { since: request.query?.since });
     } catch (err) {
       reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
+      return { error: getErrMsg(err) };
     }
   });
 
@@ -8088,7 +8092,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
       if (session && session.workspaceId) {
         try {
           await loadRevenuePanel(session.workspaceId);
-        } catch (err) { console.error("[server] loadRevenuePanel error: " + (err instanceof Error ? err.message : String(err))); }
+        } catch (err) { console.error("[server] loadRevenuePanel error: " + (getErrMsg(err))); }
       }
       renderBootstrap();
       setMessage(actionMsg, "Session loaded.", "ok");
