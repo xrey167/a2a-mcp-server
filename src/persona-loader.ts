@@ -111,5 +111,5 @@ export function watchPersonas() {
       process.stderr.write(`[persona-loader] reloaded persona: ${agentName}\n`);
     });
     process.stderr.write(`[persona-loader] watching ${PERSONAS_DIR}\n`);
-  } catch {}
+  } catch (e) { process.stderr.write(`[persona-loader] watcher setup failed: ${e}\n`); }
 }

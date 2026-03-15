@@ -184,6 +184,8 @@ export function verifySignature(payload: string, signature: string, secret: stri
 
 // ── Payload Transformation ───────────────────────────────────────
 
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 export function transformPayload(
   payload: unknown,
   fieldMappings: Record<string, string>,
@@ -192,6 +194,7 @@ export function transformPayload(
   const args = { ...staticArgs };
 
   for (const [targetField, sourcePath] of Object.entries(fieldMappings)) {
+    if (FORBIDDEN_KEYS.has(targetField)) continue;
     args[targetField] = getNestedValue(payload, sourcePath);
   }
 
