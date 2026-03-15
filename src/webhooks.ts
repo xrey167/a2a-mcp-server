@@ -20,8 +20,14 @@ import { homedir } from "os";
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-function safeJsonParse(s: string, fallback: unknown = {}): unknown {
-  try { return JSON.parse(s); } catch { return fallback; }
+function safeJsonParse(s: string | null | undefined, fallback: unknown = {}): unknown {
+  if (s == null || s === "") return fallback;
+  try {
+    return JSON.parse(s);
+  } catch (e) {
+    process.stderr.write(`[webhooks] corrupted JSON in DB, using fallback: ${e}\n`);
+    return fallback;
+  }
 }
 
 // ── Types ────────────────────────────────────────────────────────
