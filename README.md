@@ -4,15 +4,15 @@
   <img src="https://img.shields.io/badge/protocol-MCP_(Anthropic)-6366f1" alt="MCP" />
   <img src="https://img.shields.io/badge/protocol-A2A_(Google)-10b981" alt="A2A" />
   <img src="https://img.shields.io/badge/protocol-ACP_(Zed)-ef4444" alt="ACP" />
-  <img src="https://img.shields.io/badge/agents-14_workers-f59e0b" alt="Agents" />
-  <img src="https://img.shields.io/badge/MCP_tools-50%2B-8b5cf6" alt="Tools" />
+  <img src="https://img.shields.io/badge/agents-15_workers-f59e0b" alt="Agents" />
+  <img src="https://img.shields.io/badge/MCP_tools-120-8b5cf6" alt="Tools" />
   <img src="https://github.com/xrey167/a2a-mcp-server/actions/workflows/ci.yml/badge.svg" alt="CI" />
   <img src="https://img.shields.io/github/license/xrey167/a2a-mcp-server" alt="License" />
 </p>
 
 # A2A-MCP Server
 
-A multi-protocol automation runtime that connects **Claude Code**, **Zed IDE**, and any A2A-compatible agent to a fleet of 14 specialized worker agents. Built on **Bun** and **TypeScript** with no build step required.
+A multi-protocol automation runtime that connects **Claude Code**, **Zed IDE**, and any A2A-compatible agent to a fleet of 15 specialized worker agents. Built on **Bun** and **TypeScript** with no build step required.
 
 It speaks three protocols simultaneously:
 
@@ -125,7 +125,7 @@ cd a2a-mcp-server
 bun install
 
 # Initialize config (choose a profile)
-bun src/cli.ts init          # full  — all 14 workers
+bun src/cli.ts init          # full  — all 15 workers
 bun src/cli.ts init --lite   # lite  — shell + web + ai
 bun src/cli.ts init --data   # data  — lite + data
 bun src/cli.ts init --osint  # osint — lite + 6 OSINT workers
@@ -178,7 +178,7 @@ bun src/cli.ts <command> [options]
 | `lite` | shell + web + ai | Fast, minimal footprint |
 | `data` | lite + data | Data processing |
 | `osint` | lite + news + market + signal + monitor + infra + climate | Intelligence gathering |
-| `full` | All 14 workers | Maximum capability |
+| `full` | All 15 workers | Maximum capability |
 
 ---
 
@@ -215,7 +215,7 @@ This scaffolds `src/workers/my-tool.ts`. Add it to `ALL_WORKERS` in `src/server.
 
 ## MCP Tools
 
-50+ tools registered on the MCP server, organized by category:
+120 tools registered on the MCP server, organized by category:
 
 ### Core delegation
 
