@@ -86,6 +86,7 @@ const config: CacheConfig = {
     "codex_exec",
     "sandbox_execute",
     "remember",
+    "generate_brand",  // creative non-deterministic — caching produces stale brand identities
   ]),
 };
 

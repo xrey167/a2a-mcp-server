@@ -12,10 +12,10 @@ const DesignSchemas = {
   suggest_screens: z.looseObject({ appConcept: z.string().min(1), deviceType: z.string().optional().default("mobile") }),
   design_critique: z.looseObject({ description: z.string().min(1) }),
   generate_brand: z.looseObject({
-    appName: z.string().min(1),
-    description: z.string().min(1),
-    industry: z.string().optional(),
-    targetAudience: z.string().optional(),
+    appName: z.string().min(1).max(200),
+    description: z.string().min(1).max(2_000),
+    industry: z.string().max(200).optional(),
+    targetAudience: z.string().max(200).optional(),
   }),
 };
 
@@ -53,8 +53,11 @@ function runGeminiCLI(prompt: string): string {
     encoding: "utf-8",
     timeout: 60_000,
   });
-  if (result.error) throw new Error(result.error.message);
-  if (result.status !== 0) throw new Error(result.stderr || "gemini CLI failed");
+  if (result.error) throw new Error(`gemini CLI spawn error: ${result.error.message}`);
+  if (result.status !== 0) {
+    const detail = result.stderr?.trim() || result.stdout?.trim() || "(no output)";
+    throw new Error(`gemini CLI failed (exit ${result.status}): ${detail}`);
+  }
   return result.stdout.trim();
 }
 
@@ -71,8 +74,12 @@ async function callGemini(systemInstruction: string, userPrompt: string): Promis
     if (!response?.text) throw new Error("Gemini returned empty response");
     return response.text.trim();
   } catch (err) {
-    if (!(err instanceof Error) || err.message !== "no-api-key") throw err;
+    if (!(err instanceof Error) || err.message !== "no-api-key") {
+      process.stderr.write(`[${NAME}] callGemini: SDK call failed — ${err instanceof Error ? err.message : String(err)}\n`);
+      throw err;
+    }
     // CLI fallback: prefix system instruction into the prompt
+    process.stderr.write(`[${NAME}] callGemini: no API key, falling back to gemini CLI\n`);
     return runGeminiCLI(`${systemInstruction}\n\n${userPrompt}`);
   }
 }
@@ -160,14 +167,65 @@ Respond ONLY with a valid JSON object — no markdown fences, no explanation:
 Use descriptive color names ("deep navy", "warm coral") — never hex codes. Palette must be 3-5 colors that work together.`;
 
   const contextLines = [
-    `App name: ${sanitizeUserInput(appName, "app_name")}`,
-    industry ? `Industry: ${sanitizeUserInput(industry, "industry")}` : null,
-    targetAudience ? `Target audience: ${sanitizeUserInput(targetAudience, "target_audience")}` : null,
-    `Description: ${sanitizeUserInput(description, "app_description")}`,
+    `App name: ${sanitizeUserInput(appName, "app_name", 200)}`,
+    industry ? `Industry: ${sanitizeUserInput(industry, "industry", 200)}` : null,
+    targetAudience ? `Target audience: ${sanitizeUserInput(targetAudience, "target_audience", 200)}` : null,
+    `Description: ${sanitizeUserInput(description, "app_description", 2_000)}`,
   ].filter(Boolean).join("\n");
 
   const raw = await callGemini(systemInstruction, contextLines);
-  return raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+  if (!raw || raw.trim().length === 0) {
+    process.stderr.write(`[${NAME}] generate_brand: Gemini returned empty response\n`);
+    throw new Error("generate_brand: model returned empty response — retry or check API key");
+  }
+  const stripped = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+  if (stripped.length === 0) {
+    process.stderr.write(`[${NAME}] generate_brand: response was only markdown fences\n`);
+    throw new Error("generate_brand: model returned only markdown fences — retry");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripped);
+  } catch (err) {
+    process.stderr.write(`[${NAME}] generate_brand: JSON.parse failed — ${err instanceof Error ? err.message : String(err)} — raw: ${stripped.slice(0, 80)}\n`);
+    throw new Error("generate_brand: model did not return valid JSON — retry");
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    process.stderr.write(`[${NAME}] generate_brand: unexpected JSON structure (type=${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed})\n`);
+    throw new Error("generate_brand: model returned unexpected JSON structure — retry");
+  }
+  const p = parsed as Record<string, unknown>;
+  const requiredKeys = ["palette", "primaryColor", "accentColor", "backgroundColor", "typography", "visualStyle", "mood", "voice"];
+  const missing = requiredKeys.filter(k => !(k in p));
+  if (missing.length > 0) {
+    process.stderr.write(`[${NAME}] generate_brand: missing required fields: ${missing.join(", ")}\n`);
+    throw new Error(`generate_brand: model response missing required fields: ${missing.join(", ")} — retry`);
+  }
+
+  // Shape validation for compound fields
+  if (!Array.isArray(p.palette) || (p.palette as unknown[]).length < 3 || !(p.palette as unknown[]).every(c => typeof c === "string")) {
+    process.stderr.write(`[${NAME}] generate_brand: palette must be an array of 3-5 strings, got: ${JSON.stringify(p.palette)}\n`);
+    throw new Error("generate_brand: model returned invalid palette — retry");
+  }
+  if (!Array.isArray(p.mood) || !(p.mood as unknown[]).every(m => typeof m === "string")) {
+    process.stderr.write(`[${NAME}] generate_brand: mood must be an array of strings, got: ${JSON.stringify(p.mood)}\n`);
+    throw new Error("generate_brand: model returned invalid mood — retry");
+  }
+  if (typeof p.voice !== "string" || (p.voice as string).trim().length === 0) {
+    process.stderr.write(`[${NAME}] generate_brand: voice must be a non-empty string, got: ${JSON.stringify(p.voice)}\n`);
+    throw new Error("generate_brand: model returned invalid voice field — retry");
+  }
+  const typo = p.typography;
+  if (typo === null || typeof typo !== "object" || Array.isArray(typo) ||
+      typeof (typo as Record<string, unknown>).heading !== "string" ||
+      typeof (typo as Record<string, unknown>).body !== "string") {
+    process.stderr.write(`[${NAME}] generate_brand: typography must be {heading, body} strings, got: ${JSON.stringify(typo)}\n`);
+    throw new Error("generate_brand: model returned invalid typography — retry");
+  }
+
+  return stripped;
 }
 
 // ── Skill dispatcher ─────────────────────────────────────────────
