@@ -89,7 +89,7 @@ const healthStatus = new Map<string, boolean>();
 function parseSemVer(version: string): { major: number; minor: number; patch: number } | null {
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
-  return { major: parseInt(match[1]), minor: parseInt(match[2]), patch: parseInt(match[3]) };
+  return { major: parseInt(match[1]!, 10), minor: parseInt(match[2]!, 10), patch: parseInt(match[3]!, 10) };
 }
 
 function compareSemVer(a: string, b: string): number {
@@ -143,6 +143,16 @@ export function registerCapability(
   };
 
   skillMap.set(agentName, cap);
+
+  // Size guard: cap at 50 agents per skill to prevent unbounded Map growth
+  if (skillMap.size > 50) {
+    const oldest = skillMap.keys().next().value;
+    if (oldest !== undefined) {
+      skillMap.delete(oldest);
+      process.stderr.write(`[capability] evicted oldest entry "${oldest}" for skill "${skillId}" (size cap 50)\n`);
+    }
+  }
+
   process.stderr.write(`[capability] registered ${agentName}:${skillId} v${cap.version} (features: ${cap.features.join(",")})\n`);
   return cap;
 }
@@ -248,9 +258,10 @@ export function negotiate(skillId: string, query?: NegotiationQuery): Negotiatio
   // Sort by score descending
   candidates.sort((a, b) => b.score - a.score);
 
-  const best = candidates.length > 0 ? candidates[0].capability : null;
-  const reason = best
-    ? `Selected ${best.agentName} (score: ${candidates[0].score.toFixed(1)}, ${candidates[0].reasons.join(", ")})`
+  const top = candidates[0];
+  const best = top?.capability ?? null;
+  const reason = best && top
+    ? `Selected ${best.agentName} (score: ${top.score.toFixed(1)}, ${top.reasons.join(", ")})`
     : "No matching capabilities found";
 
   return { best, candidates, reason };
@@ -299,6 +310,20 @@ export function getCapabilityStats(): {
     agentsWithCapabilities: agents.size,
     skillsWithMultipleProviders: multiProvider,
   };
+}
+
+/**
+ * Prune capabilities: remove any skill entry where ALL registered agents have enabled: false.
+ * Call this after each bulk discovery cycle to keep the Map tidy.
+ */
+export function pruneCapabilities(): void {
+  for (const [skillId, skillMap] of capabilities) {
+    const allDisabled = [...skillMap.values()].every(cap => !cap.enabled);
+    if (allDisabled) {
+      capabilities.delete(skillId);
+      process.stderr.write(`[capability] pruned skill "${skillId}" — all agents disabled\n`);
+    }
+  }
 }
 
 /** Reset all capabilities (for testing). */
