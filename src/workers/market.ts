@@ -643,8 +643,8 @@ function screenAssets(
 
   const dir = sortDir === "asc" ? 1 : -1;
   filtered.sort((a, b) => {
-    const aVal = (a as any)[sortBy] ?? 0;
-    const bVal = (b as any)[sortBy] ?? 0;
+    const aVal = typeof (a as any)[sortBy] === 'number' ? (a as any)[sortBy] : 0;
+    const bVal = typeof (b as any)[sortBy] === 'number' ? (b as any)[sortBy] : 0;
     return (aVal - bVal) * dir;
   });
 
