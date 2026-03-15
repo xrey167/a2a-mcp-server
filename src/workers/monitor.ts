@@ -180,6 +180,12 @@ const MonitorSchemas = {
     /** Classification label applied to the report (e.g. "UNCLASSIFIED") */
     classification: z.string().max(100).optional().default("UNCLASSIFIED"),
   }),
+  monitor_brief: z.looseObject({
+    region: z.string().min(1).max(200),
+    source: z.enum(["acled", "gdelt"]).optional().default("gdelt"),
+    days: z.number().int().min(1).max(90).optional().default(14),
+    focus: z.string().max(200).optional(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -201,6 +207,7 @@ const AGENT_CARD = {
     { id: "fetch_flights", name: "Fetch Flights", description: "Fetch live ADS-B flight data from OpenSky Network with bounding box and military filtering" },
     { id: "fetch_vessels", name: "Fetch Vessels", description: "Fetch live AIS vessel positions from AISHub (free tier) or MarineTraffic (MARINETRAFFIC_API_KEY) with bounding box and military filtering" },
     { id: "situation_report", name: "Situation Report", description: "AI-synthesized intelligence situation report (sitrep) from multi-domain monitor data: conflicts, military surges, theater posture, naval vessels, and flights. Returns structured sitrep with key findings, threat indicators, and analyst assessment." },
+    { id: "monitor_brief", name: "Monitor Brief", description: "Fetch live conflict data, score and rank active conflicts, and generate an AI-written geopolitical situational briefing" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -1081,6 +1088,96 @@ function buildDomainSection(label: string, data: unknown): string {
   return `\n\n## ${label}\n${str}`;
 }
 
+// ── AI Monitor Brief ─────────────────────────────────────────────
+
+async function generateMonitorBrief(
+  region: string,
+  source: string,
+  days: number,
+  focus?: string,
+): Promise<string> {
+  // Detect ACLED credential absence early to avoid mislabelled response data
+  let effectiveSource = source;
+  if (source === "acled" && (!process.env.ACLED_API_KEY || !process.env.ACLED_EMAIL)) {
+    process.stderr.write(`[${NAME}] monitor_brief: ACLED credentials missing, using gdelt for region="${region}"\n`);
+    effectiveSource = "gdelt";
+  }
+
+  let conflicts: Conflict[];
+  try {
+    if (effectiveSource === "acled") {
+      conflicts = await fetchAcledConflicts(region, undefined, days, 50);
+    } else {
+      conflicts = await fetchGdeltConflicts(region, undefined, days, 50);
+    }
+  } catch (err) {
+    process.stderr.write(`[${NAME}] monitor_brief: fetchConflicts (${effectiveSource}) failed for region="${region}" days=${days}: ${err}\n`);
+    throw new Error(`monitor_brief: conflict fetch failed (${effectiveSource})`, { cause: err });
+  }
+
+  const scored = scoreConflicts(conflicts);
+
+  if (scored.length === 0) {
+    process.stderr.write(`[${NAME}] monitor_brief: ${effectiveSource} returned 0 conflicts for region="${region}" days=${days} — briefing will reflect empty dataset\n`);
+  }
+
+  const escalating = scored.filter(c => c.escalationTrend === "escalating");
+  const totalCasualties = scored.reduce((s, c) => s + c.casualties, 0);
+  const totalDisplaced = scored.reduce((s, c) => s + c.displaced, 0);
+
+  const topConflicts = scored
+    .slice(0, 5)
+    .map(c => `${sanitizeForPrompt(c.name, "conflict_name")} (${c.status}, intensity ${c.intensityScore}, trend: ${c.escalationTrend})`)
+    .join("; ");
+
+  const byStatus: Record<string, number> = {};
+  for (const c of scored) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
+  const statusSummary = Object.entries(byStatus).map(([s, n]) => `${n} ${s}`).join(", ");
+
+  const focusLine = focus ? `\nFocus area: ${sanitizeForPrompt(focus, "focus_area")}` : "";
+
+  const dataContext = `Region: ${sanitizeForPrompt(region, "region")}
+Period: last ${days} days
+Source: ${effectiveSource}${focusLine}
+
+Active conflicts: ${scored.length} total
+By status: ${statusSummary || "none"}
+Escalating: ${escalating.length}
+Estimated casualties: ${totalCasualties.toLocaleString()}
+Displaced persons: ${totalDisplaced.toLocaleString()}
+
+Top conflicts by intensity:
+${topConflicts || "none"}`;
+
+  const prompt = `You are a geopolitical intelligence analyst. Write a concise situational briefing (3-5 paragraphs) based on this conflict monitoring data:
+
+${dataContext}
+
+Cover: most significant active conflicts, escalation dynamics, humanitarian impact, and key risk factors. Be analytical and specific. End with a one-sentence risk outlook for the next 30 days.`;
+
+  let analysis: string;
+  try {
+    analysis = await callPeer("ask_claude", { prompt });
+  } catch (err) {
+    process.stderr.write(`[${NAME}] monitor_brief: callPeer ask_claude failed: ${err}\n`);
+    throw new Error("monitor_brief: AI synthesis failed", { cause: err });
+  }
+
+  return safeStringify({
+    region,
+    period: `last ${days} days`,
+    source: effectiveSource,
+    dataQuality: scored.length === 0 ? "no_data" : "ok",
+    totalConflicts: scored.length,
+    escalatingConflicts: escalating.length,
+    totalCasualties,
+    totalDisplaced,
+    byStatus,
+    topConflicts: scored.slice(0, 5),
+    analysis,
+  }, 2);
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
@@ -1149,6 +1246,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         totalEntities: entities.length,
         ...result,
       }, 2);
+    }
+
+    case "monitor_brief": {
+      const { region, source, days, focus } = MonitorSchemas.monitor_brief.parse({ region: args.region ?? text, ...args });
+      return generateMonitorBrief(region, source, days, focus);
     }
 
     case "fetch_conflicts": {
@@ -1290,7 +1392,7 @@ Be specific, factual, and concise. Use military/intelligence brevity conventions
     }
 
     default:
-      return `Unknown skill: ${skillId}`;
+      throw new Error(`Unknown skill: ${skillId}`);
   }
 }
 
