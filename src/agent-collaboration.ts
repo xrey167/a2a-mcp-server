@@ -306,7 +306,7 @@ Provide your refined answer.`;
     strategy: "debate",
     output,
     responses: allResponses,
-    rounds: Math.floor(Math.min(maxRounds, allResponses.length / request.agents.length)),
+    rounds: Math.min(maxRounds, allResponses.length / request.agents.length),
     totalDurationMs: Date.now() - startTime,
   };
 }

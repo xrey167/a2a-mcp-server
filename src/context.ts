@@ -38,8 +38,8 @@ export function getProjectContext(): ProjectContext {
     const raw = readFileSync(CACHE_FILE, "utf-8");
     return JSON.parse(raw) as ProjectContext;
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-      process.stderr.write("[context] cache read failed: " + (e instanceof Error ? e.message : String(e)) + "\n");
+    if (typeof e !== "object" || e === null || (e as NodeJS.ErrnoException).code !== "ENOENT") {
+      process.stderr.write(`[context] cache read failed: ${e instanceof Error ? e.message : String(e)}\n`);
     }
   }
 
@@ -48,8 +48,8 @@ export function getProjectContext(): ProjectContext {
     const md = readFileSync(OBSIDIAN_FILE, "utf-8");
     return parseMarkdown(md);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-      process.stderr.write("[context] Obsidian read failed: " + (e instanceof Error ? e.message : String(e)) + "\n");
+    if (typeof e !== "object" || e === null || (e as NodeJS.ErrnoException).code !== "ENOENT") {
+      process.stderr.write(`[context] Obsidian read failed: ${e instanceof Error ? e.message : String(e)}\n`);
     }
   }
 

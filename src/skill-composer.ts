@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { InvalidArgsError } from "./errors.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -75,7 +76,7 @@ export function compose(name: string, steps: PipelineStep[], description?: strin
   for (let i = 0; i < steps.length; i++) {
     const key = steps[i].as ?? steps[i].skillId;
     if (aliases.has(key)) {
-      throw new Error(`Duplicate step alias: "${key}" — each alias must be unique in a pipeline`);
+      throw new InvalidArgsError(`Duplicate step alias: "${key}" — each alias must be unique in a pipeline`, { alias: key });
     } else {
       aliases.set(key, i);
     }
