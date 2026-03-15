@@ -93,7 +93,7 @@ const MAX_AGENTS_PER_SKILL = 50;
 function parseSemVer(version: string): { major: number; minor: number; patch: number } | null {
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
-  return { major: parseInt(match[1]!, 10), minor: parseInt(match[2]!, 10), patch: parseInt(match[3]!, 10) };
+  return { major: parseInt(match[1] ?? "0", 10), minor: parseInt(match[2] ?? "0", 10), patch: parseInt(match[3] ?? "0", 10) };
 }
 
 function compareSemVer(a: string, b: string): number {
