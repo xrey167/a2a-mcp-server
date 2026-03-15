@@ -34,11 +34,14 @@ import type {
   ToolCallUpdate,
   ToolCallStatusUpdate,
   AgentMode,
-  IncomingMessage,
 } from "./acp-types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const log = (msg: string) => process.stderr.write(`[acp] ${msg}\n`);
+
+const MAX_SESSION_HISTORY = 200;
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const ONE_HOUR_MS = 60 * 60 * 1000;
 
 /** Sanitize a URL for safe logging (strips credentials, query, and fragment). */
 function sanitizeUrlForLog(url: string): string {
@@ -367,7 +370,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
   switch (method) {
     case "initialize": {
       const p = params as unknown as InitializeParams;
-      clientCapabilities = p.capabilities ?? {};
+      clientCapabilities = (p.capabilities ?? {}) as Record<string, unknown>;
       log(`initialized by ${p.clientInfo.name} v${p.clientInfo.version}`);
       const result: InitializeResult = {
         protocolVersion: PROTOCOL_VERSION,
@@ -447,7 +450,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
       const slashMatch = userText.match(/^\/(\S+)\s*(.*)/s);
       if (slashMatch) {
         const [, skillId, rest] = slashMatch;
-        resultText = await routeBySkillId(skillId, {}, rest, onToolCall, onToolCallUpdate);
+        resultText = await routeBySkillId(skillId ?? "", {}, rest ?? "", onToolCall, onToolCallUpdate);
       } else {
         resultText = await routePrompt(sessionId, userText, onToolCall, onToolCallUpdate);
       }
@@ -455,7 +458,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
       // Update session history
       session.history.push({ role: "user", text: userText, ts: Date.now() });
       session.history.push({ role: "assistant", text: resultText, ts: Date.now() });
-      if (session.history.length > 200) session.history.splice(0, session.history.length - 200);
+      if (session.history.length > MAX_SESSION_HISTORY) session.history.splice(0, session.history.length - MAX_SESSION_HISTORY);
 
       // Persist to memory (same format as server.ts)
       memory.set("sessions", sessionId, JSON.stringify(session.history.slice(-40)));
@@ -531,16 +534,16 @@ async function main() {
 
   // Prune sessions older than 30 days every hour
   const sessionPruneInterval = setInterval(() => {
-    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const cutoff = Date.now() - THIRTY_DAYS_MS;
     for (const [id, session] of sessions) {
       const lastTs = session.history.at(-1)?.ts ?? 0;
       if (lastTs < cutoff) sessions.delete(id);
     }
-  }, 60 * 60 * 1000);
+  }, ONE_HOUR_MS);
 
   // Graceful shutdown
   const cleanup = () => {
-    clearInterval(sessionPruneInterval);
+    if (sessionPruneInterval) clearInterval(sessionPruneInterval);
     log("shutting down...");
     closeTransport();
     shutdownWorkers();
