@@ -695,21 +695,25 @@ async function generateMarketBrief(symbols: string[], focus?: string): Promise<s
     .map(q => {
       const sym = sanitizeUserInput(String(q.symbol ?? ""), "symbol");
       const price = String(q.price ?? "N/A");
-      const change = String(q.changePercent ?? "N/A");
+      const changePct = Number(q.changePercent ?? NaN);
       const currency = String(q.currency ?? "USD");
-      const sign = Number(q.changePercent ?? 0) >= 0 ? "+" : "";
-      return `${sym}: ${price} ${currency} (${sign}${change}%)`;
+      if (!isFinite(changePct)) {
+        process.stderr.write(`[${NAME}] market_brief: non-numeric changePercent for ${sym}: ${q.changePercent}\n`);
+        return `${sym}: ${price} ${currency} (change: N/A)`;
+      }
+      const sign = changePct >= 0 ? "+" : "";
+      return `${sym}: ${price} ${currency} (${sign}${changePct}%)`;
     })
     .join("\n");
 
-  // Find biggest mover
-  const sorted = [...quotes].sort((a, b) =>
-    Math.abs(Number(b.changePercent ?? 0)) - Math.abs(Number(a.changePercent ?? 0))
-  );
+  // Find biggest mover — toSorted() avoids mutating quotes for any downstream use
+  const sorted = quotes.toSorted((a, b) => {
+    const pctA = isFinite(Number(a.changePercent)) ? Math.abs(Number(a.changePercent)) : 0;
+    const pctB = isFinite(Number(b.changePercent)) ? Math.abs(Number(b.changePercent)) : 0;
+    return pctB - pctA;
+  });
   const topMover = sorted[0];
-  const topMoverLine = topMover
-    ? `Biggest mover: ${sanitizeUserInput(String(topMover.symbol ?? ""), "symbol")} at ${topMover.changePercent}%`
-    : "";
+  const topMoverLine = `Biggest mover: ${sanitizeUserInput(String(topMover.symbol ?? ""), "symbol")} at ${topMover.changePercent}%`;
 
   const focusLine = focus ? `\nAnalyst focus: ${sanitizeUserInput(focus, "focus")}` : "";
 
@@ -726,14 +730,15 @@ Cover: overall market tone, notable movers and their likely drivers, any diverge
   try {
     brief = await callPeer("ask_claude", { prompt }, prompt, 60_000);
   } catch (err) {
-    process.stderr.write(`[${NAME}] market_brief: callPeer ask_claude failed for symbols=[${symbols.join(",")}]: ${(err as Error).stack ?? err}\n`);
-    throw new Error("market_brief: AI synthesis failed", { cause: err });
+    const cause = err instanceof Error ? err : new Error(String(err));
+    process.stderr.write(`[${NAME}] market_brief: callPeer ask_claude failed for symbols=[${symbols.join(",")}]: ${cause.stack ?? cause.message}\n`);
+    throw new Error(`market_brief: AI synthesis failed (${cause.message})`, { cause });
   }
 
   return safeStringify({
     symbols,
     quotesRetrieved: quotes.length,
-    dataQuality: quoteErrors.length === symbols.length ? "all_quotes_failed" : quoteErrors.length > 0 ? "partial" : "ok",
+    dataQuality: quoteErrors.length > 0 ? "partial" : "ok",
     quoteErrors: quoteErrors.length > 0 ? quoteErrors : undefined,
     brief,
   }, 2);
