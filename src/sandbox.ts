@@ -156,7 +156,9 @@ async function runSubprocess(
           stderrChunks.push(text);
           process.stderr.write(`[sandbox] ${text}`);
         }
-      } catch {}
+      } catch (err) {
+        process.stderr.write(`[sandbox] stream read error: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     })();
 
     // Read stdout line-by-line for IPC
@@ -185,7 +187,9 @@ async function runSubprocess(
             }
           }
         }
-      } catch {}
+      } catch (err) {
+        process.stderr.write(`[sandbox] stream read error: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
 
     async function handleMessage(msg: any) {
