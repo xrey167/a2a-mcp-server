@@ -2221,7 +2221,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "CARBON_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "CARBON_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2239,7 +2239,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify({ scan: safeParseJSON(scanResult), executiveBrief: summary }, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "REGULATORY_BRIEF_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "REGULATORY_BRIEF_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2274,7 +2274,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "NEARSHORING_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "NEARSHORING_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2315,7 +2315,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "WIN_LOSS_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "WIN_LOSS_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2335,7 +2335,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "PRICE_OPTIMIZE_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "PRICE_OPTIMIZE_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2355,7 +2355,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "REVENUE_FORECAST_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "REVENUE_FORECAST_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2378,7 +2378,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify({ competitor: opts.name, newsSignals: (rawNews as unknown[]).length, marketSignals: (rawMarket as unknown[]).length, rawNews, rawMarket }, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "COMPETITOR_MONITOR_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "COMPETITOR_MONITOR_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2402,7 +2402,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(brief, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "COMPETITOR_BRIEF_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "COMPETITOR_BRIEF_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2433,7 +2433,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify({ playbook: playbook.metadata, result }, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "PLAYBOOK_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "PLAYBOOK_ERROR", message: msg }); } catch (err) { process.stderr.write(`[server] markFailed error: ${err instanceof Error ? err.message : String(err)}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id, playbook: playbook.metadata }, null, 2);
@@ -8082,7 +8082,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f172a;color
       if (session && session.workspaceId) {
         try {
           await loadRevenuePanel(session.workspaceId);
-        } catch {}
+        } catch (err) { console.error("[server] loadRevenuePanel error: " + (err instanceof Error ? err.message : String(err))); }
       }
       renderBootstrap();
       setMessage(actionMsg, "Session loaded.", "ok");
