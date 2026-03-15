@@ -649,12 +649,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       let failedFeeds = 0;
       for (const feedUrl of REGULATORY_FEEDS) {
         try {
-          validateUrlNotInternal(feedUrl);
           const articles = await fetchRss(feedUrl, 50, 10000);
           allArticles.push(...articles);
         } catch (err) {
           failedFeeds++;
-          process.stderr.write(`[${NAME}] regulatory_scan: feed failed ${feedUrl}: ${err}\n`);
+          process.stderr.write(`[${NAME}] regulatory_scan: feed failed ${feedUrl}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
         }
       }
       // Also classify any articles passed via args
