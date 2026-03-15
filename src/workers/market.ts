@@ -21,7 +21,7 @@ import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round, validateUrlNotInternal } from "../worker-utils.js";
 import { callPeer } from "../peer.js";
-import { sanitizeUserInput } from "../prompt-sanitizer.js";
+import { sanitizeUserInput, sanitizeForPrompt } from "../prompt-sanitizer.js";
 
 const PORT = 8090;
 const NAME = "market-agent";
@@ -104,6 +104,11 @@ const MarketSchemas = {
     /** Optional focus to steer the AI brief (e.g. "tech sector rotation", "commodity rally") */
     focus: z.string().max(300).optional(),
   }),
+  market_report: z.looseObject({
+    symbols: z.array(z.string().min(1).max(20).regex(/^[A-Za-z0-9._^=\-]+$/)).min(1).max(10),
+    range: z.enum(["1mo", "3mo", "6mo", "1y"]).optional().default("1mo"),
+    focus: z.string().max(200).optional(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -123,6 +128,7 @@ const AGENT_CARD = {
     { id: "correlation", name: "Correlation Matrix", description: "Compute Pearson correlation matrix between multiple price series" },
     { id: "market_composite", name: "Market Composite", description: "Compute a composite 0-100 market score combining RSI, MACD, volume anomaly, momentum, volatility, and trend" },
     { id: "market_brief", name: "Market Brief", description: "Fetch live quotes for a list of symbols and return an AI-written market intelligence brief. Covers price action, notable movers, and a short outlook." },
+    { id: "market_report", name: "Market Report", description: "Fetch quotes + 1-month price history for up to 10 symbols, compute RSI and MACD signals, then generate an AI-written market briefing with bull/bear signals, key observations, and outlook. Optional focus parameter narrows the analysis (e.g. 'tech sector', 'volatility risk')." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -975,6 +981,96 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { symbols, focus } = MarketSchemas.market_brief.parse(args);
       process.stderr.write(`[${NAME}] market_brief: fetching quotes for [${symbols.join(", ")}]\n`);
       return generateMarketBrief(symbols, focus);
+    }
+
+    case "market_report": {
+      const { symbols, range, focus } = MarketSchemas.market_report.parse(args);
+
+      // Fetch quote + price history for each symbol in parallel.
+      // fetchYahooQuote/fetchYahooHistory use Yahoo's unofficial API (no key required).
+      // Set ALPHAVANTAGE_API_KEY to use the official provider for other skills;
+      // market_report always uses Yahoo — Alpha Vantage doesn't map cleanly to batch quote + history.
+      const symbolData = await Promise.all(
+        symbols.map(async (sym) => {
+          try {
+            const [quote, history] = await Promise.all([
+              fetchYahooQuote(sym),
+              fetchYahooHistory(sym, "1d", range),
+            ]);
+            // fetchYahooHistory maps null close values to 0 — filter them out.
+            // Note: legitimate near-zero prices (penny stocks, certain futures) may also be
+            // excluded; this is an accepted trade-off given the unofficial API.
+            const closes = history.close.filter(v => v !== 0);
+            const rsiSeries = closes.length >= 15 ? computeRSI(closes, 14) : [];
+            const latestRsi = rsiSeries.filter((v): v is number => v !== null).at(-1) ?? null;
+            const macdData = closes.length >= 27 ? computeMACD(closes) : null;
+            const latestMacd = macdData?.macd.filter((v): v is number => v !== null).at(-1) ?? null;
+            const latestSignal = macdData?.signal.filter((v): v is number => v !== null).at(-1) ?? null;
+            const macdCross = latestMacd !== null && latestSignal !== null
+              ? latestMacd > latestSignal ? "bullish" : "bearish"
+              : "insufficient data";
+            const price = typeof quote.price === "number" ? quote.price : null;
+            const changePercent = typeof quote.changePercent === "number" ? quote.changePercent : null;
+            const currency = typeof quote.currency === "string" ? quote.currency : "USD";
+            return {
+              symbol: sym,
+              price,
+              changePercent,
+              currency,
+              rsi: latestRsi,  // computeRSI already rounds internally
+              macdSignal: macdCross,
+              dataPoints: closes.length,
+              error: null as string | null,
+            };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`[${NAME}] market_report: ${sym} failed: ${msg}\n`);
+            return { symbol: sym, price: null, changePercent: null, currency: "USD", rsi: null, macdSignal: "insufficient data", dataPoints: 0, error: msg };
+          }
+        }),
+      );
+
+      const successful = symbolData.filter(d => d.error === null);
+      if (successful.length === 0) {
+        throw new Error(`Failed to fetch market data for all requested symbols (${range}): ${symbolData.map(d => `${d.symbol}: ${d.error}`).join("; ")}`);
+      }
+
+      const dataSection = successful.map(d => {
+        const priceStr = d.price !== null ? `$${d.price}` : "N/A";
+        const pctStr = d.changePercent !== null ? `${d.changePercent >= 0 ? "+" : ""}${d.changePercent}% ${d.currency}` : "N/A";
+        const rsiLabel = d.rsi !== null ? ` | RSI ${d.rsi}${d.rsi > 70 ? " (overbought)" : d.rsi < 30 ? " (oversold)" : ""}` : "";
+        const macdLabel = d.macdSignal !== "insufficient data" ? ` | MACD ${d.macdSignal}` : "";
+        return `${d.symbol}: ${priceStr} (${pctStr})${rsiLabel}${macdLabel}`;
+      }).join("\n");
+
+      const failedNote = symbolData.filter(d => d.error !== null).length > 0
+        ? `\n\nFailed symbols: ${symbolData.filter(d => d.error !== null).map(d => `${d.symbol} (${d.error})`).join(", ")}`
+        : "";
+
+      const focusLine = focus ? `\nFocus: ${sanitizeForPrompt(focus, "focus_area")}` : "";
+      const prompt = `You are a market analyst writing a concise market briefing.
+
+Date range analyzed: last ${range}${focusLine}
+
+Market data:
+${dataSection}${failedNote}
+
+Write a structured briefing with these sections:
+1. **Overview** — 2-3 sentence summary of overall market tone
+2. **Bull Signals** — assets or indicators showing strength
+3. **Bear Signals** — assets or indicators showing weakness or risk
+4. **Key Observations** — notable patterns (RSI extremes, MACD crosses, divergences)
+5. **Outlook** — short-term directional view with key risks to watch
+
+Be concise. Use the data above. Do not invent prices or signals not shown.`;
+
+      try {
+        return await callPeer("ask_claude", { prompt }, prompt, 90_000);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] market_report: ask_claude peer call failed (${successful.length} symbols fetched, prompt ${prompt.length} chars): ${msg}\n`);
+        throw new Error(`Market data fetched successfully but AI synthesis failed: ${msg}`);
+      }
     }
 
     default:
