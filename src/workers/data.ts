@@ -678,24 +678,34 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         }
       }
 
-      // Build left index for O(1) right-join lookups
+      // Build left index for O(1) right-join lookups; skip rows where the key field is absent
       const leftIndex = new Map<unknown, DataRow[]>();
+      let leftMissingKey = 0;
       for (const row of rawLeft) {
         if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
         const l = row as DataRow;
         const k = l[key];
+        if (k === undefined) { leftMissingKey++; continue; }
         if (!leftIndex.has(k)) leftIndex.set(k, []);
         (leftIndex.get(k) as DataRow[]).push(l);
       }
+      if (leftMissingKey > 0) {
+        process.stderr.write(`[${NAME}] merge_datasets: ${leftMissingKey} left rows missing join key "${key}" — excluded\n`);
+      }
 
-      // Build index: key value → list of right rows (handles duplicate keys)
+      // Build index: key value → list of right rows (handles duplicate keys); skip rows missing key
       const rightIndex = new Map<unknown, DataRow[]>();
+      let rightMissingKey = 0;
       for (const row of rawRight) {
         if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
         const r = row as DataRow;
         const k = r[key];
+        if (k === undefined) { rightMissingKey++; continue; }
         if (!rightIndex.has(k)) rightIndex.set(k, []);
         (rightIndex.get(k) as DataRow[]).push(r);
+      }
+      if (rightMissingKey > 0) {
+        process.stderr.write(`[${NAME}] merge_datasets: ${rightMissingKey} right rows missing join key "${key}" — excluded\n`);
       }
 
       // Merge a left row with a (possibly null) right row
@@ -775,8 +785,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         }
       }
 
+      const warnings: string[] = [];
+      if (leftMissingKey > 0) warnings.push(`${leftMissingKey} left rows missing join key "${key}"`);
+      if (rightMissingKey > 0) warnings.push(`${rightMissingKey} right rows missing join key "${key}"`);
       process.stderr.write(`[${NAME}] merge_datasets: ${joinType} join on "${key}": ${rawLeft.length}L × ${rawRight.length}R → ${result.length} rows\n`);
-      return safeStringify({ joinType, key, leftRows: rawLeft.length, rightRows: rawRight.length, resultRows: result.length, data: result }, 2);
+      return safeStringify({ joinType, key, leftRows: rawLeft.length, rightRows: rawRight.length, resultRows: result.length, ...(warnings.length > 0 ? { warnings } : {}), data: result }, 2);
     }
 
     case "fetch_dataset": {
