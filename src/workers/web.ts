@@ -17,6 +17,12 @@ const WebSchemas = {
     /** Heuristically extract only the main content area (article/main), stripping nav/header/footer (default true) */
     mainOnly: z.boolean().optional().default(true),
   }),
+  search_web: z.looseObject({
+    /** Search query string */
+    query: z.string().min(1).refine(s => s.trim().length > 0, "query must not be blank"),
+    /** Maximum number of results to return (default 10, max 20) */
+    maxResults: z.number().int().min(1).max(20).optional().default(10),
+  }),
 };
 
 /** Block RFC-1918, loopback, APIPA, and cloud-metadata hostnames at the hostname level. */
@@ -211,6 +217,7 @@ const AGENT_CARD = {
     { id: "fetch_url", name: "Fetch URL", description: "Fetch raw content from a URL (text or JSON)" },
     { id: "call_api", name: "Call API", description: "Make an HTTP request to an external API" },
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
+    { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -270,6 +277,62 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       if (html === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
       const scraped = scrapeHtml(html, mainOnly, maxLinks);
       return safeStringify({ url, ...scraped }, 2);
+    }
+    case "search_web": {
+      const { query, maxResults } = WebSchemas.search_web.parse({ query: args.query ?? text, ...args });
+      const trimmedQuery = query.trim();
+      // Encode query for URL; do NOT pass raw user input as a URL component without encoding
+      const encodedQuery = encodeURIComponent(trimmedQuery);
+      const searchUrl = `https://html.duckduckgo.com/html/?q=${encodedQuery}`;
+      const ssrfBlock = await blockPrivateUrl(searchUrl);
+      if (ssrfBlock) return ssrfBlock;
+      const res = await fetch(searchUrl, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        headers: {
+          "Accept": "text/html,application/xhtml+xml",
+          "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)",
+        },
+      });
+      if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+      const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
+      if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
+      const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+      if (html === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
+
+      // Parse DuckDuckGo result blocks: each result is a <div class="result"> with
+      // an <a class="result__a"> (title+url) and <a class="result__snippet"> (snippet)
+      const results: Array<{ title: string; url: string; snippet: string }> = [];
+      const resultBlockRe = /<div[^>]+class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
+      for (const m of html.matchAll(resultBlockRe)) {
+        if (results.length >= maxResults) break;
+        const chunk = m[1] ?? "";
+        const titleMatch = chunk.match(/<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i);
+        const snippetMatch = chunk.match(/<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/i)
+          ?? chunk.match(/<div[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+        if (!titleMatch || !titleMatch[1] || !titleMatch[2]) continue;
+        const rawUrl = decodeEntities(titleMatch[1].trim());
+        const title = decodeEntities(titleMatch[2].replace(/<[^>]+>/g, "").trim());
+        const snippet = snippetMatch && snippetMatch[1]
+          ? decodeEntities(snippetMatch[1].replace(/<[^>]+>/g, "").trim())
+          : "";
+        // DuckDuckGo wraps result URLs in a redirect; extract the real URL from uddg param
+        let url = rawUrl;
+        try {
+          const parsed = new URL(rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl);
+          const uddg = parsed.searchParams.get("uddg");
+          if (uddg) url = decodeURIComponent(uddg);
+        } catch {
+          // keep rawUrl as-is
+        }
+        if (url && title) results.push({ title, url, snippet });
+      }
+
+      if (results.length === 0) {
+        process.stderr.write(`[${NAME}] search_web: no results parsed from DuckDuckGo HTML for query\n`);
+        return safeStringify({ query: trimmedQuery, results: [], resultCount: 0, note: "No results found or page structure changed" }, 2);
+      }
+
+      return safeStringify({ query: trimmedQuery, results: results.slice(0, maxResults), resultCount: results.length }, 2);
     }
     default:
       return `Unknown skill: ${skillId}`;
