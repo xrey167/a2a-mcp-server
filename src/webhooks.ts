@@ -17,11 +17,19 @@ import { randomUUID, createHmac, timingSafeEqual } from "crypto";
 import { Database } from "bun:sqlite";
 import { join } from "path";
 import { homedir } from "os";
+import { createLogger } from "./logger.js";
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+const log = createLogger("webhooks");
+
 function safeJsonParse(s: string, fallback: unknown = {}): unknown {
-  try { return JSON.parse(s); } catch { return fallback; }
+  try {
+    return JSON.parse(s);
+  } catch (err) {
+    log.warn("corrupted JSON in DB row", { raw: s.slice(0, 100), error: String(err) });
+    return fallback;
+  }
 }
 
 // ── Types ────────────────────────────────────────────────────────
