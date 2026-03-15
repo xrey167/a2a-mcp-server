@@ -40,7 +40,7 @@ import { compose, getPipeline, listPipelines as listComposerPipelines, removePip
 import { collaborate, type CollaborationRequest } from "./agent-collaboration.js";
 import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracingStats } from "./tracing.js";
 import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats, configureCacheSkill } from "./skill-cache.js";
-import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
+import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive, pruneCapabilities } from "./capability-negotiation.js";
 import { auditLog, auditQuery, auditStats, closeAuditDb } from "./audit.js";
 import { validateApiKey, lookupApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed, type ApiKeyEntry } from "./auth.js";
 import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace, isMember } from "./workspace.js";
@@ -8745,6 +8745,8 @@ async function main() {
       });
     }
   }
+
+  pruneCapabilities();
 
   // Clean up old sandbox vars and populate adapter list
   sandboxStore.prune(7);
