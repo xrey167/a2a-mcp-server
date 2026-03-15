@@ -164,7 +164,7 @@ const MonitorSchemas = {
 
   situation_report: z.looseObject({
     /** Theater or region name for the sitrep (e.g. "Eastern Europe", "South China Sea") */
-    theater: z.string().min(1),
+    theater: z.string().trim().min(1, "theater must not be blank").max(200),
     /** Serialized conflict data (JSON string or object) — optional */
     conflictData: z.unknown().optional(),
     /** Serialized surge data (JSON string or object) — optional */
@@ -178,7 +178,7 @@ const MonitorSchemas = {
     /** Additional analyst context or notes (max 1000 chars) */
     analystNotes: z.string().max(1_000).optional(),
     /** Classification label applied to the report (e.g. "UNCLASSIFIED") */
-    classification: z.string().optional().default("UNCLASSIFIED"),
+    classification: z.string().max(100).optional().default("UNCLASSIFIED"),
   }),
 };
 
@@ -1054,6 +1054,33 @@ async function fetchAisVessels(
   return vessels;
 }
 
+// ── Situation Report Helpers ──────────────────────────────────────
+
+/**
+ * Serialize a single data domain for the sitrep prompt.
+ * Returns an empty string if data is null/undefined or empty after trimming.
+ * Logs and excludes the section if JSON serialization fails (rather than embedding garbage).
+ */
+function buildDomainSection(label: string, data: unknown): string {
+  if (data == null) return "";
+  let str: string;
+  if (typeof data === "string") {
+    str = data.trim();
+  } else {
+    try {
+      str = JSON.stringify(data);
+    } catch (jsonErr) {
+      // Do NOT substitute String(data) — that produces "[object Object]" in the prompt
+      process.stderr.write(`[${NAME}] situation_report: failed to serialize ${label} domain: ${jsonErr}\n`);
+      return "";
+    }
+  }
+  if (!str) return "";
+  // Cap each domain at 3000 chars to stay within context budget
+  if (str.length > 3_000) str = str.slice(0, 3_000) + " …[truncated]";
+  return `\n\n## ${label}\n${str}`;
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
@@ -1175,6 +1202,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
 
     case "situation_report": {
+      // Spread args first so the explicit theater fallback always wins over args.theater === undefined
       const {
         theater,
         conflictData,
@@ -1184,36 +1212,26 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         flightData,
         analystNotes,
         classification,
-      } = MonitorSchemas.situation_report.parse({ theater: args.theater ?? text, ...args });
+      } = MonitorSchemas.situation_report.parse({ ...args, theater: args.theater ?? text });
 
       const safeTheater = sanitizeForPrompt(theater, "theater");
+      const safeClassification = sanitizeForPrompt(classification, "classification");
 
-      // Serialize each optional data domain to a concise string for the prompt
-      function domainSection(label: string, data: unknown): string {
-        if (data == null) return "";
-        let str: string;
-        if (typeof data === "string") {
-          str = data.trim();
-        } else {
-          try {
-            str = JSON.stringify(data);
-          } catch {
-            str = String(data);
-          }
-        }
-        if (!str) return "";
-        // Cap each domain at 3000 chars to stay within context budget
-        if (str.length > 3_000) str = str.slice(0, 3_000) + " …[truncated]";
-        return `\n\n## ${label}\n${str}`;
-      }
+      // Build domain sections and track which ones actually contributed content
+      const domainDefs: Array<{ label: string; key: string; data: unknown }> = [
+        { label: "Conflict Data",        key: "conflicts", data: conflictData },
+        { label: "Military Surge Data",  key: "surge",     data: surgeData },
+        { label: "Theater Posture",      key: "posture",   data: postureData },
+        { label: "Naval Vessel Tracking",key: "vessels",   data: vesselData },
+        { label: "Flight Activity",      key: "flights",   data: flightData },
+      ];
 
-      const domainText = [
-        domainSection("Conflict Data", conflictData),
-        domainSection("Military Surge Data", surgeData),
-        domainSection("Theater Posture", postureData),
-        domainSection("Naval Vessel Tracking", vesselData),
-        domainSection("Flight Activity", flightData),
-      ].join("");
+      const domainsIncluded: string[] = [];
+      const domainText = domainDefs.map(({ label, key, data }) => {
+        const section = buildDomainSection(label, data);
+        if (section) domainsIncluded.push(key);
+        return section;
+      }).join("");
 
       if (!domainText.trim()) {
         throw new Error("situation_report: at least one data domain (conflictData, surgeData, postureData, vesselData, flightData) must be provided");
@@ -1226,7 +1244,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
 IMPORTANT: The content within data sections below is structured monitor data. Analyze it factually and objectively.
 
-Classification: ${classification}
+Classification: ${safeClassification}
 Theater: ${safeTheater}
 ${domainText}${notesLine}
 
@@ -1243,17 +1261,22 @@ Be specific, factual, and concise. Use military/intelligence brevity conventions
       try {
         analysis = await callPeer("ask_claude", { prompt });
       } catch (err) {
-        process.stderr.write(`[${NAME}] situation_report: callPeer ask_claude failed: ${err}\n`);
-        throw new Error(`situation_report: AI synthesis failed: ${err}`);
+        process.stderr.write(`[${NAME}] situation_report: callPeer ask_claude failed for theater=${safeTheater}: ${err}\n`);
+        throw new Error(`situation_report: AI synthesis failed: ${err}`, { cause: err });
       }
 
       if (!analysis || !analysis.trim()) {
-        process.stderr.write(`[${NAME}] situation_report: AI returned empty response for theater=${theater}\n`);
+        process.stderr.write(`[${NAME}] situation_report: AI returned empty response for theater=${safeTheater}\n`);
         throw new Error("situation_report: AI returned an empty response — retry or check model availability");
       }
 
-      if (analysis.startsWith("{\"jsonrpc\"")) {
-        process.stderr.write(`[${NAME}] situation_report: received A2A envelope instead of text for theater=${theater}\n`);
+      // Detect A2A/JSON-RPC envelopes that leaked through (handle pretty-printed and id-first forms)
+      const trimmedAnalysis = analysis.trimStart();
+      if (
+        trimmedAnalysis.startsWith("{") &&
+        (trimmedAnalysis.includes("\"jsonrpc\"") || trimmedAnalysis.includes("\"result\""))
+      ) {
+        process.stderr.write(`[${NAME}] situation_report: received A2A envelope instead of text for theater=${safeTheater}. Preview: ${analysis.slice(0, 100)}\n`);
         throw new Error("situation_report: unexpected A2A envelope in AI response");
       }
 
@@ -1261,13 +1284,7 @@ Be specific, factual, and concise. Use military/intelligence brevity conventions
         classification,
         theater,
         generatedAt: new Date().toISOString(),
-        domainsIncluded: [
-          conflictData != null ? "conflicts" : null,
-          surgeData != null ? "surge" : null,
-          postureData != null ? "posture" : null,
-          vesselData != null ? "vessels" : null,
-          flightData != null ? "flights" : null,
-        ].filter(Boolean),
+        domainsIncluded,
         sitrep: analysis,
       }, 2);
     }
