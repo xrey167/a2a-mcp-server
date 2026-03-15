@@ -315,8 +315,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }
 
       // Step 3: synthesize answer via ai-agent (peer A2A call)
+      // Pass explicit maxLength matching CONTEXT_CHAR_LIMIT so sanitizer doesn't re-truncate
       const safeQuestion = sanitizeUserInput(question, "question");
-      const safeContext = sanitizeUserInput(contextText, "knowledge_context");
+      const safeContext = sanitizeUserInput(contextText, "knowledge_context", CONTEXT_CHAR_LIMIT);
 
       const prompt = `You are a knowledge assistant. Answer the question below using ONLY the provided notes as context.
 
@@ -334,7 +335,7 @@ Answer the question directly and concisely. Cite which note(s) your answer draws
       const answer = await callPeer("ask_claude", { prompt }, prompt, 60_000);
 
       if (!answer || !answer.trim()) {
-        process.stderr.write(`[${NAME}] query_knowledge: callPeer returned empty response for question="${question.slice(0, 80)}"\n`);
+        process.stderr.write(`[${NAME}] query_knowledge: callPeer returned empty response for question="${safeQuestion.slice(0, 80)}"\n`);
         return JSON.stringify({
           question, sourcesUsed: sources, answer: null,
           dataQuality: "error",
