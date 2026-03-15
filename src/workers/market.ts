@@ -145,7 +145,7 @@ async function fetchYahooQuote(symbol: string): Promise<Record<string, unknown>>
   const quote = result.indicators?.quote?.[0] ?? {};
   const prices = quote.close ?? [];
   const lastPrice = prices[prices.length - 1] ?? meta.regularMarketPrice;
-  if (lastPrice === undefined || lastPrice === null) throw new Error(`No price data available for ${symbol}`);
+  if (lastPrice == null) throw new Error(`No price data available for ${symbol}`);
   const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? lastPrice;
   const change = lastPrice - prevClose;
   const changePercent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
