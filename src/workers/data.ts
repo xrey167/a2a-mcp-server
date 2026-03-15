@@ -112,8 +112,8 @@ const DataSchemas = {
     data: z.unknown(),
     /** Number of rows to return (default 10, max 10 000) */
     n: z.number().int().min(1).max(10_000).optional().default(10),
-    /** Optional integer seed for reproducible sampling (0 = unseeded) */
-    seed: z.number().int().min(0).optional().default(0),
+    /** Optional integer seed ≥ 1 for reproducible sampling; omit or null for random */
+    seed: z.number().int().min(1).optional().nullable(),
   }),
 
   data_brief: z.looseObject({
@@ -921,14 +921,14 @@ Requirements:
       const sampleSize = Math.min(n, totalRows);
 
       // Reservoir sampling (Algorithm R) — O(totalRows) time, O(n) space.
-      // Uses a seeded LCG when seed > 0 for reproducible results, Math.random() otherwise.
-      let lcgState = seed;
+      // Uses a seeded LCG when seed != null for reproducible results, Math.random() otherwise.
+      let lcgState = seed ?? 0;
       const lcgRandom = (): number => {
         // Knuth multiplicative LCG (32-bit unsigned)
         lcgState = (lcgState * 1_664_525 + 1_013_904_223) & 0xffff_ffff;
         return (lcgState >>> 0) / 0x1_0000_0000;
       };
-      const rand = seed > 0 ? lcgRandom : () => Math.random();
+      const rand = seed != null ? lcgRandom : () => Math.random();
 
       // Fill reservoir with first sampleSize rows
       const reservoir: unknown[] = (data as unknown[]).slice(0, sampleSize);
