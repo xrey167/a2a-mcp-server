@@ -449,6 +449,7 @@ Answer the question directly and concisely. Cite which note(s) your answer draws
       const tagCounts = new Map<string, number>();
       const noteSnippets: string[] = [];
       let totalChars = 0;
+      let contentTruncated = false;
 
       for (const { path: relPath, title } of sample) {
         const fullPath = join(VAULT, relPath);
@@ -483,7 +484,7 @@ Answer the question directly and concisely. Cite which note(s) your answer draws
         // Add a title+excerpt snippet to the context
         const excerpt = content.replace(/^---[\s\S]*?---\s*\n?/, "").replace(/^#.*\n/, "").trim().slice(0, 300);
         const snippet = `### ${title}\n${excerpt}${excerpt.length >= 300 ? "…" : ""}`;
-        if (totalChars + snippet.length > CONTENT_CHAR_LIMIT) break;
+        if (totalChars + snippet.length > CONTENT_CHAR_LIMIT) { contentTruncated = true; break; }
         noteSnippets.push(snippet);
         totalChars += snippet.length;
       }
@@ -550,7 +551,7 @@ Be concrete — reference actual note titles or tags where relevant. Do not inve
         sampledNotes: noteSnippets.length,
         topTags,
         topic: rawTopic ?? null,
-        dataQuality: topicUnmatched ? "topic_unmatched" : readErrors.length > 0 ? "partial" : "ok",
+        dataQuality: topicUnmatched ? "topic_unmatched" : readErrors.length > 0 ? "partial" : contentTruncated ? "truncated" : "ok",
         ...(topicUnmatched ? { warning: `Topic "${displayTopic}" matched no notes — showing full vault overview` } : {}),
         brief,
         ...(readErrors.length > 0 ? { readErrors } : {}),
