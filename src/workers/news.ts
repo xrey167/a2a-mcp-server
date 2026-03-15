@@ -589,21 +589,31 @@ async function generateNewsBrief(
         feedErrors.push(msg);
       }
     });
+    if (feedErrors.length > 0) {
+      process.stderr.write(`[${NAME}] news_brief: ${feedErrors.length}/${urls.length} feeds failed\n`);
+    }
   }
 
   if (rawArticles.length === 0) {
     throw new Error("news_brief: no articles available — all feeds failed or no urls provided");
   }
 
-  // Deduplicate and optionally filter by topic keyword
+  // Deduplicate; guard against all articles collapsing to zero via shared title/link
   let articles = deduplicateArticles(rawArticles);
+  if (articles.length === 0) {
+    process.stderr.write(`[${NAME}] news_brief: deduplication eliminated all ${rawArticles.length} articles\n`);
+    throw new Error(`news_brief: no articles remained after deduplication (${rawArticles.length} raw articles were all duplicates)`);
+  }
+
+  // Optionally filter by topic keyword
   if (topic) {
+    const safeTopic = topic.replace(/[\r\n]/g, " ");
     const topicLower = topic.toLowerCase();
     const filtered = articles.filter(a =>
       `${a.title} ${a.description}`.toLowerCase().includes(topicLower)
     );
     if (filtered.length > 0) articles = filtered;
-    else process.stderr.write(`[${NAME}] news_brief: topic filter "${topic}" matched 0 articles; using all\n`);
+    else process.stderr.write(`[${NAME}] news_brief: topic filter "${safeTopic}" matched 0 articles; using all\n`);
   }
 
   // Classify and sort by importance score descending
@@ -647,8 +657,11 @@ Cover: the most significant developments, any converging patterns across stories
   try {
     brief = await callPeer("ask_claude", { prompt }, prompt, 60_000);
   } catch (err) {
-    process.stderr.write(`[${NAME}] news_brief: callPeer ask_claude failed: ${(err as Error).stack ?? err}\n`);
-    throw new Error("news_brief: AI synthesis failed", { cause: err });
+    const cause = err instanceof Error ? err : new Error(String(err));
+    const isDiscovery = cause.message.includes("No peer found with skill");
+    const label = isDiscovery ? "news_brief: AI worker unreachable (peer discovery failed)" : "news_brief: AI synthesis failed";
+    process.stderr.write(`[${NAME}] ${label} — ${cause.stack ?? cause.message}\n`);
+    throw new Error(`${label} (${cause.message})`, { cause });
   }
 
   // Category and importance breakdown for metadata
@@ -662,7 +675,7 @@ Cover: the most significant developments, any converging patterns across stories
   return safeStringify({
     topic: topic ?? null,
     articleCount: articles.length,
-    dataQuality: feedErrors.length === urls?.length ? "all_feeds_failed" : feedErrors.length > 0 ? "partial" : "ok",
+    dataQuality: !urls || urls.length === 0 ? "no_feeds_requested" : feedErrors.length === urls.length ? "all_feeds_failed" : feedErrors.length > 0 ? "partial" : "ok",
     feedErrors: feedErrors.length > 0 ? feedErrors : undefined,
     byCategory,
     byImportance,
@@ -804,7 +817,8 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
     case "news_brief": {
       const { urls, topic, focus, maxArticles } = NewsSchemas.news_brief.parse({ ...args });
-      process.stderr.write(`[${NAME}] news_brief: generating brief — ${urls?.length ?? 0} feeds${topic ? `, topic="${topic}"` : ""}\n`);
+      const safeTopic = topic ? topic.replace(/[\r\n]/g, " ") : undefined;
+      process.stderr.write(`[${NAME}] news_brief: generating brief — ${urls?.length ?? 0} feeds${safeTopic ? `, topic="${safeTopic}"` : ""}\n`);
       return generateNewsBrief(urls, topic, focus, maxArticles);
     }
 
