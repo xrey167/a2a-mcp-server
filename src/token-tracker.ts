@@ -103,7 +103,7 @@ export function getTokenStats(opts?: { since?: string; skillId?: string }): Toke
     `SELECT COALESCE(SUM(input_tokens),0) as input, COALESCE(SUM(output_tokens),0) as output,
             COALESCE(SUM(saved_tokens),0) as saved, COUNT(*) as cnt
      FROM token_savings WHERE ${where}`
-  ).get(...params)!;
+  ).get(...params) ?? { input: 0, output: 0, saved: 0, cnt: 0 };
 
   const topSkills = d.query<{ skill_id: string; saved: number; cnt: number }, unknown[]>(
     `SELECT skill_id, SUM(saved_tokens) as saved, COUNT(*) as cnt
