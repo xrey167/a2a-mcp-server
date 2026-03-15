@@ -33,8 +33,8 @@ const AiSchemas = {
   classify_text: z.looseObject({
     /** Text to classify */
     text: z.string().min(1).refine(s => s.trim().length > 0, "text must not be blank"),
-    /** List of category labels to classify into */
-    categories: z.array(z.string().min(1)).min(2, "at least 2 categories required"),
+    /** List of category labels to classify into (2–50, each max 200 chars) */
+    categories: z.array(z.string().min(1).max(200, "each category label must be 200 characters or fewer")).min(2, "at least 2 categories required").max(50, "max 50 categories"),
     /** Optional hint about the classification domain, e.g. "sentiment", "topic", "intent" */
     domain: z.string().max(200).optional(),
     /** Whether to allow multiple labels (default: false — single best match) */
@@ -263,11 +263,12 @@ ${safeText}`;
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[${NAME}] classify_text: Zod parse error: ${detail}\n`);
-        throw new Error(`classify_text: invalid arguments — ${detail}`, { cause: err });
+        throw err; // preserve ZodError type and full .errors array
       }
       const { text: rawText, categories, domain, multi } = parsed;
 
       if (rawText.length > 20_000) {
+        process.stderr.write(`[${NAME}] classify_text: input too large (${rawText.length} chars, limit 20000)\n`);
         return `Error: text input is ${rawText.length} characters — exceeds 20,000 character limit for classification`;
       }
 
@@ -299,20 +300,19 @@ ${safeText}
       try {
         raw = await handleSkill("ask_claude", { prompt }, prompt);
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`[${NAME}] classify_text: ask_claude failed: ${errMsg}\n`);
+        const errMsg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+        process.stderr.write(`[${NAME}] classify_text: ask_claude failed (categories=[${categories.join(", ")}], multi=${multi}, textLen=${rawText.length}): ${errMsg}\n`);
         throw err;
       }
 
-      if (!raw || (typeof raw === "string" && !raw.trim())) {
-        process.stderr.write(`[${NAME}] classify_text: AI worker returned empty response (raw length: ${(raw as string)?.length ?? 0})\n`);
-        return "Error: classify_text returned an empty response — retry or check model availability";
+      if (!raw || typeof raw !== "string" || !raw.trim()) {
+        process.stderr.write(`[${NAME}] classify_text: unexpected response from ask_claude — type: ${typeof raw}, length: ${typeof raw === "string" ? raw.length : "N/A"}\n`);
+        return "Error: classify_text returned an unexpected response — retry or check model availability";
       }
-      const rawStr = typeof raw === "string" ? raw : JSON.stringify(raw);
+      const rawStr = raw;
 
       // Strip markdown fences if Claude wrapped despite instructions
-      const fenceMatch = rawStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/i);
-      const stripped = (fenceMatch?.[1] ?? rawStr).trim();
+      const stripped = rawStr.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
 
       // Validate JSON and verify the label field exists
       let parsed2: Record<string, unknown>;
@@ -320,15 +320,18 @@ ${safeText}
         parsed2 = JSON.parse(stripped);
       } catch (parseErr) {
         const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-        process.stderr.write(`[${NAME}] classify_text: Claude returned non-JSON output (${stripped.slice(0, 80)}...): ${msg}\n`);
+        const preview = stripped.length > 300 ? stripped.slice(0, 300) + "…" : stripped;
+        process.stderr.write(`[${NAME}] classify_text: Claude returned non-JSON output (${preview}): ${msg}\n`);
         return "Error: classify_text: model did not return valid JSON — retry or simplify the category list";
       }
 
-      // Verify structure: must have label (single) or labels (multi)
-      const hasLabel = multi ? Array.isArray(parsed2.labels) : typeof parsed2.label === "string";
+      // Verify structure: must have non-empty label (single) or non-empty labels array (multi)
+      const hasLabel = multi
+        ? Array.isArray(parsed2.labels) && (parsed2.labels as unknown[]).length > 0
+        : typeof parsed2.label === "string" && (parsed2.label as string).trim().length > 0;
       if (!hasLabel) {
-        process.stderr.write(`[${NAME}] classify_text: JSON missing expected field (multi=${multi}): ${stripped.slice(0, 120)}\n`);
-        return "Error: classify_text: model returned JSON but with unexpected structure — retry";
+        process.stderr.write(`[${NAME}] classify_text: JSON has degenerate structure (multi=${multi}, labels=${JSON.stringify((parsed2.labels ?? parsed2.label))}): ${stripped.slice(0, 120)}\n`);
+        return "Error: classify_text: model returned no classification labels — retry";
       }
 
       return stripped;
@@ -371,7 +374,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     const result = await handleSkill(sid, args ?? { prompt: text }, text);
     resultText = typeof result === "string" ? result : safeStringify(result, 2);
   } catch (err) {
-    resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[${NAME}] unhandled error in skill "${sid}": ${msg}\n`);
+    resultText = `Error: ${msg}`;
   }
   return buildA2AResponse(data.id, taskId, resultText);
 });
