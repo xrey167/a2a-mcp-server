@@ -912,10 +912,13 @@ Requirements:
           throw new Error(`sample_data: data must be a JSON array (parse error: ${msg})`);
         }
       }
-      if (!Array.isArray(data)) throw new Error("sample_data: data must be an array of records");
+      if (!Array.isArray(data)) {
+        process.stderr.write(`[${NAME}] sample_data: data is not an array (received ${typeof data})\n`);
+        throw new Error(`sample_data: data must be an array of records (received ${typeof data})`);
+      }
       const totalRows = data.length;
       if (totalRows === 0) {
-        return safeStringify({ totalRows: 0, sampledRows: 0, seed, rows: [] }, 2);
+        return safeStringify({ totalRows: 0, sampledRows: 0, seed: seed ?? null, rows: [] }, 2);
       }
 
       const sampleSize = Math.min(n, totalRows);
@@ -930,19 +933,22 @@ Requirements:
       };
       const rand = seed != null ? lcgRandom : () => Math.random();
 
-      // Fill reservoir with first sampleSize rows
-      const reservoir: unknown[] = (data as unknown[]).slice(0, sampleSize);
+      // Fill reservoir with first sampleSize rows. Shallow-spread each object row so
+      // that mutations to the reservoir cannot alias back into the caller's original array.
+      const shallowCopy = (v: unknown): unknown =>
+        typeof v === "object" && v !== null && !Array.isArray(v) ? { ...(v as object) } : v;
+      const reservoir: unknown[] = (data as unknown[]).slice(0, sampleSize).map(shallowCopy);
       for (let i = sampleSize; i < totalRows; i++) {
         const j = Math.floor(rand() * (i + 1));
         if (j < sampleSize) {
-          reservoir[j] = (data as unknown[])[i];
+          reservoir[j] = shallowCopy((data as unknown[])[i]);
         }
       }
 
       return safeStringify({
         totalRows,
         sampledRows: sampleSize,
-        seed,
+        seed: seed ?? null,
         rows: reservoir,
       }, 2);
     }
