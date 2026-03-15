@@ -359,8 +359,8 @@ Be strict. A score of ${threshold}+ means production-ready quality. Deduct point
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(stripJsonFences(raw));
-  } catch {
-    log(`qualityGate: failed to parse LLM response as JSON — treating as failed gate`);
+  } catch (err) {
+    log(`qualityGate: failed to parse LLM response as JSON — treating as failed gate: ${err instanceof Error ? err.message : String(err)}`);
     return { passed: false, scores: {}, average: 0, issues: [{ dimension: "parse", severity: "critical", description: "LLM returned non-JSON response", fix: "Retry generation" }], summary: "Quality gate could not parse LLM response" };
   }
 
@@ -542,7 +542,7 @@ async function createProject(
         message: { role: "user" as const, parts: [{ kind: "text" as const, text: `read ${file}` }] },
       });
       allCode += `\n// === ${file} ===\n${content}`;
-    } catch { /* file may not exist yet */ }
+    } catch (err) { log(`read_file skipped for ${file}: ${err instanceof Error ? err.message : String(err)}`); }
   }
 
   if (allCode.trim()) {
