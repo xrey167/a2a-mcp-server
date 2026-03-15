@@ -1692,7 +1692,8 @@ function nowIso(): string {
 function parseMetadata(raw: string): Record<string, unknown> {
   try {
     return JSON.parse(raw) as Record<string, unknown>;
-  } catch {
+  } catch (e) {
+    process.stderr.write("Error in parseMetadata: " + (e instanceof Error ? e.message : String(e)) + "\n");
     return {};
   }
 }
@@ -1700,7 +1701,8 @@ function parseMetadata(raw: string): Record<string, unknown> {
 function parseConfig(raw: string): Record<string, unknown> {
   try {
     return JSON.parse(raw) as Record<string, unknown>;
-  } catch {
+  } catch (e) {
+    process.stderr.write("Error in parseConfig: " + (e instanceof Error ? e.message : String(e)) + "\n");
     return {};
   }
 }
@@ -3125,7 +3127,8 @@ function parseIntentTags(raw: string): string[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((item): item is string => typeof item === "string");
-  } catch {
+  } catch (e) {
+    process.stderr.write("Error in parseIntentTags: " + (e instanceof Error ? e.message : String(e)) + "\n");
     return [];
   }
 }
@@ -3267,7 +3270,8 @@ function extractGmailBodyFromPayload(payload: Record<string, unknown> | undefine
   if (directData) {
     try {
       return safeBase64UrlDecode(directData);
-    } catch {
+    } catch (e) {
+      process.stderr.write("Error in extractGmailBodyFromPayload (base64 decode): " + (e instanceof Error ? e.message : String(e)) + "\n");
       return "";
     }
   }
@@ -4212,8 +4216,9 @@ export function ingestQuoteCommunication(
   for (const contact of contacts) {
     try {
       upsertQuotePersonalityProfileForContact(workspaceId, contact);
-    } catch {
+    } catch (e) {
       // Communication ingest must not fail because profile projection failed.
+      process.stderr.write("Error in upsertQuotePersonalityProfileForContact: " + (e instanceof Error ? e.message : String(e)) + "\n");
     }
   }
   return {
