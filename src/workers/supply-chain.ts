@@ -606,6 +606,7 @@ async function handleCriticalPath(args: Record<string, unknown>): Promise<string
   if (depth && depth !== 3) {
     for (let i = 0; i < targetOrders.length; i++) {
       const order = targetOrders[i];
+      if (!order) continue;
       try {
         const deepComponents = await erp.getBOMComponents(order.itemNo, depth);
         if (deepComponents.length > 0) {

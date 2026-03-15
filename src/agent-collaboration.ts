@@ -156,7 +156,7 @@ async function consensus(
   }
 
   if (validResponses.length === 1) {
-    return { id, strategy: "consensus", output: validResponses[0].result, responses, agreement: 1, totalDurationMs: Date.now() - startTime };
+    return { id, strategy: "consensus", output: validResponses[0]?.result ?? "", responses, agreement: 1, totalDurationMs: Date.now() - startTime };
   }
 
   // Phase 2: Have an AI score all responses
@@ -189,14 +189,14 @@ Reply with JSON: { "scores": [{"id": 0, "score": 8, "reason": "..."}, ...], "bes
     for (const score of parsed.scores ?? []) {
       const idx = score.id;
       if (idx >= 0 && idx < validResponses.length) {
-        validResponses[idx].score = score.score;
+        validResponses[idx]!.score = score.score;
       }
     }
 
     return {
       id,
       strategy: "consensus",
-      output: validResponses[bestId]?.result ?? validResponses[0].result,
+      output: validResponses[bestId]?.result ?? validResponses[0]?.result ?? "",
       responses,
       agreement,
       totalDurationMs: Date.now() - startTime,
@@ -209,7 +209,7 @@ Reply with JSON: { "scores": [{"id": 0, "score": 8, "reason": "..."}, ...], "bes
     return {
       id,
       strategy: "consensus",
-      output: validResponses[0].result,
+      output: validResponses[0]?.result ?? "",
       responses,
       agreement: 0,
       totalDurationMs: Date.now() - startTime,
@@ -295,7 +295,7 @@ Provide your refined answer.`;
         prompt: `Synthesize these refined perspectives into a single coherent answer:\n\n${summary}\n\n<original_question>\n${request.query}\n</original_question>`,
       }, "");
     } catch {
-      output = finalResponses[0].result;
+      output = finalResponses[0]?.result ?? "";
     }
   } else {
     output = finalResponses[0]?.result ?? "No agents completed the debate";
@@ -328,7 +328,7 @@ async function mapReduce(
   const agentCount = Math.min(request.agents.length, items.length);
   const chunks: Array<{ agent: string; items: unknown[] }> = request.agents.slice(0, agentCount).map(a => ({ agent: a, items: [] }));
   for (let i = 0; i < items.length; i++) {
-    chunks[i % agentCount].items.push(items[i]);
+    chunks[i % agentCount]!.items.push(items[i]);
   }
 
   // Map phase: each agent processes its chunk

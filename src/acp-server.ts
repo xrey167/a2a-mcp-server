@@ -34,7 +34,6 @@ import type {
   ToolCallUpdate,
   ToolCallStatusUpdate,
   AgentMode,
-  IncomingMessage,
 } from "./acp-types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -371,7 +370,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
   switch (method) {
     case "initialize": {
       const p = params as unknown as InitializeParams;
-      clientCapabilities = p.capabilities ?? {};
+      clientCapabilities = (p.capabilities ?? {}) as Record<string, unknown>;
       log(`initialized by ${p.clientInfo.name} v${p.clientInfo.version}`);
       const result: InitializeResult = {
         protocolVersion: PROTOCOL_VERSION,
@@ -451,7 +450,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
       const slashMatch = userText.match(/^\/(\S+)\s*(.*)/s);
       if (slashMatch) {
         const [, skillId, rest] = slashMatch;
-        resultText = await routeBySkillId(skillId, {}, rest, onToolCall, onToolCallUpdate);
+        resultText = await routeBySkillId(skillId ?? "", {}, rest ?? "", onToolCall, onToolCallUpdate);
       } else {
         resultText = await routePrompt(sessionId, userText, onToolCall, onToolCallUpdate);
       }
