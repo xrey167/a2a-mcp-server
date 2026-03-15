@@ -23,6 +23,15 @@ const WebSchemas = {
     /** Maximum number of results to return (default 10, max 20) */
     maxResults: z.number().int().min(1).max(20).optional().default(10),
   }),
+
+  check_links: z.looseObject({
+    /** List of URLs to check (max 25) */
+    urls: z.array(z.string().url()).min(1).max(25, "max 25 URLs per request"),
+    /** Per-URL timeout in milliseconds (default 10000, max 30000) */
+    timeoutMs: z.number().int().min(500).max(30_000).optional().default(10_000),
+    /** Concurrency — how many URLs to check in parallel (default 5, max 10) */
+    concurrency: z.number().int().min(1).max(10).optional().default(5),
+  }),
 };
 
 /** Block RFC-1918, loopback, APIPA, and cloud-metadata hostnames at the hostname level. */
@@ -218,6 +227,7 @@ const AGENT_CARD = {
     { id: "call_api", name: "Call API", description: "Make an HTTP request to an external API" },
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
+    { id: "check_links", name: "Check Links", description: "Check reachability of up to 25 URLs in parallel using HTTP HEAD (with GET fallback for 405). Returns JSON array with url, status, ok, and error for each. SSRF-safe: private/internal URLs are blocked. Configurable per-URL timeout and concurrency." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -349,6 +359,71 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }
 
       return safeStringify({ query: trimmedQuery, results: results.slice(0, maxResults), resultCount: results.length }, 2);
+    }
+    case "check_links": {
+      let clParsed: ReturnType<typeof WebSchemas.check_links.parse>;
+      try {
+        clParsed = WebSchemas.check_links.parse({ urls: args.urls ?? (text ? [text] : undefined), ...args });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] check_links: Zod parse error: ${detail}\n`);
+        throw err;
+      }
+      const { urls, timeoutMs, concurrency } = clParsed;
+
+      type LinkResult = { url: string; status: number | null; ok: boolean; error?: string };
+
+      /** Check a single URL: HEAD first, fallback GET on 405 */
+      async function checkOne(url: string): Promise<LinkResult> {
+        const ssrfBlock = await blockPrivateUrl(url);
+        if (ssrfBlock) return { url, status: null, ok: false, error: ssrfBlock };
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          let res = await fetch(url, {
+            method: "HEAD",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+          // Some servers return 405 for HEAD — retry with GET, no body read
+          if (res.status === 405) {
+            res = await fetch(url, {
+              method: "GET",
+              redirect: "follow",
+              signal: AbortSignal.timeout(timeoutMs),
+            });
+            // Consume and discard body to free connection
+            await res.body?.cancel();
+          }
+          return { url, status: res.status, ok: res.ok };
+        } catch (err) {
+          const isTimeout = err instanceof Error && err.name === "AbortError";
+          const msg = isTimeout ? `timed out after ${timeoutMs}ms` : (err instanceof Error ? err.message : String(err));
+          return { url, status: null, ok: false, error: msg };
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      // Process URLs in batches of `concurrency`
+      const results: LinkResult[] = [];
+      for (let i = 0; i < urls.length; i += concurrency) {
+        const batch = urls.slice(i, i + concurrency);
+        const settled = await Promise.allSettled(batch.map(checkOne));
+        for (const outcome of settled) {
+          if (outcome.status === "fulfilled") {
+            results.push(outcome.value);
+          } else {
+            // Should not happen — checkOne never throws — but handle defensively
+            results.push({ url: "unknown", status: null, ok: false, error: String(outcome.reason) });
+          }
+        }
+      }
+
+      const okCount = results.filter(r => r.ok).length;
+      process.stderr.write(`[${NAME}] check_links: checked ${urls.length} URLs — ${okCount} ok, ${urls.length - okCount} failed\n`);
+      return safeStringify({ checked: results.length, okCount, failCount: urls.length - okCount, results }, 2);
     }
     default:
       return `Unknown skill: ${skillId}`;
