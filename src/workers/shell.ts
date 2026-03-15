@@ -107,8 +107,22 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       if (!existsSync(safeB)) return `File not found: ${safeB}`;
 
       const MAX_FILE_BYTES = 500_000; // 500 KB per file
-      const statA = statSync(safeA);
-      const statB = statSync(safeB);
+      const MAX_LINES = 10_000;      // Guard against O(m*n) DP table OOM
+
+      let statA: ReturnType<typeof statSync>;
+      let statB: ReturnType<typeof statSync>;
+      try { statA = statSync(safeA); } catch (err) {
+        process.stderr.write(`[${NAME}] diff_files: stat failed for A (${safeA}): ${err instanceof Error ? err.message : String(err)}\n`);
+        return `Error: cannot stat file A: ${safeA}`;
+      }
+      try { statB = statSync(safeB); } catch (err) {
+        process.stderr.write(`[${NAME}] diff_files: stat failed for B (${safeB}): ${err instanceof Error ? err.message : String(err)}\n`);
+        return `Error: cannot stat file B: ${safeB}`;
+      }
+
+      if (!statA.isFile()) return `Error: path A is not a regular file: ${safeA}`;
+      if (!statB.isFile()) return `Error: path B is not a regular file: ${safeB}`;
+
       if (statA.size > MAX_FILE_BYTES) {
         process.stderr.write(`[${NAME}] diff_files: file A too large (${statA.size} bytes): ${safeA}\n`);
         return `Error: file A is ${statA.size} bytes — exceeds 500 KB limit for diff`;
@@ -118,11 +132,29 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
         return `Error: file B is ${statB.size} bytes — exceeds 500 KB limit for diff`;
       }
 
-      const linesA = readFileSync(safeA, "utf-8").split("\n");
-      const linesB = readFileSync(safeB, "utf-8").split("\n");
+      let linesA: string[];
+      let linesB: string[];
+      try { linesA = readFileSync(safeA, "utf-8").split("\n"); } catch (err) {
+        process.stderr.write(`[${NAME}] diff_files: read failed for A (${safeA}): ${err instanceof Error ? err.message : String(err)}\n`);
+        return `Error: cannot read file A: ${safeA}`;
+      }
+      try { linesB = readFileSync(safeB, "utf-8").split("\n"); } catch (err) {
+        process.stderr.write(`[${NAME}] diff_files: read failed for B (${safeB}): ${err instanceof Error ? err.message : String(err)}\n`);
+        return `Error: cannot read file B: ${safeB}`;
+      }
 
-      // Myers diff — builds edit script then renders unified diff
-      const diff = computeUnifiedDiff(linesA, linesB, safeA, safeB, ctxLines);
+      if (linesA.length > MAX_LINES || linesB.length > MAX_LINES) {
+        process.stderr.write(`[${NAME}] diff_files: too many lines (A=${linesA.length}, B=${linesB.length}): ${safeA} vs ${safeB}\n`);
+        return `Error: files exceed ${MAX_LINES}-line limit for diff (A=${linesA.length}, B=${linesB.length})`;
+      }
+
+      let diff: string;
+      try {
+        diff = computeUnifiedDiff(linesA, linesB, safeA, safeB, ctxLines);
+      } catch (err) {
+        process.stderr.write(`[${NAME}] diff_files: computeUnifiedDiff failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        return `Error: diff computation failed — ${err instanceof Error ? err.message : String(err)}`;
+      }
       return diff.trim().length === 0 ? "Files are identical" : diff;
     }
     default:
@@ -173,12 +205,13 @@ function computeUnifiedDiff(
     if (i < m && j < n && linesA[i] === linesB[j]) {
       edits.push({ op: "=", lineA: i, lineB: j, text: linesA[i] ?? "" });
       i++; j++;
-    } else if (j < n && (i >= m || dpIJ1 >= dpI1J)) {
-      edits.push({ op: "+", lineA: i, lineB: j, text: linesB[j] ?? "" });
-      j++;
-    } else {
+    } else if (i < m && (j >= n || dpI1J >= dpIJ1)) {
+      // Prefer deletion before addition — unified diff convention: --- lines before +++ lines
       edits.push({ op: "-", lineA: i, lineB: j, text: linesA[i] ?? "" });
       i++;
+    } else {
+      edits.push({ op: "+", lineA: i, lineB: j, text: linesB[j] ?? "" });
+      j++;
     }
   }
 
@@ -213,10 +246,11 @@ function computeUnifiedDiff(
   for (const [hs, he] of ranges) {
     const slice = edits.slice(hs, he);
     const first = slice[0];
-    const aStart = (first?.lineA ?? 0) + 1;
-    const bStart = (first?.lineB ?? 0) + 1;
     const aCount = slice.filter(e => e.op !== "+").length;
     const bCount = slice.filter(e => e.op !== "-").length;
+    // Per unified diff spec: when count is 0, start line is 0 (not 1)
+    const aStart = aCount === 0 ? 0 : (first?.lineA ?? 0) + 1;
+    const bStart = bCount === 0 ? 0 : (first?.lineB ?? 0) + 1;
     const hunkLines = [`@@ -${aStart},${aCount} +${bStart},${bCount} @@`];
     for (const e of slice) {
       if (e.op === "=") hunkLines.push(` ${e.text}`);
