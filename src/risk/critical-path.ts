@@ -33,9 +33,6 @@ export function computeCriticalPath(
   // Recursively add component nodes
   addComponentNodes(rootItemNo, components, nodes, edges, nodeMap);
 
-  // Guard: Math.max(...[]) returns -Infinity, producing garbage downstream
-  if (nodes.length === 0) return { nodes: [], edges: [], criticalPath: [], totalDurationDays: 0 };
-
   // Forward pass: compute earliest start/finish
   const sorted = topologicalSort(nodes, edges);
   for (const nodeId of sorted) {
@@ -53,8 +50,9 @@ export function computeCriticalPath(
     }
   }
 
-  // Total project duration
-  const totalDurationDays = Math.max(...nodes.map((n) => n.earliestFinish ?? 0));
+  // Total project duration — guard against Math.max(...[]) = -Infinity if nodes is ever empty
+  const finishes = nodes.map((n) => n.earliestFinish ?? 0);
+  const totalDurationDays = finishes.length > 0 ? Math.max(...finishes) : 0;
 
   // Backward pass: compute latest start/finish
   for (const nodeId of sorted.reverse()) {
