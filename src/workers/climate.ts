@@ -24,6 +24,8 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round, haversineKm } from "../worker-utils.js";
+import { callPeer } from "../peer.js";
+import { sanitizeForPrompt } from "../prompt-sanitizer.js";
 
 const PORT = 8094;
 const NAME = "climate-agent";
@@ -102,6 +104,14 @@ const ClimateSchemas = {
     timezone: z.string().optional().default("auto"),
   }),
 
+  climate_report: z.looseObject({
+    location: z.string().min(1).max(200),
+    lat: z.number().optional(),
+    lon: z.number().optional(),
+    days: z.number().int().min(1).max(30).optional().default(7),
+    focus: z.string().max(200).optional(),
+  }),
+
   event_correlate: z.looseObject({
     naturalEvents: z.array(z.object({
       type: z.string(),
@@ -142,6 +152,7 @@ const AGENT_CARD = {
     { id: "climate_anomalies", name: "Climate Anomalies", description: "Detect temperature, precipitation, and wind anomalies using z-score against baseline" },
     { id: "fetch_weather", name: "Fetch Weather", description: "Fetch daily weather time series (temperature, precipitation, wind) from OpenMeteo (free, no auth). Returns a series array directly compatible with climate_anomalies." },
     { id: "event_correlate", name: "Event Correlate", description: "Correlate natural events with infrastructure assets and conflict zones by proximity" },
+    { id: "climate_report", name: "Climate Report", description: "Fetch earthquakes, wildfires, and natural events for a location and generate an AI-written situational briefing" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -729,6 +740,97 @@ async function fetchWeather(
   };
 }
 
+// ── AI Climate Report ─────────────────────────────────────────────
+
+async function generateClimateReport(
+  location: string,
+  days: number,
+  lat?: number,
+  lon?: number,
+  focus?: string,
+): Promise<string> {
+  // Fetch earthquakes, wildfires, and natural events in parallel
+  const geoArgs = lat !== undefined && lon !== undefined
+    ? { lat, lon, radiusKm: 500 }
+    : {};
+
+  const [quakes, fires, events] = await Promise.allSettled([
+    fetchEarthquakes(4.0, 20, days, geoArgs.lat, geoArgs.lon, geoArgs.radiusKm),
+    fetchWildfires("VIIRS_SNPP_NRT", Math.min(days, 10), geoArgs.lat, geoArgs.lon, geoArgs.radiusKm, 50),
+    fetchNaturalEvents("all", days, 30, "open"),
+  ]);
+
+  const quakeList = quakes.status === "fulfilled" ? quakes.value : [];
+  const fireList = fires.status === "fulfilled" ? fires.value : [];
+  const eventList = events.status === "fulfilled" ? events.value : [];
+
+  if (quakes.status === "rejected") {
+    process.stderr.write(`[${NAME}] climate_report: fetchEarthquakes failed: ${quakes.reason}\n`);
+  }
+  if (fires.status === "rejected") {
+    process.stderr.write(`[${NAME}] climate_report: fetchWildfires failed: ${fires.reason}\n`);
+  }
+  if (events.status === "rejected") {
+    process.stderr.write(`[${NAME}] climate_report: fetchNaturalEvents failed: ${events.reason}\n`);
+  }
+
+  // Build summary for the AI prompt
+  const topQuakes = quakeList
+    .sort((a, b) => b.magnitude - a.magnitude)
+    .slice(0, 5)
+    .map(q => `M${q.magnitude} at ${q.place} (depth ${q.depth}km${q.tsunami ? ", TSUNAMI ALERT" : ""})`)
+    .join("; ");
+
+  const fireCount = fireList.length;
+  const avgFRP = fireList.length > 0
+    ? round(fireList.reduce((s, f) => s + f.frp, 0) / fireList.length, 1)
+    : 0;
+
+  const eventsByCategory: Record<string, number> = {};
+  for (const e of eventList) eventsByCategory[e.category] = (eventsByCategory[e.category] ?? 0) + 1;
+  const eventSummary = Object.entries(eventsByCategory)
+    .map(([cat, n]) => `${n} ${cat}`)
+    .join(", ");
+
+  const focusLine = focus ? `\nFocus area: ${sanitizeForPrompt(focus, "focus_area")}` : "";
+
+  const dataContext = `Location: ${sanitizeForPrompt(location, "location")}
+Period: last ${days} days${focusLine}
+
+Earthquakes (≥M4.0): ${quakeList.length} total
+Top events: ${topQuakes || "none"}
+
+Wildfires (VIIRS hotspots): ${fireCount} active hotspots, avg FRP ${avgFRP} MW
+
+NASA EONET active events: ${eventList.length} total
+By category: ${eventSummary || "none"}`;
+
+  const prompt = `You are a climate and natural hazard analyst. Write a concise situational briefing (3-5 paragraphs) based on this data:
+
+${dataContext}
+
+Cover: notable seismic activity, wildfire situation, other active hazards, and any compound risks. Be factual and specific. End with a one-sentence risk outlook.`;
+
+  let analysis: string;
+  try {
+    analysis = await callPeer("ask_claude", { prompt });
+  } catch (err) {
+    process.stderr.write(`[${NAME}] climate_report: callPeer ask_claude failed: ${err}\n`);
+    throw new Error(`climate_report: AI synthesis failed: ${err}`);
+  }
+
+  return safeStringify({
+    location,
+    period: `last ${days} days`,
+    earthquakeCount: quakeList.length,
+    wildfireHotspots: fireCount,
+    activeNaturalEvents: eventList.length,
+    topEarthquakes: quakeList.slice(0, 5),
+    eventsByCategory,
+    analysis,
+  }, 2);
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
@@ -810,6 +912,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         // series is directly usable as climate_anomalies.series input
         series: result.series,
       }, 2);
+    }
+
+    case "climate_report": {
+      const { location, lat, lon, days, focus } = ClimateSchemas.climate_report.parse({ location: args.location ?? text, ...args });
+      return generateClimateReport(location, days, lat, lon, focus);
     }
 
     case "event_correlate": {
