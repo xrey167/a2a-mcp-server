@@ -4345,6 +4345,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let buffer = "";
     let accumulated = "";
     let chunkIndex = 0;
+    let sseParseErrors = 0;
+    let lastSseParseMsg = "";
 
     try {
       while (true) {
@@ -4367,8 +4369,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 });
               }
             }
-          } catch (e) { process.stderr.write(`[sse] parse error: ${e}\n`); }
+          } catch (e) {
+            const msg = String(e);
+            if (msg !== lastSseParseMsg) {
+              process.stderr.write(`[sse] parse error: ${msg}\n`);
+              lastSseParseMsg = msg;
+            }
+            sseParseErrors++;
+          }
         }
+      }
+      if (sseParseErrors > 1) {
+        process.stderr.write(`[sse] ${sseParseErrors} parse errors total for this stream (deduplicated)\n`);
       }
     } finally {
       clearTimeout(timer);

@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import { z } from "zod";
+import { lookup } from "node:dns/promises";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
@@ -29,13 +30,29 @@ function isPrivateHostname(hostname: string): boolean {
   );
 }
 
-function blockPrivateUrl(url: string): string | null {
+async function blockPrivateUrl(url: string): Promise<string | null> {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return `Blocked: only http and https protocols are allowed (got ${parsed.protocol})`;
     }
-    return isPrivateHostname(parsed.hostname) ? `Blocked: private/internal URLs are not allowed (${parsed.hostname})` : null;
+    if (isPrivateHostname(parsed.hostname)) {
+      return `Blocked: private/internal URLs are not allowed (${parsed.hostname})`;
+    }
+    // DNS pre-resolution: resolve all IPs to close the TOCTOU window between
+    // hostname validation and fetch(). Fail-closed: DNS errors block the request.
+    let addresses: { address: string }[];
+    try {
+      addresses = await lookup(parsed.hostname, { all: true });
+    } catch {
+      return `Blocked: DNS resolution failed for ${parsed.hostname}`;
+    }
+    for (const { address } of addresses) {
+      if (isPrivateHostname(address)) {
+        return `Blocked: ${parsed.hostname} resolves to private/internal address (${address})`;
+      }
+    }
+    return null;
   } catch {
     return "Blocked: invalid URL";
   }
@@ -111,7 +128,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
   switch (skillId) {
     case "fetch_url": {
       const { url, format } = WebSchemas.fetch_url.parse({ url: args.url ?? text, ...args });
-      const block = blockPrivateUrl(url);
+      const block = await blockPrivateUrl(url);
       if (block) return block;
       const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
@@ -127,7 +144,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
     case "call_api": {
       const { url, method, headers, body } = WebSchemas.call_api.parse({ url: args.url ?? text, ...args });
-      const blockMsg = blockPrivateUrl(url);
+      const blockMsg = await blockPrivateUrl(url);
       if (blockMsg) return blockMsg;
       const res = await fetch(url, {
         method,
