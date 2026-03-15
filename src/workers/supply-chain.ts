@@ -344,8 +344,8 @@ async function clearFirmedOrdersPersistence(): Promise<void> {
   firmedOrders = [];
   try {
     await Bun.write(FIRMED_ORDERS_PATH, "[]");
-  } catch {
-    // ignore
+  } catch (e) {
+    process.stderr.write(`[${NAME}] clearFirmedOrdersPersistence failed: ` + (e instanceof Error ? e.message : String(e)) + '\n');
   }
 }
 
