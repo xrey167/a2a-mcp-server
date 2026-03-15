@@ -287,10 +287,16 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { url, question } = WebSchemas.summarize_url.parse({ url: args.url ?? text, ...args });
       const block = await blockPrivateUrl(url);
       if (block) return block;
-      const res = await fetch(url, {
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        headers: { "Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
-      });
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          headers: { "Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+        });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] summarize_url: fetch failed for ${url}: ${err}\n`);
+        return `summarize_url: could not fetch ${url} — ${err instanceof Error ? err.message : String(err)}`;
+      }
       if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
       const ct = res.headers.get("content-type") ?? "";
       if (!ct.includes("text/html") && !ct.includes("application/xhtml")) {
@@ -301,6 +307,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
       if (html === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
       const scraped = scrapeHtml(html, true, 0);
+
+      if (scraped.wordCount === 0) {
+        process.stderr.write(`[${NAME}] summarize_url: scrapeHtml returned empty text for ${url}\n`);
+        return `summarize_url: no readable text found at ${url} — the page may be JavaScript-rendered or require authentication. Try scrape_page to inspect the raw content.`;
+      }
 
       // Truncate to token-safe word limit before sending to AI
       const words = scraped.text.split(/\s+/);
@@ -317,14 +328,15 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       try {
         summary = await callPeer("ask_claude", { prompt }, prompt, 60_000);
       } catch (err) {
-        process.stderr.write(`[${NAME}] summarize_url: callPeer ask_claude failed: ${err}\n`);
-        throw new Error("summarize_url: AI summary failed", { cause: err });
+        const cause = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] summarize_url: callPeer ask_claude failed: ${cause}\n`);
+        return `summarize_url: AI summary unavailable — the AI worker could not be reached (${cause}). Try again in a moment or use scrape_page to get the raw text.`;
       }
 
       return safeStringify({ url, title: scraped.title, wordCount: scraped.wordCount, summary }, 2);
     }
     default:
-      throw new Error(`Unknown skill: ${skillId}`);
+      return `Unknown skill: ${skillId}`;
   }
 }
 
