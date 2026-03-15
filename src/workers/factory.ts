@@ -28,10 +28,10 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 
 const FactorySchemas = {
-  normalize_intent: z.object({ idea: z.string().min(1), pipeline: z.string().optional().default("app") }).passthrough(),
-  create_project: z.object({ idea: z.string().min(1), pipeline: z.string().optional().default("app"), outputDir: z.string().optional(), variant: z.string().optional() }).passthrough(),
-  quality_gate: z.object({ code: z.string().min(1), spec: z.string().optional().default("{}"), pipeline: z.string().optional().default("app"), variant: z.string().optional() }).passthrough(),
-  list_templates: z.object({ pipeline: z.string().optional().default("") }).passthrough(),
+  normalize_intent: z.looseObject({ idea: z.string().min(1), pipeline: z.string().optional().default("app") }),
+  create_project: z.looseObject({ idea: z.string().min(1), pipeline: z.string().optional().default("app"), outputDir: z.string().optional(), variant: z.string().optional() }),
+  quality_gate: z.looseObject({ code: z.string().min(1), spec: z.string().optional().default("{}"), pipeline: z.string().optional().default("app"), variant: z.string().optional() }),
+  list_templates: z.looseObject({ pipeline: z.string().optional().default("") }),
 };
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { PIPELINES, listPipelines, getPipeline } from "../pipelines/index.js";
@@ -47,7 +47,6 @@ import {
   type VariantSummary,
 } from "../templates/loader.js";
 import { sendTask } from "../a2a.js";
-import { randomUUID } from "crypto";
 import {
   sanitizeUserInput,
   sanitizeTemplateContent,
@@ -137,14 +136,6 @@ async function writeFile(path: string, content: string): Promise<string> {
   });
 }
 
-async function reviewCode(code: string, context: string): Promise<string> {
-  return sendTask(WORKER_URLS.code, {
-    skillId: "codex_review",
-    args: { code, context },
-    message: { role: "user" as const, parts: [{ kind: "text" as const, text: context }] },
-  }, { timeoutMs: 120_000 });
-}
-
 function stripJsonFences(raw: string): string {
   return raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
 }
@@ -207,6 +198,9 @@ Rules:
 
     if (variantId && variants.some(v => v.variantId === variantId)) {
       const variantSpec = await loadVariantSpec(pipelineId, variantId);
+      if (!variantSpec) {
+        return { variantId: null, variantSpec: null, confidence: "none", reason: `Variant spec not found for variantId="${variantId}"` };
+      }
       return {
         variantId,
         variantSpec,
@@ -223,7 +217,7 @@ Rules:
     };
   } catch (err) {
     log(`template matching failed: ${err}`);
-    return { variantId: null, variantSpec: null, confidence: "none", reason: "Matching failed, using base template" };
+    return { variantId: null, variantSpec: null, confidence: "none", reason: `Matching failed for pipeline "${pipelineId}": ${err instanceof Error ? err.message : String(err)}, using base template` };
   }
 }
 
@@ -245,7 +239,6 @@ async function normalizeIntent(
     // Inject variant-specific domain knowledge into the prompt
     const enhancement = buildVariantEnhancement(variantSpec);
     const sanitizedVariantId = sanitizeTemplateContent(variantSpec.variantId ?? "", "variant_id");
-    const sanitizedVariantName = sanitizeTemplateContent(variantSpec.name, "variant_name");
 
     prompt = `${prompt}
 
@@ -371,8 +364,6 @@ Be strict. A score of ${threshold}+ means production-ready quality. Deduct point
   }
 
   const scores = parsed.scores as Record<string, number>;
-  const values = Object.values(scores);
-  const average = values.length > 0 ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : 0;
 
   // If there's a checklist, failing critical items lowers the score
   let checklistResults: Array<{ item: string; passed: boolean }> | undefined;
@@ -427,7 +418,7 @@ async function scaffoldProject(
   });
 
   // Ensure output directory exists
-  await runShell(`mkdir -p ${safeDir}`);
+  await runShell(`mkdir -p -- ${JSON.stringify(safeDir)}`);
 
   // Collect all unique directories we need to create
   const dirs = new Set<string>();
@@ -440,7 +431,7 @@ async function scaffoldProject(
   if (dirs.size > 0) {
     // Sanitize each directory path before shell execution
     const safeDirs = Array.from(dirs).map(d => sanitizePath(d));
-    await runShell(`mkdir -p ${safeDirs.join(" ")}`);
+    await runShell(`mkdir -p ${safeDirs.map(d => JSON.stringify(d)).join(" ")}`);
   }
 
   // Write all template files (uses write_file skill, not shell)
@@ -518,7 +509,11 @@ async function createProject(
     throw new Error(`Intent normalization returned invalid JSON: ${specRaw.slice(0, 200)}`);
   }
 
-  const projectName = (spec.name as string ?? "my-project").toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  const projectName = (spec.name as string ?? "my-project")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .slice(0, 64)
+    .replace(/^-+|-+$/g, "") || "my-project";
   const targetDir = outputDir ?? `/tmp/factory/${projectName}-${Date.now()}`;
 
   // Phase 2: Scaffold from templates
@@ -684,7 +679,7 @@ For each file, use this exact format:
       const dir = fullPath.substring(0, fullPath.lastIndexOf("/"));
       if (dir) {
         const safeDir = sanitizePath(dir);
-        await runShell(`mkdir -p ${safeDir}`);
+        await runShell(`mkdir -p -- ${JSON.stringify(safeDir)}`);
       }
       await writeFile(fullPath, content);
       files.push(fullPath);
