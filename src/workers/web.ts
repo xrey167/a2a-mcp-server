@@ -417,36 +417,77 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { url, followRedirects } = WebSchemas.get_headers.parse({ url: args.url ?? text, ...args });
       const block = await blockPrivateUrl(url);
       if (block) return block;
+
+      // Always use redirect:"manual" so we can SSRF-validate each Location header
+      // before issuing the next request. redirect:"follow" sends the request to the
+      // redirect target before any post-hoc check can run.
+      const MAX_REDIRECTS = 5;
+      let currentUrl = url;
+      let redirectCount = 0;
       let res: Response;
+
+      while (true) {
+        try {
+          res = await fetch(currentUrl, {
+            method: "HEAD",
+            redirect: "manual",
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+          });
+        } catch (err) {
+          process.stderr.write(`[${NAME}] get_headers: fetch failed for ${currentUrl}: ${err}\n`);
+          return `get_headers: could not reach ${currentUrl} — ${err instanceof Error ? err.message : String(err)}`;
+        }
+
+        // Not a redirect, or caller wants only the first response — stop here
+        if (!followRedirects || res.status < 300 || res.status >= 400) break;
+
+        const location = res.headers.get("location");
+        if (!location) break;  // 3xx with no Location — stop
+
+        if (redirectCount >= MAX_REDIRECTS) {
+          process.stderr.write(`[${NAME}] get_headers: too many redirects (>${MAX_REDIRECTS}) starting from ${url}\n`);
+          return `get_headers: too many redirects (max ${MAX_REDIRECTS}) starting from ${url}`;
+        }
+
+        // Resolve relative Location against current URL, then SSRF-check before fetching
+        let resolved: string;
+        try {
+          resolved = new URL(location, currentUrl).href;
+        } catch {
+          process.stderr.write(`[${NAME}] get_headers: malformed Location header "${location}" from ${currentUrl}\n`);
+          return `get_headers: server returned a malformed redirect Location: ${location}`;
+        }
+        const redirectBlock = await blockPrivateUrl(resolved);
+        if (redirectBlock) {
+          process.stderr.write(`[${NAME}] get_headers: redirect to blocked address: ${currentUrl} -> ${resolved}\n`);
+          return redirectBlock;
+        }
+
+        process.stderr.write(`[${NAME}] get_headers: following redirect ${currentUrl} -> ${resolved}\n`);
+        currentUrl = resolved;
+        redirectCount++;
+      }
+
+      if (!res.ok) {
+        process.stderr.write(`[${NAME}] get_headers: ${currentUrl} returned HTTP ${res.status} ${res.statusText}\n`);
+      }
+
+      const headers: Record<string, string> = {};
       try {
-        res = await fetch(url, {
-          method: "HEAD",
-          redirect: followRedirects ? "follow" : "manual",
-          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-          headers: { "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+        res.headers.forEach((value, name) => {
+          headers[name] = value;
         });
       } catch (err) {
-        process.stderr.write(`[${NAME}] get_headers: fetch failed for ${url}: ${err}\n`);
-        return `get_headers: could not reach ${url} — ${err instanceof Error ? err.message : String(err)}`;
+        process.stderr.write(`[${NAME}] get_headers: headers.forEach failed for ${currentUrl}: ${err}\n`);
       }
-      // Validate the final URL after redirects against the SSRF blocklist.
-      // res.url is "" in Bun when redirect:"manual" (no follow); fall back to original url.
-      // Always run this check (not only when finalUrl !== url) to close the DNS-rebinding window.
-      const finalUrl = res.url || url;
-      if (finalUrl !== url) {
-        process.stderr.write(`[${NAME}] get_headers: followed redirect ${url} -> ${finalUrl}\n`);
-      }
-      const finalBlock = await blockPrivateUrl(finalUrl);
-      if (finalBlock) return finalBlock;
-      const headers: Record<string, string> = {};
-      res.headers.forEach((value, name) => {
-        headers[name] = value;
-      });
+
       return safeStringify({
-        url: finalUrl,
+        url: currentUrl,
         status: res.status,
         statusText: res.statusText,
-        redirected: res.redirected,
+        redirected: redirectCount > 0,
+        redirectCount,
         headers,
       }, 2);
     }
