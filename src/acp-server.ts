@@ -95,7 +95,7 @@ function spawnWorker(w: typeof WORKERS[number]) {
   proc.exited.then((exitCode) => {
     log(`${w.name} exited (code ${exitCode}) — respawning in 2s`);
     setTimeout(() => spawnWorker(w), 2_000);
-  }).catch(() => {});
+  }).catch(e => process.stderr.write(`[acp-server] proc.exited error: ${e}\n`));
 }
 
 function spawnWorkers() {
@@ -543,7 +543,7 @@ async function main() {
 
   // Graceful shutdown
   const cleanup = () => {
-    clearInterval(sessionPruneInterval);
+    if (sessionPruneInterval) clearInterval(sessionPruneInterval);
     log("shutting down...");
     closeTransport();
     shutdownWorkers();

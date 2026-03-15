@@ -12,12 +12,12 @@ import { sanitizeForPrompt } from "../prompt-sanitizer.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 
 const KnowledgeSchemas = {
-  create_note: z.object({ title: z.string().min(1), content: z.string(), tags: z.array(z.string()).optional() }).passthrough(),
-  read_note: z.object({ title: z.string().min(1) }).passthrough(),
-  update_note: z.object({ title: z.string().min(1), content: z.string() }).passthrough(),
-  search_notes: z.object({ query: z.string().min(1) }).passthrough(),
-  list_notes: z.object({ folder: z.string().optional().default("") }).passthrough(),
-  summarize_notes: z.object({ query: z.string().min(1), focus: z.string().optional() }).passthrough(),
+  create_note: z.looseObject({ title: z.string().min(1), content: z.string(), tags: z.array(z.string()).optional() }),
+  read_note: z.looseObject({ title: z.string().min(1) }),
+  update_note: z.looseObject({ title: z.string().min(1), content: z.string() }),
+  search_notes: z.looseObject({ query: z.string().min(1) }),
+  list_notes: z.looseObject({ folder: z.string().optional().default("") }),
+  summarize_notes: z.looseObject({ query: z.string().min(1), focus: z.string().optional() }),
 };
 
 const PORT = 8085;

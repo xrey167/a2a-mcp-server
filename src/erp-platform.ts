@@ -32,7 +32,6 @@ const QuoteCommunicationChannelSchema = z.enum(["email", "call", "meeting", "cha
 const QuoteCommunicationDirectionSchema = z.enum(["inbound", "outbound"]);
 const QuoteMailboxProviderSchema = z.enum(["gmail", "outlook"]);
 const QuoteFollowupActionTypeSchema = z.enum(["email_followup", "call_followup", "escalate_owner"]);
-const QuoteFollowupPrioritySchema = z.enum(["low", "normal", "high", "critical"]);
 const QuoteFollowupStatusSchema = z.enum(["open", "sent", "done", "dismissed"]);
 const RevenueGraphEntityTypeSchema = z.enum(["account", "contact", "quote", "opportunity", "order", "invoice", "payment", "activity", "communication"]);
 const AutopilotProposalStatusSchema = z.enum(["draft", "approved", "rejected", "executed", "failed"]);
@@ -75,7 +74,7 @@ const Customer360HealthInputSchema = z.object({
 const Customer360TimelineInputSchema = z.object({
   workspaceId: z.string().min(1),
   customerExternalId: z.string().min(1),
-  since: z.string().datetime().optional(),
+  since: z.iso.datetime().optional(),
   limit: z.number().int().min(1).max(500).optional().default(100),
   interactionTypes: z.array(Customer360InteractionTypeSchema).optional(),
 }).strict();
@@ -98,7 +97,7 @@ const ConnectPayloadSchema = z.object({
   config: z.record(z.string(), z.unknown()).default({}),
   metadata: z.object({
     tenantId: z.string().optional(),
-    instanceUrl: z.string().url().optional(),
+    instanceUrl: z.url().optional(),
     odooPlan: z.string().optional(),
     tokenExpiresAt: z.string().optional(),
     webhookExpiresAt: z.string().optional(),
@@ -292,7 +291,7 @@ const QuoteMailboxConnectionSchema = z.object({
   refreshToken: z.string().optional(),
   accessToken: z.string().optional(),
   accessTokenExpiresAt: z.string().optional(),
-  tokenEndpoint: z.string().url().optional(),
+  tokenEndpoint: z.url().optional(),
   scopes: z.array(z.string()).optional().default([]),
   metadata: z.record(z.string(), z.unknown()).optional().default({}),
   enabled: z.boolean().optional().default(true),
@@ -878,19 +877,6 @@ interface AutopilotProposalRow {
   updated_at: string;
 }
 
-interface DealRescueRunRow {
-  id: string;
-  workspace_id: string;
-  mode: "targeted" | "batch";
-  targeted_quote_external_id: string | null;
-  min_stagnation_hours: number;
-  identified_count: number;
-  proposal_count: number;
-  recovered_value_eur: number;
-  avg_time_to_recovery_hours: number | null;
-  details_json: string;
-  created_at: string;
-}
 
 interface TrustConsentRow {
   id: string;
@@ -955,12 +941,6 @@ interface PersonalityFeedbackRow {
   created_at: string;
 }
 
-interface ConnectorReplayRow {
-  id: string;
-  run_id: string;
-  connector_type: ConnectorType;
-  created_at: string;
-}
 
 type WizardSessionStatus = "active" | "completed" | "launched" | "blocked";
 type WizardGateStatus = "green" | "red" | "overridden";
@@ -1712,7 +1692,8 @@ function nowIso(): string {
 function parseMetadata(raw: string): Record<string, unknown> {
   try {
     return JSON.parse(raw) as Record<string, unknown>;
-  } catch {
+  } catch (e) {
+    process.stderr.write("Error in parseMetadata: " + (e instanceof Error ? e.message : String(e)) + "\n");
     return {};
   }
 }
@@ -1720,7 +1701,8 @@ function parseMetadata(raw: string): Record<string, unknown> {
 function parseConfig(raw: string): Record<string, unknown> {
   try {
     return JSON.parse(raw) as Record<string, unknown>;
-  } catch {
+  } catch (e) {
+    process.stderr.write("Error in parseConfig: " + (e instanceof Error ? e.message : String(e)) + "\n");
     return {};
   }
 }
@@ -3145,7 +3127,8 @@ function parseIntentTags(raw: string): string[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((item): item is string => typeof item === "string");
-  } catch {
+  } catch (e) {
+    process.stderr.write("Error in parseIntentTags: " + (e instanceof Error ? e.message : String(e)) + "\n");
     return [];
   }
 }
@@ -3287,7 +3270,8 @@ function extractGmailBodyFromPayload(payload: Record<string, unknown> | undefine
   if (directData) {
     try {
       return safeBase64UrlDecode(directData);
-    } catch {
+    } catch (e) {
+      process.stderr.write("Error in extractGmailBodyFromPayload (base64 decode): " + (e instanceof Error ? e.message : String(e)) + "\n");
       return "";
     }
   }
@@ -4232,8 +4216,9 @@ export function ingestQuoteCommunication(
   for (const contact of contacts) {
     try {
       upsertQuotePersonalityProfileForContact(workspaceId, contact);
-    } catch {
+    } catch (e) {
       // Communication ingest must not fail because profile projection failed.
+      process.stderr.write("Error in upsertQuotePersonalityProfileForContact: " + (e instanceof Error ? e.message : String(e)) + "\n");
     }
   }
   return {
@@ -5116,7 +5101,6 @@ function buildPersonalityProfileSnapshot(
   }
 
   const latest = events[0];
-  const sortedAsc = [...events].sort((a, b) => Date.parse(a.occurred_at) - Date.parse(b.occurred_at));
   const typeCounts = new Map<string, number>();
   const intentCounts = new Map<string, number>();
   const confidenceByDay = new Map<string, { total: number; confidenceSum: number }>();
@@ -5354,8 +5338,13 @@ function getPersonalityFeedbackSummary(workspaceId: string, contactKey: string, 
     let scoreSum = 0;
     let replies = 0;
     let conversions = 0;
+    const VALID_OUTCOMES = new Set(["positive", "neutral", "negative", "ignored"]);
     for (const row of rows) {
-      if (Object.hasOwn(summary, row.outcome)) summary[row.outcome] += 1;
+      if (VALID_OUTCOMES.has(row.outcome) && Object.hasOwn(summary, row.outcome)) {
+        summary[row.outcome] += 1;
+      } else if (!VALID_OUTCOMES.has(row.outcome)) {
+        process.stderr.write(`[erp-platform] skipping unknown outcome key: "${row.outcome}"\n`);
+      }
       scoreSum += num(row.feedback_score);
       if (row.reply_received === 1) replies += 1;
       if (row.converted_to_order === 1) conversions += 1;
@@ -9685,11 +9674,10 @@ function tryGetCachedProfile(
   ).get(workspaceId, customerExternalId);
 
   if (!cached) return null;
+  if (typeof cached !== 'object' || cached === null) throw new Error('cache: unexpected non-object');
 
   const age = Date.now() - new Date(cached.computed_at).getTime();
   if (age >= 3600_000) return null;
-
-  if (typeof cached !== 'object' || cached === null) throw new Error('cache: unexpected non-object');
   const cacheObj = cached as Record<string, any>;
   const {
     contacts_json,

@@ -86,7 +86,7 @@ function normalizeSignalType(type: string): CanonicalSignalType | string {
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const SignalSchemas = {
-  aggregate_signals: z.object({
+  aggregate_signals: z.looseObject({
     signals: z.array(z.object({
       id: z.string().optional(),
       type: z.string(),
@@ -102,18 +102,18 @@ const SignalSchemas = {
     })).min(1),
     windowHours: z.number().positive().optional().default(24),
     dedup: z.boolean().optional().default(true),
-  }).passthrough(),
+  }),
 
-  classify_threat: z.object({
+  classify_threat: z.looseObject({
     events: z.array(z.object({
       title: z.string(),
       description: z.string().optional().default(""),
       source: z.string().optional().default(""),
       type: z.string().optional().default(""),
     })).min(1),
-  }).passthrough(),
+  }),
 
-  detect_convergence: z.object({
+  detect_convergence: z.looseObject({
     signals: z.array(z.object({
       type: z.string(),
       lat: z.number(),
@@ -124,9 +124,9 @@ const SignalSchemas = {
     })).min(1),
     radiusKm: z.number().positive().optional().default(150),
     minTypes: z.number().int().positive().optional().default(2),
-  }).passthrough(),
+  }),
 
-  baseline_compare: z.object({
+  baseline_compare: z.looseObject({
     series: z.array(z.object({
       timestamp: z.string(),
       value: z.number(),
@@ -134,9 +134,9 @@ const SignalSchemas = {
     })).min(2),
     baselineHours: z.number().positive().optional().default(48),
     zScoreThreshold: z.number().positive().optional().default(2),
-  }).passthrough(),
+  }),
 
-  instability_index: z.object({
+  instability_index: z.looseObject({
     country: z.string().min(1),
     indicators: z.object({
       conflictEvents: z.number().optional().default(0),
@@ -160,23 +160,23 @@ const SignalSchemas = {
     }).optional().default({}),
     /** Geopolitical risk framework overlay */
     framework: z.enum(["standard", "grand_chessboard", "prisoners_of_geography"]).optional().default("standard"),
-  }).passthrough(),
+  }),
 
   // ── Live Cyber Threat Feed Skills ────────────────────────────────
-  fetch_cyber_c2: z.object({
+  fetch_cyber_c2: z.looseObject({
     limit: z.number().int().positive().optional().default(100),
-  }).passthrough(),
+  }),
 
-  fetch_malicious_urls: z.object({
+  fetch_malicious_urls: z.looseObject({
     limit: z.number().int().positive().optional().default(100),
-  }).passthrough(),
+  }),
 
-  fetch_outages: z.object({
+  fetch_outages: z.looseObject({
     country: z.string().optional(),
     days: z.number().int().positive().optional().default(7),
-  }).passthrough(),
+  }),
 
-  correlate_signals: z.object({
+  correlate_signals: z.looseObject({
     signals: z.array(z.object({
       type: z.string(),
       source: z.string().optional().default(""),
@@ -190,7 +190,7 @@ const SignalSchemas = {
     })).min(1),
     windowHours: z.number().positive().optional().default(24),
     minConfidence: z.number().min(0).max(1).optional().default(0.3),
-  }).passthrough(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -316,7 +316,7 @@ function aggregateSignals(signals: Signal[], windowHours: number, dedup: boolean
   const byCountry = new Map<string, Signal[]>();
   for (const s of filtered) {
     const country = s.country || "unknown";
-    (byCountry.get(country) ?? (byCountry.set(country, []), byCountry.get(country))!).push(s);
+    (byCountry.get(country) ?? (byCountry.set(country, []), byCountry.get(country) ?? [])).push(s);
   }
 
   // Build clusters with geo-normalization
@@ -400,7 +400,7 @@ const THREAT_CATEGORIES: Record<string, string[]> = {
   humanitarian: ["refugee", "displacement", "famine", "humanitarian", "aid", "crisis", "migration", "asylum"],
 };
 
-const THREAT_ESCALATION_TERMS: Record<string, string[]> = {
+const THREAT_ESCALATION_TERMS: Record<"critical" | "high" | "medium", string[]> = {
   critical: ["breaking", "urgent", "imminent", "nuclear strike", "mass casualty", "war declared", "coup underway", "invasion begun", "chemical weapon"],
   high: ["escalat", "mobiliz", "surge", "critical", "emergency", "alert", "threat level", "evacuate", "martial law", "sanctions imposed"],
   medium: ["tension", "concern", "increased", "reported", "incident", "warning", "monitor", "elevated"],
@@ -436,16 +436,16 @@ function classifyThreat(title: string, description: string, source: string, type
   let threatLevel = "low";
   let confidence = 0.3;
 
-  for (const term of (THREAT_ESCALATION_TERMS.critical ?? [])) {
+  for (const term of THREAT_ESCALATION_TERMS.critical) {
     if (text.includes(term)) { threatLevel = "critical"; confidence = 0.9; break; }
   }
   if (threatLevel === "low") {
-    for (const term of (THREAT_ESCALATION_TERMS.high ?? [])) {
+    for (const term of THREAT_ESCALATION_TERMS.high) {
       if (text.includes(term)) { threatLevel = "high"; confidence = 0.7; break; }
     }
   }
   if (threatLevel === "low") {
-    for (const term of (THREAT_ESCALATION_TERMS.medium ?? [])) {
+    for (const term of THREAT_ESCALATION_TERMS.medium) {
       if (text.includes(term)) { threatLevel = "medium"; confidence = 0.5; break; }
     }
   }
@@ -501,7 +501,7 @@ function detectConvergence(signals: GeoSignal[], radiusKm: number, minTypes: num
     const cellY = Math.floor(signals[i]!.lat / cellSizeDeg);
     const key = `${cellX},${cellY}`;
     if (!grid.has(key)) grid.set(key, []);
-    grid.get(key)!.push(i);
+    (grid.get(key) ?? []).push(i);
   }
 
   // How many adjacent cells to check based on radius vs cell size
@@ -734,8 +734,8 @@ function applyFrameworkWeights(
   // Renormalize weights to sum to 1.0
   const total = Object.values(weights).reduce((s, w) => s + w, 0);
   if (total > 0) {
-    for (const key of Object.keys(weights)) {
-      weights[key] = round((weights[key] ?? 0) / total, 4);
+    for (const [key, val] of Object.entries(weights)) {
+      weights[key] = round(val / total, 4);
     }
   }
 
@@ -851,11 +851,11 @@ function detectCorrelationPatterns(
     const domains = classifySignalDomain(sig);
     for (const d of domains) {
       if (!byDomain.has(d)) byDomain.set(d, []);
-      byDomain.get(d)!.push(sig);
+      (byDomain.get(d) ?? []).push(sig);
     }
     const country = sig.country || "unknown";
     if (!byCountry.has(country)) byCountry.set(country, []);
-    byCountry.get(country)!.push(sig);
+    (byCountry.get(country) ?? []).push(sig);
   }
 
   const domainCount = (d: string) => (byDomain.get(d) ?? []).length;
@@ -1004,7 +1004,7 @@ function detectCorrelationPatterns(
       const domains = classifySignalDomain(sig);
       for (const d of domains) {
         if (!typeCountries.has(d)) typeCountries.set(d, new Set());
-        typeCountries.get(d)!.add(sig.country);
+        (typeCountries.get(d) ?? new Set()).add(sig.country);
       }
     }
     const spillovers: string[] = [];
@@ -1171,6 +1171,7 @@ async function fetchIodaOutages(country?: string, days: number = 7): Promise<Rec
     };
   } catch (err) {
     // IODA API may be unreliable; return graceful degradation
+    process.stderr.write(`[${NAME}] fetch_outages: IODA request failed: ${err instanceof Error ? err.message : String(err)}\n`);
     return {
       source: "ioda",
       description: "Internet outage signals (IODA)",

@@ -177,7 +177,7 @@ export function watchPlugins(onReload?: () => void) {
         await reload();
       });
       process.stderr.write(`[skill-loader] watching ${PLUGINS_DIR}\n`);
-    } catch {}
+    } catch (e) { process.stderr.write(`[skill-loader] watcher setup failed: ${e}\n`); }
   }
 
   if (existsSync(VAULT_PLUGINS_DIR)) {
@@ -188,6 +188,6 @@ export function watchPlugins(onReload?: () => void) {
         await reload();
       });
       process.stderr.write(`[skill-loader] watching ${VAULT_PLUGINS_DIR}\n`);
-    } catch {}
+    } catch (e) { process.stderr.write(`[skill-loader] watcher setup failed: ${e}\n`); }
   }
 }

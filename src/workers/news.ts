@@ -26,28 +26,28 @@ const NAME = "news-agent";
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const NewsSchemas = {
-  fetch_rss: z.object({
-    url: z.string().url(),
+  fetch_rss: z.looseObject({
+    url: z.url(),
     limit: z.number().int().positive().optional().default(50),
     timeout: z.number().int().positive().optional().default(15000),
-  }).passthrough(),
+  }),
 
-  aggregate_feeds: z.object({
-    urls: z.array(z.string().url()).min(1).max(50),
+  aggregate_feeds: z.looseObject({
+    urls: z.array(z.url()).min(1).max(50),
     limit: z.number().int().positive().optional().default(100),
     dedup: z.boolean().optional().default(true),
     sortBy: z.enum(["date", "title"]).optional().default("date"),
-  }).passthrough(),
+  }),
 
-  classify_news: z.object({
+  classify_news: z.looseObject({
     articles: z.array(z.object({
       title: z.string(),
       description: z.string().optional().default(""),
       source: z.string().optional().default(""),
     })).min(1),
-  }).passthrough(),
+  }),
 
-  cluster_news: z.object({
+  cluster_news: z.looseObject({
     articles: z.array(z.object({
       title: z.string(),
       description: z.string().optional().default(""),
@@ -56,9 +56,9 @@ const NewsSchemas = {
       pubDate: z.string().optional().default(""),
     })).min(1),
     threshold: z.number().min(0).max(1).optional().default(0.3),
-  }).passthrough(),
+  }),
 
-  detect_signals: z.object({
+  detect_signals: z.looseObject({
     articles: z.array(z.object({
       title: z.string(),
       description: z.string().optional().default(""),
@@ -68,12 +68,12 @@ const NewsSchemas = {
     })).min(1),
     baselineHours: z.number().positive().optional().default(24),
     spikeMultiplier: z.number().positive().optional().default(3),
-  }).passthrough(),
+  }),
 
-  regulatory_scan: z.object({
+  regulatory_scan: z.looseObject({
     categories: z.array(z.enum(["supply_chain", "sustainability", "data", "automotive", "trade"])).optional(),
     maxResults: z.number().int().positive().optional().default(50),
-  }).passthrough(),
+  }),
 };
 
 // ── Regulatory Monitoring ───────────────────────────────────────
@@ -653,8 +653,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           allArticles.push(...articles);
         } catch (err) {
           failedFeeds++;
-          const errMsg = err instanceof Error ? err.message.replace(/\n/g, " ") : String(err);
-          process.stderr.write(`[${NAME}] regulatory_scan: feed failed ${feedUrl}: ${errMsg}\n`);
+          process.stderr.write(`[${NAME}] regulatory_scan: feed failed ${feedUrl}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
         }
       }
       // Log summary if there were failures
@@ -667,12 +666,10 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           allArticles.push(a);
         }
       }
-      // Classify all articles for regulatory relevance
-      const alerts: RegulatoryAlert[] = [];
-      for (const article of allArticles) {
-        const alert = classifyRegulatoryArticle(article, categories);
-        if (alert) alerts.push(alert);
-      }
+      // Classify all articles for regulatory relevance, filtering out null (no-match) results
+      const alerts: RegulatoryAlert[] = allArticles
+        .map(a => classifyRegulatoryArticle(a, categories))
+        .filter((r): r is RegulatoryAlert => r !== null);
       // Sort by impact level
       const impactOrder = { critical: 0, high: 1, medium: 2, low: 3 };
       alerts.sort((a, b) => impactOrder[a.impactLevel] - impactOrder[b.impactLevel]);

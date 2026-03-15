@@ -50,8 +50,9 @@ export function computeCriticalPath(
     }
   }
 
-  // Total project duration
-  const totalDurationDays = Math.max(...nodes.map((n) => n.earliestFinish ?? 0));
+  // Total project duration — guard against Math.max(...[]) = -Infinity if nodes is ever empty
+  const finishes = nodes.map((n) => n.earliestFinish ?? 0);
+  const totalDurationDays = finishes.length > 0 ? Math.max(...finishes) : 0;
 
   // Backward pass: compute latest start/finish
   for (const nodeId of sorted.reverse()) {
@@ -134,7 +135,7 @@ function topologicalSort(nodes: GraphNode[], edges: GraphEdge[]): string[] {
 
   for (const edge of edges) {
     inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
-    adjacency.get(edge.from)!.push(edge.to);
+    adjacency.get(edge.from)?.push(edge.to); // skip malformed edges
   }
 
   const queue = nodes
@@ -144,7 +145,8 @@ function topologicalSort(nodes: GraphNode[], edges: GraphEdge[]): string[] {
   const sorted: string[] = [];
 
   while (queue.length > 0) {
-    const current = queue.shift()!;
+    const current = queue.shift();
+    if (!current) break;
     sorted.push(current);
 
     for (const neighbor of adjacency.get(current) ?? []) {

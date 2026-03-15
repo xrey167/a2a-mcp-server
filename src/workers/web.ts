@@ -6,8 +6,8 @@ import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
 
 const WebSchemas = {
-  fetch_url: z.object({ url: z.string().url(), format: z.enum(["text", "json"]).optional().default("text") }).passthrough(),
-  call_api: z.object({ url: z.string().url(), method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).optional().default("GET"), headers: z.record(z.string(), z.string()).optional().default({}), body: z.unknown().optional() }).passthrough(),
+  fetch_url: z.looseObject({ url: z.url(), format: z.enum(["text", "json"]).optional().default("text") }),
+  call_api: z.looseObject({ url: z.url(), method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).optional().default("GET"), headers: z.record(z.string(), z.string()).optional().default({}), body: z.unknown().optional() }),
 };
 
 /** Block RFC-1918, loopback, APIPA, and cloud-metadata hostnames at the hostname level. */
@@ -15,21 +15,27 @@ function isPrivateHostname(hostname: string): boolean {
   const h = hostname.toLowerCase();
   return (
     h === "localhost" ||
+    h === "0.0.0.0" ||
+    /^0\./.test(h) ||              // 0.0.0.0/8
     /^127\./.test(h) ||
     /^10\./.test(h) ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
     /^192\.168\./.test(h) ||
     /^169\.254\./.test(h) ||  // APIPA + AWS/GCP metadata
     h === "::1" ||
-    /^fd[0-9a-f]{2}:/i.test(h) || // ULA IPv6
+    /^fc[0-9a-f]{2}:/i.test(h) || // fc00::/7 IPv6 ULA
+    /^fd[0-9a-f]{2}:/i.test(h) || // fd00::/8 IPv6 ULA
     /^fe80:/i.test(h)              // link-local IPv6
   );
 }
 
 function blockPrivateUrl(url: string): string | null {
   try {
-    const { hostname } = new URL(url);
-    return isPrivateHostname(hostname) ? `Blocked: private/internal URLs are not allowed (${hostname})` : null;
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return `Blocked: only http and https protocols are allowed (got ${parsed.protocol})`;
+    }
+    return isPrivateHostname(parsed.hostname) ? `Blocked: private/internal URLs are not allowed (${parsed.hostname})` : null;
   } catch {
     return "Blocked: invalid URL";
   }

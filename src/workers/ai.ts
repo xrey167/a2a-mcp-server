@@ -8,9 +8,9 @@ import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
 
 const AiSchemas = {
-  ask_claude: z.object({ prompt: z.string().min(1), model: z.string().optional(), max_tokens: z.number().int().positive().optional() }).passthrough(),
-  search_files: z.object({ pattern: z.string().min(1), directory: z.string().optional().default(".") }).passthrough(),
-  query_sqlite: z.object({ database: z.string().min(1), sql: z.string().min(1) }).passthrough(),
+  ask_claude: z.looseObject({ prompt: z.string().min(1), model: z.string().optional(), max_tokens: z.number().int().positive().optional() }),
+  search_files: z.looseObject({ pattern: z.string().min(1), directory: z.string().optional().default(".") }),
+  query_sqlite: z.looseObject({ database: z.string().min(1), sql: z.string().min(1) }),
 };
 import { resolve } from "node:path";
 import { runClaudeCLI } from "../claude-cli.js";
@@ -53,9 +53,16 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           system: persona.systemPrompt || undefined,
           messages: [{ role: "user", content: prompt }],
         });
+        if (message.content.length === 0) throw new Error("Anthropic returned empty content array");
+        const textContent = message.content
+          .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
+          .map(b => b.text)
+          .join("\n");
+        if (textContent) return textContent;
+        // No text blocks — serialize first block as fallback
         const block = message.content[0];
-        if (!block) return "";
-        return block.type === "text" ? block.text : safeStringify(block);
+        if (!block) throw new Error("Anthropic returned empty content array");
+        return safeStringify(block);
       } catch (anthropicErr) {
         // Try Ollama/LM Studio as second fallback (OpenAI-compatible API)
         const ollamaUrl = process.env.OLLAMA_URL ?? process.env.LM_STUDIO_URL;
