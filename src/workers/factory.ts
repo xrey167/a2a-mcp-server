@@ -509,7 +509,11 @@ async function createProject(
     throw new Error(`Intent normalization returned invalid JSON: ${specRaw.slice(0, 200)}`);
   }
 
-  const projectName = (spec.name as string ?? "my-project").toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  const projectName = (spec.name as string ?? "my-project")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .slice(0, 64)
+    .replace(/^-+|-+$/g, "") || "my-project";
   const targetDir = outputDir ?? `/tmp/factory/${projectName}-${Date.now()}`;
 
   // Phase 2: Scaffold from templates
