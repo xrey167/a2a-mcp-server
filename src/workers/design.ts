@@ -64,7 +64,7 @@ async function callGemini(systemInstruction: string, userPrompt: string): Promis
     if (!response?.text) throw new Error("Gemini returned empty response");
     return response.text.trim();
   } catch (err) {
-    if ((err as Error).message !== "no-api-key") throw err;
+    if (!(err instanceof Error) || err.message !== "no-api-key") throw err;
     // CLI fallback: prefix system instruction into the prompt
     return runGeminiCLI(`${systemInstruction}\n\n${userPrompt}`);
   }
