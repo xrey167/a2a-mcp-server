@@ -12,10 +12,10 @@ const DesignSchemas = {
   suggest_screens: z.looseObject({ appConcept: z.string().min(1), deviceType: z.string().optional().default("mobile") }),
   design_critique: z.looseObject({ description: z.string().min(1) }),
   generate_brand: z.looseObject({
-    appName: z.string().min(1),
-    description: z.string().min(1),
-    industry: z.string().optional(),
-    targetAudience: z.string().optional(),
+    appName: z.string().min(1).max(200),
+    description: z.string().min(1).max(2_000),
+    industry: z.string().max(200).optional(),
+    targetAudience: z.string().max(200).optional(),
   }),
 };
 
@@ -143,6 +143,11 @@ ${sanitizeUserInput(description, "design_description")}`;
 
 // ── Generate a brand identity system for an app ──────────────────
 async function generateBrand(appName: string, description: string, industry?: string, targetAudience?: string): Promise<string> {
+  if (description.length > 2_000) {
+    process.stderr.write(`[${NAME}] generate_brand: description too large (${description.length} chars)\n`);
+    throw new Error(`generate_brand: description is ${description.length} characters — exceeds 2,000 character limit`);
+  }
+
   const systemInstruction = `You are a brand strategist and visual designer. Given an app concept, produce a complete brand identity system as JSON.
 
 Respond ONLY with a valid JSON object — no markdown fences, no explanation:
@@ -160,14 +165,44 @@ Respond ONLY with a valid JSON object — no markdown fences, no explanation:
 Use descriptive color names ("deep navy", "warm coral") — never hex codes. Palette must be 3-5 colors that work together.`;
 
   const contextLines = [
-    `App name: ${sanitizeUserInput(appName, "app_name")}`,
-    industry ? `Industry: ${sanitizeUserInput(industry, "industry")}` : null,
-    targetAudience ? `Target audience: ${sanitizeUserInput(targetAudience, "target_audience")}` : null,
-    `Description: ${sanitizeUserInput(description, "app_description")}`,
+    `App name: ${sanitizeUserInput(appName, "app_name", 200)}`,
+    industry ? `Industry: ${sanitizeUserInput(industry, "industry", 200)}` : null,
+    targetAudience ? `Target audience: ${sanitizeUserInput(targetAudience, "target_audience", 200)}` : null,
+    `Description: ${sanitizeUserInput(description, "app_description", 2_000)}`,
   ].filter(Boolean).join("\n");
 
   const raw = await callGemini(systemInstruction, contextLines);
-  return raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+  if (!raw || raw.trim().length === 0) {
+    process.stderr.write(`[${NAME}] generate_brand: Gemini returned empty response\n`);
+    throw new Error("generate_brand: model returned empty response — retry or check API key");
+  }
+  const stripped = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+  if (stripped.length === 0) {
+    process.stderr.write(`[${NAME}] generate_brand: response was only markdown fences\n`);
+    throw new Error("generate_brand: model returned only markdown fences — retry");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripped);
+  } catch (err) {
+    process.stderr.write(`[${NAME}] generate_brand: JSON.parse failed — ${err instanceof Error ? err.message : String(err)} — raw: ${stripped.slice(0, 80)}\n`);
+    throw new Error("generate_brand: model did not return valid JSON — retry");
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    process.stderr.write(`[${NAME}] generate_brand: unexpected JSON structure (type=${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed})\n`);
+    throw new Error("generate_brand: model returned unexpected JSON structure — retry");
+  }
+  const p = parsed as Record<string, unknown>;
+  const requiredKeys = ["palette", "primaryColor", "accentColor", "backgroundColor", "typography", "visualStyle", "mood", "voice"];
+  const missing = requiredKeys.filter(k => !(k in p));
+  if (missing.length > 0) {
+    process.stderr.write(`[${NAME}] generate_brand: missing required fields: ${missing.join(", ")}\n`);
+    throw new Error(`generate_brand: model response missing required fields: ${missing.join(", ")} — retry`);
+  }
+
+  return stripped;
 }
 
 // ── Skill dispatcher ─────────────────────────────────────────────
@@ -192,7 +227,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
 
     case "generate_brand": {
-      const { appName, description, industry, targetAudience } = DesignSchemas.generate_brand.parse({ appName: args.appName ?? text, ...args });
+      let gbParsed: ReturnType<typeof DesignSchemas.generate_brand.parse>;
+      try {
+        gbParsed = DesignSchemas.generate_brand.parse({ appName: args.appName ?? text, ...args });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] generate_brand: Zod parse error: ${err instanceof Error ? err.message : String(err)}\n`);
+        throw err;
+      }
+      const { appName, description, industry, targetAudience } = gbParsed;
       return generateBrand(appName, description, industry, targetAudience);
     }
 
