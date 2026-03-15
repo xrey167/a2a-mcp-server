@@ -316,7 +316,8 @@ function aggregateSignals(signals: Signal[], windowHours: number, dedup: boolean
   const byCountry = new Map<string, Signal[]>();
   for (const s of filtered) {
     const country = s.country || "unknown";
-    (byCountry.get(country) ?? (byCountry.set(country, []), byCountry.get(country) ?? [])).push(s);
+    if (!byCountry.has(country)) byCountry.set(country, []);
+    byCountry.get(country)!.push(s);
   }
 
   // Build clusters with geo-normalization
