@@ -50,6 +50,7 @@ export async function fetchWithTimeout(
 export async function discoverAgent(agentUrl: string): Promise<AgentCard> {
   const res = await fetch(`${agentUrl}/.well-known/agent.json`, {
     redirect: "manual", // Prevent following redirects to bypass SSRF checks
+    signal: AbortSignal.timeout(10_000),
   });
 
   // Reject redirects
