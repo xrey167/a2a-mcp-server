@@ -26,6 +26,8 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round } from "../worker-utils.js";
+import { callPeer } from "../peer.js";
+import { sanitizeForPrompt } from "../prompt-sanitizer.js";
 
 const PORT = 8093;
 const NAME = "infra-agent";
@@ -145,6 +147,11 @@ const InfraSchemas = {
     query: z.enum(["stats", "critical_nodes", "single_points_of_failure", "impact_of", "depends_on"]).optional().default("stats"),
     targetNode: z.string().optional(),
   }),
+
+  infra_brief: z.looseObject({
+    region: z.string().min(1).max(200),
+    focus: z.string().max(200).optional(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -163,6 +170,7 @@ const AGENT_CARD = {
     { id: "dependency_graph", name: "Dependency Graph", description: "Build dependency graphs and query: critical nodes (high in-degree), single points of failure, impact analysis" },
     { id: "load_infrastructure", name: "Load Infrastructure", description: "Load the static infrastructure database (chokepoints, bases, cables, pipelines, datacenters, ports) with optional type/region filtering" },
     { id: "fetch_cables", name: "Fetch Cables", description: "Fetch live submarine cable topology from TeleGeography (free, no auth). Returns cable systems as InfraNode+InfraEdge arrays ready for cascade_analysis or dependency_graph" },
+    { id: "infra_brief", name: "Infra Brief", description: "Load static infrastructure database for a region, assess chokepoints and redundancy, and generate an AI-written critical infrastructure vulnerability briefing" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -861,8 +869,8 @@ async function fetchSubmarineCables(
 
 let infraDbCache: { nodes: InfraNode[]; edges: InfraEdge[] } | null = null;
 
-function loadInfrastructureDb(): { nodes: InfraNode[]; edges: InfraEdge[] } {
-  if (infraDbCache) return infraDbCache;
+function loadInfrastructureDb(): { nodes: InfraNode[]; edges: InfraEdge[]; dbLoadFailed: boolean } {
+  if (infraDbCache) return { ...infraDbCache, dbLoadFailed: false };
   try {
     const thisDir = dirname(fileURLToPath(import.meta.url));
     const dbPath = join(thisDir, "..", "data", "infrastructure.json");
@@ -870,11 +878,116 @@ function loadInfrastructureDb(): { nodes: InfraNode[]; edges: InfraEdge[] } {
     const data = JSON.parse(raw) as { nodes: InfraNode[]; edges: InfraEdge[] };
     infraDbCache = data;
     process.stderr.write(`[${NAME}] loaded infrastructure DB: ${data.nodes.length} nodes, ${data.edges.length} edges\n`);
-    return data;
+    return { ...data, dbLoadFailed: false };
   } catch (err) {
     process.stderr.write(`[${NAME}] failed to load infrastructure DB: ${err}\n`);
-    return { nodes: [], edges: [] };
+    return { nodes: [], edges: [], dbLoadFailed: true };
   }
+}
+
+// ── AI Infrastructure Brief ──────────────────────────────────────
+
+async function generateInfraBrief(region: string, focus?: string): Promise<string> {
+  // Load static infrastructure database — abort if the DB itself failed to load
+  const { nodes, edges, dbLoadFailed } = loadInfrastructureDb();
+  if (dbLoadFailed) {
+    process.stderr.write(`[${NAME}] infra_brief: aborting for region="${region}" — infrastructure DB failed to load\n`);
+    throw new Error("infra_brief: infrastructure database unavailable; cannot generate briefing");
+  }
+
+  const regionLower = region.toLowerCase();
+  const regionNodes = nodes.filter(n => {
+    const meta = n.metadata as Record<string, unknown>;
+    const country = String(meta.country ?? meta.fromCountry ?? "").toLowerCase();
+    const landing = String(meta.landingPoints ?? "").toLowerCase();
+    return country.includes(regionLower) || landing.includes(regionLower) || n.name.toLowerCase().includes(regionLower);
+  });
+
+  // Type counts for redundancy summary
+  const typeCounts: Record<string, number> = {};
+  for (const n of regionNodes) {
+    const t = normalizeNodeType(n.type);
+    typeCounts[t] = (typeCounts[t] ?? 0) + 1;
+  }
+
+  // Assess chokepoints scoped to the region (not all global nodes)
+  interface StaticChokepoint {
+    name: string;
+    dailyTransits: number;
+    oilFlowMbpd: number;
+    lngFlowMtpa: number;
+    widthKm: number;
+    alternatives: string[];
+    threats: string[];
+    controllingEntities: string[];
+  }
+  const chokepointNodes = regionNodes.filter(n => normalizeNodeType(n.type) === "chokepoint");
+  const chokepoints: StaticChokepoint[] = chokepointNodes.map(n => {
+    const meta = n.metadata as Record<string, unknown>;
+    return {
+      name: n.name,
+      dailyTransits: Number(meta.dailyTransits ?? 0),
+      oilFlowMbpd: Number(meta.oilFlowMbpd ?? 0),
+      lngFlowMtpa: Number(meta.lngFlowMtpa ?? 0),
+      widthKm: Number(meta.widthKm ?? 0),
+      alternatives: (meta.alternatives as string[] | undefined) ?? [],
+      threats: (meta.threats as string[] | undefined) ?? [],
+      controllingEntities: (meta.controllingEntities as string[] | undefined) ?? [],
+    };
+  });
+
+  const assessedChokepoints = assessChokepoints(chokepoints as Parameters<typeof assessChokepoints>[0]);
+  const criticalChokepoints = assessedChokepoints.filter(cp => cp.vulnerabilityLevel === "critical" || cp.vulnerabilityLevel === "high");
+
+  const topChokepoints = criticalChokepoints
+    .slice(0, 5)
+    .map(cp => `${sanitizeForPrompt(cp.name, "chokepoint_name")} (score ${cp.vulnerabilityScore}, ${sanitizeForPrompt(cp.vulnerabilityLevel, "vulnerability_level")})`)
+    .join("; ");
+
+  const nodeId = new Set(regionNodes.map(n => n.id));
+  const regionEdges = edges.filter(e => nodeId.has(e.from) || nodeId.has(e.to));
+
+  if (regionNodes.length === 0) {
+    process.stderr.write(`[${NAME}] infra_brief: region="${region}" matched 0 nodes in static DB — AI briefing will be speculative\n`);
+  }
+
+  const focusLine = focus ? `\nFocus area: ${sanitizeForPrompt(focus, "focus_area")}` : "";
+
+  const dataContext = `Region: ${sanitizeForPrompt(region, "region")}${focusLine}
+
+Infrastructure nodes: ${regionNodes.length} total
+Type breakdown: ${Object.entries(typeCounts).map(([t, n]) => `${n} ${t}`).join(", ") || "none"}
+Infrastructure edges/connections: ${regionEdges.length}
+
+Regional chokepoints: ${chokepointNodes.length} total
+Critical/high vulnerability chokepoints: ${criticalChokepoints.length}
+Top vulnerable chokepoints: ${topChokepoints || "none"}`;
+
+  const prompt = `You are a critical infrastructure security analyst. Write a concise vulnerability briefing (3-5 paragraphs) based on this infrastructure data:
+
+${dataContext}
+
+Cover: key infrastructure assets in the region, most vulnerable chokepoints, potential cascade risks, redundancy gaps, and strategic dependencies. Be factual and specific. End with a one-sentence resilience outlook.`;
+
+  let analysis: string;
+  try {
+    analysis = await callPeer("ask_claude", { prompt }, prompt, 60_000);
+  } catch (err) {
+    process.stderr.write(`[${NAME}] infra_brief: callPeer ask_claude failed for region="${region}": ${(err as Error).stack ?? err}\n`);
+    throw new Error("infra_brief: AI synthesis failed", { cause: err });
+  }
+
+  return safeStringify({
+    region,
+    dataQuality: regionNodes.length === 0 ? "no_region_match" : "ok",
+    regionNodeCount: regionNodes.length,
+    regionEdgeCount: regionEdges.length,
+    typeBreakdown: typeCounts,
+    totalChokepoints: chokepointNodes.length,
+    criticalChokepoints: criticalChokepoints.length,
+    topVulnerableChokepoints: assessedChokepoints.slice(0, 5),
+    analysis,
+  }, 2);
 }
 
 // ── Skill Dispatcher ─────────────────────────────────────────────
@@ -933,6 +1046,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     case "load_infrastructure": {
       const { filter } = InfraSchemas.load_infrastructure.parse(args);
       const infraData = loadInfrastructureDb();
+      if (infraData.dbLoadFailed) throw new Error("load_infrastructure: infrastructure database unavailable");
       let nodes = infraData.nodes;
       let edges = infraData.edges;
 
@@ -988,8 +1102,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }, 2);
     }
 
+    case "infra_brief": {
+      const { region, focus } = InfraSchemas.infra_brief.parse({ region: args.region ?? text, ...args });
+      process.stderr.write(`[${NAME}] infra_brief: generating brief for region="${region}"${focus ? ` focus="${focus}"` : ""}\n`);
+      return generateInfraBrief(region, focus);
+    }
+
     default:
-      return `Unknown skill: ${skillId}`;
+      throw new Error(`Unknown skill: ${skillId}`);
   }
 }
 
