@@ -21,6 +21,7 @@ import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round, validateUrlNotInternal } from "../worker-utils.js";
 import { callPeer } from "../peer.js";
+import { sanitizeForPrompt } from "../prompt-sanitizer.js";
 
 const PORT = 8090;
 const NAME = "market-agent";
@@ -98,9 +99,9 @@ const MarketSchemas = {
   }),
 
   market_report: z.looseObject({
-    symbols: z.array(z.string().min(1)).min(1).max(10),
+    symbols: z.array(z.string().min(1).max(20).regex(/^[A-Za-z0-9._^=\-]+$/)).min(1).max(10),
     range: z.enum(["1mo", "3mo", "6mo", "1y"]).optional().default("1mo"),
-    focus: z.string().optional(),
+    focus: z.string().max(200).optional(),
   }),
 };
 
@@ -891,7 +892,10 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     case "market_report": {
       const { symbols, range, focus } = MarketSchemas.market_report.parse(args);
 
-      // Fetch quote + price history for each symbol in parallel
+      // Fetch quote + price history for each symbol in parallel.
+      // fetchYahooQuote/fetchYahooHistory use Yahoo's unofficial API (no key required).
+      // Set ALPHAVANTAGE_API_KEY to use the official provider for other skills;
+      // market_report always uses Yahoo — Alpha Vantage doesn't map cleanly to batch quote + history.
       const symbolData = await Promise.all(
         symbols.map(async (sym) => {
           try {
@@ -899,48 +903,57 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
               fetchYahooQuote(sym),
               fetchYahooHistory(sym, "1d", range),
             ]);
-            const closes = history.close.filter(v => v > 0);
+            // fetchYahooHistory maps null close values to 0 — filter them out.
+            // Note: legitimate near-zero prices (penny stocks, certain futures) may also be
+            // excluded; this is an accepted trade-off given the unofficial API.
+            const closes = history.close.filter(v => v !== 0);
             const rsiSeries = closes.length >= 15 ? computeRSI(closes, 14) : [];
-            const latestRsi = rsiSeries.filter(v => v !== null).at(-1) ?? null;
+            const latestRsi = rsiSeries.filter((v): v is number => v !== null).at(-1) ?? null;
             const macdData = closes.length >= 27 ? computeMACD(closes) : null;
-            const latestMacd = macdData?.macd.filter(v => v !== null).at(-1) ?? null;
-            const latestSignal = macdData?.signal.filter(v => v !== null).at(-1) ?? null;
+            const latestMacd = macdData?.macd.filter((v): v is number => v !== null).at(-1) ?? null;
+            const latestSignal = macdData?.signal.filter((v): v is number => v !== null).at(-1) ?? null;
             const macdCross = latestMacd !== null && latestSignal !== null
               ? latestMacd > latestSignal ? "bullish" : "bearish"
               : "insufficient data";
+            const price = typeof quote.price === "number" ? quote.price : null;
+            const changePercent = typeof quote.changePercent === "number" ? quote.changePercent : null;
+            const currency = typeof quote.currency === "string" ? quote.currency : "USD";
             return {
               symbol: sym,
-              price: quote.price,
-              change: quote.change,
-              changePercent: quote.changePercent,
-              currency: quote.currency,
-              rsi: latestRsi !== null ? round(latestRsi as number) : null,
+              price,
+              changePercent,
+              currency,
+              rsi: latestRsi !== null ? round(latestRsi) : null,
               macdSignal: macdCross,
               dataPoints: closes.length,
-              error: null,
+              error: null as string | null,
             };
           } catch (err) {
-            return { symbol: sym, error: err instanceof Error ? err.message : String(err) };
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`[${NAME}] market_report: ${sym} failed: ${msg}\n`);
+            return { symbol: sym, price: null, changePercent: null, currency: "USD", rsi: null, macdSignal: "insufficient data", dataPoints: 0, error: msg };
           }
         }),
       );
 
-      const successful = symbolData.filter(d => !d.error);
+      const successful = symbolData.filter(d => d.error === null);
       if (successful.length === 0) {
-        return `Failed to fetch data for all symbols: ${symbolData.map(d => `${d.symbol}: ${d.error}`).join("; ")}`;
+        throw new Error(`Failed to fetch market data for all requested symbols (${range}): ${symbolData.map(d => `${d.symbol}: ${d.error}`).join("; ")}`);
       }
 
       const dataSection = successful.map(d => {
+        const priceStr = d.price !== null ? `$${d.price}` : "N/A";
+        const pctStr = d.changePercent !== null ? `${d.changePercent >= 0 ? "+" : ""}${d.changePercent}% ${d.currency}` : "N/A";
         const rsiLabel = d.rsi !== null ? ` | RSI ${d.rsi}${d.rsi > 70 ? " (overbought)" : d.rsi < 30 ? " (oversold)" : ""}` : "";
         const macdLabel = d.macdSignal !== "insufficient data" ? ` | MACD ${d.macdSignal}` : "";
-        return `${d.symbol}: $${d.price} (${Number(d.changePercent) >= 0 ? "+" : ""}${d.changePercent}% ${d.currency ?? "USD"})${rsiLabel}${macdLabel}`;
+        return `${d.symbol}: ${priceStr} (${pctStr})${rsiLabel}${macdLabel}`;
       }).join("\n");
 
-      const failedNote = symbolData.filter(d => d.error).length > 0
-        ? `\n\nFailed symbols: ${symbolData.filter(d => d.error).map(d => `${d.symbol} (${d.error})`).join(", ")}`
+      const failedNote = symbolData.filter(d => d.error !== null).length > 0
+        ? `\n\nFailed symbols: ${symbolData.filter(d => d.error !== null).map(d => `${d.symbol} (${d.error})`).join(", ")}`
         : "";
 
-      const focusLine = focus ? `\nFocus: ${focus}` : "";
+      const focusLine = focus ? `\nFocus: ${sanitizeForPrompt(focus, "focus_area")}` : "";
       const prompt = `You are a market analyst writing a concise market briefing.
 
 Date range analyzed: last ${range}${focusLine}
@@ -957,7 +970,13 @@ Write a structured briefing with these sections:
 
 Be concise. Use the data above. Do not invent prices or signals not shown.`;
 
-      return callPeer("ask_claude", { prompt }, prompt, 90_000);
+      try {
+        return await callPeer("ask_claude", { prompt }, prompt, 90_000);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] market_report: ask_claude peer call failed (${successful.length} symbols fetched, prompt ${prompt.length} chars): ${msg}\n`);
+        throw new Error(`Market data fetched successfully but AI synthesis failed: ${msg}`);
+      }
     }
 
     default:
