@@ -676,14 +676,17 @@ function screenAssets(
 // ── AI Market Briefing ────────────────────────────────────────────
 
 /** Serialize an optional data domain into a labeled prompt section.
- *  Returns "" (never "[object Object]") when data is missing or unstringifiable. */
+ *  Uses safeStringify (circular-ref safe) + XML entity escaping to prevent
+ *  prompt injection. Returns "" (never "[object Object]") on failure. */
 function buildMarketSection(label: string, data: unknown): string {
   if (data === undefined || data === null) return "";
   try {
-    const serialized = typeof data === "string" ? data : JSON.stringify(data, null, 2);
-    return `\n### ${label}\n${serialized}\n`;
+    const json = typeof data === "string" ? data : safeStringify(data, 2);
+    // Escape XML delimiters so embedded data cannot break prompt structure
+    const safe = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `\n### ${label}\n${safe}\n`;
   } catch (err) {
-    process.stderr.write(`[${NAME}] market_briefing: failed to serialize ${label}: ${err}\n`);
+    process.stderr.write(`[${NAME}] market_briefing: failed to serialize ${label}: ${err instanceof Error ? err.stack : String(err)}\n`);
     return "";
   }
 }
@@ -723,7 +726,7 @@ async function generateMarketBriefing(
         : "Write for a non-technical executive. Summarize market posture in plain language. Lead with business impact.";
 
   const notesSection = analystNotes
-    ? `\n### Analyst Notes\n${sanitizeUserInput(analystNotes, "analyst_notes")}\n`
+    ? `\n${sanitizeUserInput(analystNotes, "analyst_notes")}\n`
     : "";
 
   const prompt = `You are a quantitative market analyst writing a market briefing.
@@ -756,16 +759,27 @@ If correlation data is available, note the strongest relationships and what they
   try {
     result = await callPeer("ask_claude", { prompt }, prompt, 90_000);
   } catch (err) {
-    throw new Error(`market_briefing: AI call failed: ${(err as Error).message}`, { cause: err });
+    const isTimeout = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+    const msg = isTimeout
+      ? "market_briefing: AI call timed out after 90 s — model may be overloaded; retry or reduce input data"
+      : `market_briefing: AI call failed: ${(err as Error).message}`;
+    throw new Error(msg, { cause: err });
   }
 
   if (!result || !result.trim()) {
     process.stderr.write(`[${NAME}] market_briefing: AI worker returned empty response\n`);
     throw new Error("market_briefing: AI returned an empty response — retry or check model availability");
   }
-  if (result.trimStart().startsWith("{") && (result.includes("\"jsonrpc\"") || result.includes("\"result\""))) {
-    process.stderr.write(`[${NAME}] market_briefing: AI worker returned A2A envelope instead of briefing\n`);
-    throw new Error("market_briefing: AI worker returned an A2A envelope instead of briefing text");
+  // Guard against AI worker returning a structured JSON blob instead of text
+  try {
+    const parsed = JSON.parse(result);
+    if (parsed !== null && typeof parsed === "object") {
+      process.stderr.write(`[${NAME}] market_briefing: AI worker returned structured JSON instead of briefing text\n`);
+      throw new Error("market_briefing: AI worker returned structured JSON instead of briefing text");
+    }
+  } catch (e) {
+    if (!(e instanceof SyntaxError)) throw e;
+    // SyntaxError = not valid JSON = expected text response, continue
   }
 
   return result;
@@ -1001,6 +1015,13 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
 
     case "market_briefing": {
+      let parsedBriefing: ReturnType<typeof MarketSchemas.market_briefing.parse>;
+      try {
+        parsedBriefing = MarketSchemas.market_briefing.parse({ symbol: args.symbol ?? text, ...args });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] market_briefing: validation failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        throw err;
+      }
       const {
         symbol,
         compositeData,
@@ -1010,7 +1031,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         screeningData,
         analystNotes,
         audience,
-      } = MarketSchemas.market_briefing.parse({ symbol: args.symbol ?? text, ...args });
+      } = parsedBriefing;
       return generateMarketBriefing(
         symbol, compositeData, anomalyData, technicalData, correlationData, screeningData,
         analystNotes, audience,
