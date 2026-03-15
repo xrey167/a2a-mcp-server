@@ -53,8 +53,11 @@ function runGeminiCLI(prompt: string): string {
     encoding: "utf-8",
     timeout: 60_000,
   });
-  if (result.error) throw new Error(result.error.message);
-  if (result.status !== 0) throw new Error(result.stderr || "gemini CLI failed");
+  if (result.error) throw new Error(`gemini CLI spawn error: ${result.error.message}`);
+  if (result.status !== 0) {
+    const detail = result.stderr?.trim() || result.stdout?.trim() || "(no output)";
+    throw new Error(`gemini CLI failed (exit ${result.status}): ${detail}`);
+  }
   return result.stdout.trim();
 }
 
@@ -71,8 +74,12 @@ async function callGemini(systemInstruction: string, userPrompt: string): Promis
     if (!response?.text) throw new Error("Gemini returned empty response");
     return response.text.trim();
   } catch (err) {
-    if (!(err instanceof Error) || err.message !== "no-api-key") throw err;
+    if (!(err instanceof Error) || err.message !== "no-api-key") {
+      process.stderr.write(`[${NAME}] callGemini: SDK call failed — ${err instanceof Error ? err.message : String(err)}\n`);
+      throw err;
+    }
     // CLI fallback: prefix system instruction into the prompt
+    process.stderr.write(`[${NAME}] callGemini: no API key, falling back to gemini CLI\n`);
     return runGeminiCLI(`${systemInstruction}\n\n${userPrompt}`);
   }
 }
@@ -143,11 +150,6 @@ ${sanitizeUserInput(description, "design_description")}`;
 
 // ── Generate a brand identity system for an app ──────────────────
 async function generateBrand(appName: string, description: string, industry?: string, targetAudience?: string): Promise<string> {
-  if (description.length > 2_000) {
-    process.stderr.write(`[${NAME}] generate_brand: description too large (${description.length} chars)\n`);
-    throw new Error(`generate_brand: description is ${description.length} characters — exceeds 2,000 character limit`);
-  }
-
   const systemInstruction = `You are a brand strategist and visual designer. Given an app concept, produce a complete brand identity system as JSON.
 
 Respond ONLY with a valid JSON object — no markdown fences, no explanation:
@@ -202,6 +204,27 @@ Use descriptive color names ("deep navy", "warm coral") — never hex codes. Pal
     throw new Error(`generate_brand: model response missing required fields: ${missing.join(", ")} — retry`);
   }
 
+  // Shape validation for compound fields
+  if (!Array.isArray(p.palette) || (p.palette as unknown[]).length < 3 || !(p.palette as unknown[]).every(c => typeof c === "string")) {
+    process.stderr.write(`[${NAME}] generate_brand: palette must be an array of 3-5 strings, got: ${JSON.stringify(p.palette)}\n`);
+    throw new Error("generate_brand: model returned invalid palette — retry");
+  }
+  if (!Array.isArray(p.mood) || !(p.mood as unknown[]).every(m => typeof m === "string")) {
+    process.stderr.write(`[${NAME}] generate_brand: mood must be an array of strings, got: ${JSON.stringify(p.mood)}\n`);
+    throw new Error("generate_brand: model returned invalid mood — retry");
+  }
+  if (typeof p.voice !== "string" || (p.voice as string).trim().length === 0) {
+    process.stderr.write(`[${NAME}] generate_brand: voice must be a non-empty string, got: ${JSON.stringify(p.voice)}\n`);
+    throw new Error("generate_brand: model returned invalid voice field — retry");
+  }
+  const typo = p.typography;
+  if (typo === null || typeof typo !== "object" || Array.isArray(typo) ||
+      typeof (typo as Record<string, unknown>).heading !== "string" ||
+      typeof (typo as Record<string, unknown>).body !== "string") {
+    process.stderr.write(`[${NAME}] generate_brand: typography must be {heading, body} strings, got: ${JSON.stringify(typo)}\n`);
+    throw new Error("generate_brand: model returned invalid typography — retry");
+  }
+
   return stripped;
 }
 
@@ -227,14 +250,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
 
     case "generate_brand": {
-      let gbParsed: ReturnType<typeof DesignSchemas.generate_brand.parse>;
-      try {
-        gbParsed = DesignSchemas.generate_brand.parse({ appName: args.appName ?? text, ...args });
-      } catch (err) {
-        process.stderr.write(`[${NAME}] generate_brand: Zod parse error: ${err instanceof Error ? err.message : String(err)}\n`);
-        throw err;
-      }
-      const { appName, description, industry, targetAudience } = gbParsed;
+      const { appName, description, industry, targetAudience } = DesignSchemas.generate_brand.parse({ appName: args.appName ?? text, ...args });
       return generateBrand(appName, description, industry, targetAudience);
     }
 

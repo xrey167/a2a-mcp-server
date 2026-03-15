@@ -661,7 +661,9 @@ function startDesignWorkflow(args: Record<string, unknown>): string {
           lines.push(`Brand identity generated.\n`);
         } catch (err) {
           // Non-fatal: fall back to concept-only if brand generation fails
-          process.stderr.write(`[orchestrator] design_workflow: generate_brand failed (non-fatal, continuing without brand): ${err}\n`);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[orchestrator] design_workflow: generate_brand failed (non-fatal, continuing without brand): ${errMsg}\n`);
+          lines.push(`Warning: brand generation failed (${errMsg}) — proceeding without brand tokens.\n`);
         }
       }
 
