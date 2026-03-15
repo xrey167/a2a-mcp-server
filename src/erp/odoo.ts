@@ -220,7 +220,7 @@ export class OdooConnector implements ERPConnector {
       };
     }
 
-    const p = raw[0];
+    const p = raw[0]!;
     const sellerIds = p.seller_ids as number[] ?? [];
     let vendorNo: string | undefined;
     let vendorName: string | undefined;
@@ -237,10 +237,10 @@ export class OdooConnector implements ERPConnector {
         ["id", "in", sellerIds],
       ], ["partner_id", "delay", "min_qty"], 1);
       if (sellers.length > 0) {
-        const partner = (sellers[0].partner_id as [number, string]) ?? [0, ""];
+        const partner = (sellers[0]!.partner_id as [number, string]) ?? [0, ""];
         vendorNo = String(partner[0]);
         vendorName = partner[1];
-        leadTimeDays = Number(sellers[0].delay ?? leadTimeDays);
+        leadTimeDays = Number(sellers[0]!.delay ?? leadTimeDays);
 
         // Fetch vendor country
         try {
@@ -248,7 +248,7 @@ export class OdooConnector implements ERPConnector {
             ["id", "=", partner[0]],
           ], ["country_id"], 1);
           if (vendorData.length > 0) {
-            const countryId = vendorData[0].country_id as [number, string] | undefined;
+            const countryId = vendorData[0]!.country_id as [number, string] | undefined;
             vendorCountry = countryId ? countryId[1] : undefined;
           }
         } catch { /* ignore */ }
@@ -263,9 +263,9 @@ export class OdooConnector implements ERPConnector {
         ["product_id", "=", productId],
       ], ["id", "type", "product_qty", "scrap"], 1);
       if (boms.length > 0) {
-        const bomType = String(boms[0].type ?? "normal");
+        const bomType = String(boms[0]!.type ?? "normal");
         replenishmentMethod = bomType === "subcontract" ? "purchase" : "production";
-        const bomScrap = Number(boms[0].scrap ?? 0);
+        const bomScrap = Number(boms[0]!.scrap ?? 0);
         if (bomScrap > 0) scrapPercent = bomScrap;
       }
     } catch {
@@ -284,7 +284,7 @@ export class OdooConnector implements ERPConnector {
         ["product_id", "=", productId],
       ], ["product_min_qty", "product_max_qty", "qty_multiple"], 1);
       if (orderpoints.length > 0) {
-        const op = orderpoints[0];
+        const op = orderpoints[0]!;
         reorderPoint = Number(op.product_min_qty ?? 0);
         safetyStock = reorderPoint; // In Odoo, min qty acts as safety stock
         const maxQty = Number(op.product_max_qty ?? 0);
@@ -315,8 +315,8 @@ export class OdooConnector implements ERPConnector {
         const cats = await this.searchRead("product.category", [
           ["id", "=", categId[0]],
         ], ["property_cost_method"], 1);
-        if (cats.length > 0 && cats[0].property_cost_method) {
-          costingMethod = String(cats[0].property_cost_method);
+        if (cats.length > 0 && cats[0]!.property_cost_method) {
+          costingMethod = String(cats[0]!.property_cost_method);
         }
       } catch { /* category costing not available */ }
     }
@@ -410,7 +410,7 @@ export class OdooConnector implements ERPConnector {
 
     if (boms.length === 0) return [];
 
-    const lineIds = boms[0].bom_line_ids as number[] ?? [];
+    const lineIds = boms[0]!.bom_line_ids as number[] ?? [];
     if (lineIds.length === 0) return [];
 
     const raw = await this.searchRead("mrp.bom.line", [
@@ -851,7 +851,7 @@ export class OdooConnector implements ERPConnector {
           ], ["product_id", "product_uom_qty"], 1);
 
           if (moves.length > 0) {
-            const pid = (moves[0].product_id as [number, string]) ?? [0, ""];
+            const pid = (moves[0]!.product_id as [number, string]) ?? [0, ""];
             transfers.push({
               id: String(r.id),
               number: String(r.name ?? ""),
@@ -859,7 +859,7 @@ export class OdooConnector implements ERPConnector {
               toLocation: toLoc[1] ?? "",
               itemNo: String(pid[0]),
               itemName: pid[1] ?? "",
-              quantity: Number(moves[0].product_uom_qty ?? 0),
+              quantity: Number(moves[0]!.product_uom_qty ?? 0),
               shipmentDate: String(r.scheduled_date ?? "").slice(0, 10),
               receiptDate: String(r.date_done ?? r.scheduled_date ?? "").slice(0, 10),
               status: mapOdooTransferStatus(String(r.state ?? "")),
