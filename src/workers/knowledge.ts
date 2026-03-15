@@ -82,7 +82,9 @@ async function buildIndex() {
         const title = file.replace(/\.md$/, "");
         upsertNote.run(file, title, content, Date.now());
         count++;
-      } catch { /* skip unreadable files */ }
+      } catch (err) {
+        process.stderr.write(`[knowledge] index file error: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
   });
   tx();
@@ -105,7 +107,9 @@ function watchVault() {
         try {
           const content = readFileSync(fullPath, "utf-8");
           indexNote(filename, content);
-        } catch { /* ignore read errors during writes */ }
+        } catch (err) {
+          process.stderr.write(`[knowledge] watch read error: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       } else {
         deleteNote.run(filename);
       }
@@ -194,7 +198,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         if (ftsResults.length > 0) {
           return ftsResults.map(r => r.path).join("\n");
         }
-      } catch { /* FTS query syntax error — fall through to brute force */ }
+      } catch (err) {
+        process.stderr.write(`[knowledge] fts search error: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
       // Fallback: scan vault for substring match
       const query = rawQuery.toLowerCase();
       const glob = new Glob("**/*.md");
@@ -206,7 +212,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           if (content.toLowerCase().includes(query)) {
             results.push(file);
           }
-        } catch { /* skip unreadable files */ }
+        } catch (err) {
+          process.stderr.write(`[knowledge] scan read error: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       }
       return results.length > 0 ? results.join("\n") : "No matching notes found";
     }
