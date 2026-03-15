@@ -646,14 +646,20 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { categories, maxResults } = NewsSchemas.regulatory_scan.parse(args);
       // Fetch all regulatory feeds
       const allArticles: Article[] = [];
+      let failedFeeds = 0;
       for (const feedUrl of REGULATORY_FEEDS) {
         try {
-          validateUrlNotInternal(feedUrl);
           const articles = await fetchRss(feedUrl, 50, 10000);
           allArticles.push(...articles);
-        } catch {
-          // Feed unavailable or blocked — skip silently
+        } catch (err) {
+          failedFeeds++;
+          const errMsg = err instanceof Error ? err.message.replace(/\n/g, " ") : String(err);
+          process.stderr.write(`[${NAME}] regulatory_scan: feed failed ${feedUrl}: ${errMsg}\n`);
         }
+      }
+      // Log summary if there were failures
+      if (failedFeeds > 0) {
+        process.stderr.write(`[${NAME}] regulatory_scan: ${failedFeeds}/${REGULATORY_FEEDS.length} feeds failed\n`);
       }
       // Also classify any articles passed via args
       if (args.articles && Array.isArray(args.articles)) {
@@ -673,6 +679,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       return safeStringify({
         totalScanned: allArticles.length,
         alertCount: alerts.length,
+        failedFeeds,
         alerts: alerts.slice(0, maxResults),
         categories: categories ?? Object.keys(REGULATORY_KEYWORDS),
       }, 2);
