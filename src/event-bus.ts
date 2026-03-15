@@ -53,6 +53,8 @@ export interface Subscription {
   createdAt: number;
   /** Number of events delivered to this subscriber */
   matchCount: number;
+  /** Timestamp of the last matched event delivery (undefined if never matched) */
+  lastMatchedAt?: number;
 }
 
 export interface DeadLetter {
@@ -171,6 +173,7 @@ export async function publish(
     if (sub.filter && !matchesFilter(event, sub.filter)) continue;
 
     sub.matchCount++;
+    sub.lastMatchedAt = Date.now();
     deliveryPromises.push(
       (async () => {
         try {
@@ -241,6 +244,8 @@ export function listSubscriptions(): Array<{
   pattern: string;
   name?: string;
   createdAt: number;
+  matchCount: number;
+  lastMatchedAt?: number;
   filter?: Record<string, unknown>;
 }> {
   return [...subscriptions.values()].map(s => ({
@@ -248,6 +253,8 @@ export function listSubscriptions(): Array<{
     pattern: s.pattern,
     name: s.name,
     createdAt: s.createdAt,
+    matchCount: s.matchCount,
+    lastMatchedAt: s.lastMatchedAt,
     filter: s.filter,
   }));
 }
@@ -355,9 +362,11 @@ function pruneHistory(): void {
   if (overCapacity > 0) removeCount += overCapacity;
   if (removeCount > 0) eventHistory.splice(0, removeCount);
 
-  // Prune stale subscriptions: created >24h ago and never matched any event
+  // Prune stale subscriptions: any subscription inactive for longer than STALE_SUB_TTL_MS (24h),
+  // whether it ever matched or not. lastMatchedAt takes priority over createdAt.
   for (const [id, sub] of Array.from(subscriptions)) {
-    if (sub.matchCount === 0 && now - sub.createdAt > STALE_SUB_TTL_MS) {
+    const lastActivity = sub.lastMatchedAt ?? sub.createdAt;
+    if (now - lastActivity > STALE_SUB_TTL_MS) {
       subscriptions.delete(id);
       process.stderr.write(`[event-bus] pruned stale subscription: ${id} (${sub.pattern})${sub.name ? ` [${sub.name}]` : ""}\n`);
     }
