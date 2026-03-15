@@ -10,6 +10,7 @@
  *   analyze_data   — Compute statistics (mean, median, stddev, percentiles, correlations)
  *   pivot_table    — Create pivot table summaries from flat data
  *   data_brief     — AI-generated narrative analysis of a dataset via ask_claude
+ *   deduplicate    — Remove duplicate rows by composite key fields
  *   remember/recall — Shared persistent memory
  */
 
@@ -915,33 +916,36 @@ Requirements:
       const seen = new Set<string>();
       const unique: DataRow[] = [];
       let missingKeyRows = 0;
+      let skippedRows = 0;
 
-      // Build composite key for a row: JSON-stringify of the key field values in order.
-      // A missing field contributes the string "null" — explicitly distinct from the string "null"
-      // in the data, but consistent across rows so duplicates are still detected.
+      // Build composite key: encode each field as [1, value] when present, [0] when absent.
+      // This prevents JSON.stringify from colliding undefined (missing field) with explicit null
+      // since JSON.stringify([undefined]) === "[null]" === JSON.stringify([null]).
       const rowKey = (row: DataRow): string =>
-        JSON.stringify(keys.map(k => (k in row ? row[k] : undefined)));
+        JSON.stringify(keys.map(k => (k in row ? [1, row[k]] : [0])));
 
       const rows = data as (DataRow | unknown)[];
 
       if (keep === "last") {
-        // Reverse pass: track seen keys, then reverse result to restore original order
+        // Reverse pass: collect in reverse order, then reverse to restore original order.
+        // Using push+reverse is O(n) total; unshift would be O(n^2) due to shifting on each call.
         for (let i = rows.length - 1; i >= 0; i--) {
           const row = rows[i];
-          if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+          if (row === null || typeof row !== "object" || Array.isArray(row)) { skippedRows++; continue; }
           const r = row as DataRow;
           const anyMissing = keys.some(k => !(k in r));
           if (anyMissing) missingKeyRows++;
           const k = rowKey(r);
           if (!seen.has(k)) {
             seen.add(k);
-            unique.unshift(r);
+            unique.push(r);
           }
         }
+        unique.reverse();
       } else {
         // Forward pass (keep === "first")
         for (const row of rows) {
-          if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+          if (row === null || typeof row !== "object" || Array.isArray(row)) { skippedRows++; continue; }
           const r = row as DataRow;
           const anyMissing = keys.some(k => !(k in r));
           if (anyMissing) missingKeyRows++;
@@ -954,18 +958,23 @@ Requirements:
       }
 
       if (missingKeyRows > 0) {
-        process.stderr.write(`[${NAME}] deduplicate: ${missingKeyRows} rows missing at least one key field — treated as null for dedup\n`);
+        process.stderr.write(`[${NAME}] deduplicate: ${missingKeyRows} rows missing at least one key field — treated as absent for dedup\n`);
+      }
+      if (skippedRows > 0) {
+        process.stderr.write(`[${NAME}] deduplicate: ${skippedRows} non-object rows skipped (null, array, or primitive)\n`);
       }
 
+      // removedCount excludes skipped non-object rows — those were never candidates for dedup
       const result: Record<string, unknown> = {
         totalRows,
         uniqueRows: unique.length,
-        removedCount: totalRows - unique.length,
+        removedCount: totalRows - skippedRows - unique.length,
         keys,
         keep,
         rows: unique,
       };
-      if (missingKeyRows > 0) result.warning = `${missingKeyRows} rows were missing at least one key field and were treated as null`;
+      if (skippedRows > 0) result.skippedRows = skippedRows;
+      if (missingKeyRows > 0) result.warning = `${missingKeyRows} rows were missing at least one key field and were treated as absent`;
 
       return safeStringify(result, 2);
     }
