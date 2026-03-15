@@ -68,8 +68,8 @@ const DataSchemas = {
   export_csv: z.looseObject({
     /** Array of objects to serialise as CSV */
     data: z.unknown(),
-    /** Column delimiter (default ",") */
-    delimiter: z.string().optional().default(","),
+    /** Single-character column delimiter (default ","); use "\t" for TSV */
+    delimiter: z.string().length(1).optional().default(","),
     /** Include header row (default true) */
     includeHeader: z.boolean().optional().default(true),
     /** Explicit column order; omitted columns are excluded (default: all keys from first row) */
@@ -642,19 +642,32 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
     case "export_csv": {
       const { data, delimiter, includeHeader, fields } = DataSchemas.export_csv.parse(args);
-      if (!Array.isArray(data)) return "Error: data must be an array of objects";
+      if (!Array.isArray(data)) throw new Error("export_csv: data must be an array of objects");
       if (data.length === 0) return "";
+      // Reject primitive arrays — Object.keys on a string returns char indices, silently corrupt
+      if (typeof data[0] !== "object" || data[0] === null || Array.isArray(data[0])) {
+        throw new Error("export_csv: data must be an array of plain objects, not primitives or nested arrays — use transform_data to flatten first");
+      }
+      if (fields !== undefined && fields.length === 0) {
+        throw new Error("export_csv: fields array is empty — provide at least one column name or omit fields to export all columns");
+      }
       const cols = fields ?? Object.keys(data[0] as Record<string, unknown>);
-      if (cols.length === 0) return "Error: no columns to export";
-      // Escape a single cell value: wrap in quotes if it contains delimiter, quote, or newline
+      if (cols.length === 0) throw new Error("export_csv: first row has no enumerable keys — cannot derive column headers");
+
+      // RFC 4180 cell quoting: wrap in double-quotes if cell contains delimiter, quote, CR, or LF
       const escapeCell = (v: unknown): string => {
+        if (v !== null && v !== undefined && typeof v === "object") {
+          // Nested object/array: JSON-encode rather than silently produce [object Object]
+          throw new Error(`export_csv: nested object/array value in column — use transform_data to flatten before exporting. Value: ${JSON.stringify(v).slice(0, 80)}`);
+        }
         const s = v === null || v === undefined ? "" : String(v);
-        return s.includes(delimiter) || s.includes('"') || s.includes("\n")
-          ? `"${s.replace(/"/g, '""')}`+ `"`
+        return s.includes(delimiter) || s.includes('"') || s.includes("\n") || s.includes("\r")
+          ? `"${s.replace(/"/g, '""')}"`
           : s;
       };
+
       const rows: string[] = [];
-      if (includeHeader) rows.push(cols.map(escapeCell).join(delimiter));
+      if (includeHeader) rows.push(cols.map(c => escapeCell(c)).join(delimiter));
       for (const row of data as Record<string, unknown>[]) {
         rows.push(cols.map(c => escapeCell(row[c])).join(delimiter));
       }
