@@ -11,6 +11,12 @@ import { sanitizeUserInput } from "../prompt-sanitizer.js";
 const WebSchemas = {
   fetch_url: z.looseObject({ url: z.url(), format: z.enum(["text", "json"]).optional().default("text") }),
   call_api: z.looseObject({ url: z.url(), method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).optional().default("GET"), headers: z.record(z.string(), z.string()).optional().default({}), body: z.unknown().optional() }),
+  get_headers: z.looseObject({
+    /** URL to send the HEAD request to */
+    url: z.string().url(),
+    /** Follow redirects and return final headers (default true) */
+    followRedirects: z.boolean().optional().default(true),
+  }),
   scrape_page: z.looseObject({
     /** URL to fetch and scrape */
     url: z.string().url(),
@@ -230,6 +236,7 @@ const AGENT_CARD = {
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
     { id: "summarize_url", name: "Summarize URL", description: "Fetch a web page, scrape its text, and return an AI-written summary. Pass an optional question to focus the summary on a specific aspect." },
+    { id: "get_headers", name: "Get Headers", description: "Send a HEAD request to a URL and return the HTTP response headers (status, content-type, content-length, last-modified, cache-control, etc.) as JSON." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -406,6 +413,85 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
       return safeStringify({ url, title: scraped.title, wordCount: scraped.wordCount, summary }, 2);
     }
+    case "get_headers": {
+      const { url, followRedirects } = WebSchemas.get_headers.parse({ url: args.url ?? text, ...args });
+      const block = await blockPrivateUrl(url);
+      if (block) return block;
+
+      // Always use redirect:"manual" so we can SSRF-validate each Location header
+      // before issuing the next request. redirect:"follow" sends the request to the
+      // redirect target before any post-hoc check can run.
+      const MAX_REDIRECTS = 5;
+      let currentUrl = url;
+      let redirectCount = 0;
+      let res: Response;
+
+      while (true) {
+        try {
+          res = await fetch(currentUrl, {
+            method: "HEAD",
+            redirect: "manual",
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+          });
+        } catch (err) {
+          process.stderr.write(`[${NAME}] get_headers: fetch failed for ${currentUrl}: ${err}\n`);
+          return `get_headers: could not reach ${currentUrl} — ${err instanceof Error ? err.message : String(err)}`;
+        }
+
+        // Not a redirect, or caller wants only the first response — stop here
+        if (!followRedirects || res.status < 300 || res.status >= 400) break;
+
+        const location = res.headers.get("location");
+        if (!location) break;  // 3xx with no Location — stop
+
+        if (redirectCount >= MAX_REDIRECTS) {
+          process.stderr.write(`[${NAME}] get_headers: too many redirects (>${MAX_REDIRECTS}) starting from ${url}\n`);
+          return `get_headers: too many redirects (max ${MAX_REDIRECTS}) starting from ${url}`;
+        }
+
+        // Resolve relative Location against current URL, then SSRF-check before fetching
+        let resolved: string;
+        try {
+          resolved = new URL(location, currentUrl).href;
+        } catch {
+          process.stderr.write(`[${NAME}] get_headers: malformed Location header "${location}" from ${currentUrl}\n`);
+          return `get_headers: server returned a malformed redirect Location: ${location}`;
+        }
+        const redirectBlock = await blockPrivateUrl(resolved);
+        if (redirectBlock) {
+          process.stderr.write(`[${NAME}] get_headers: redirect to blocked address: ${currentUrl} -> ${resolved}\n`);
+          return redirectBlock;
+        }
+
+        process.stderr.write(`[${NAME}] get_headers: following redirect ${currentUrl} -> ${resolved}\n`);
+        currentUrl = resolved;
+        redirectCount++;
+      }
+
+      if (!res.ok) {
+        process.stderr.write(`[${NAME}] get_headers: ${currentUrl} returned HTTP ${res.status} ${res.statusText}\n`);
+      }
+
+      const headers: Record<string, string> = {};
+      try {
+        res.headers.forEach((value, name) => {
+          headers[name] = value;
+        });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] get_headers: headers.forEach failed for ${currentUrl}: ${err}\n`);
+      }
+
+      return safeStringify({
+        url: currentUrl,
+        status: res.status,
+        statusText: res.statusText,
+        redirected: redirectCount > 0,
+        redirectCount,
+        headers,
+      }, 2);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
