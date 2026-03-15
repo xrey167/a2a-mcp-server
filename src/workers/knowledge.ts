@@ -257,10 +257,12 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         try {
           const content = readFileSync(join(VAULT, file), "utf-8");
           return `## ${file.replace(/\.md$/, "")}\n${content}`;
-        } catch {
-          return `## ${file.replace(/\.md$/, "")}\n(unreadable)`;
+        } catch (err) {
+          process.stderr.write(`[${NAME}] summarize_notes: failed to read "${file}": ${err instanceof Error ? err.message : String(err)}\n`);
+          return null;
         }
-      });
+      }).filter((c): c is string => c !== null);
+      if (noteContents.length === 0) return "No notes could be read.";
 
       // Step 3: call ai-agent's ask_claude directly (peer A2A — no orchestrator hop)
       const focusSection = focus ? `\n\nFocus area:\n${sanitizeForPrompt(focus, "focus_area")}` : "";
@@ -337,9 +339,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }
 
       // Step 3: synthesize answer via ai-agent (peer A2A call)
-      // Pass explicit maxLength matching CONTEXT_CHAR_LIMIT so sanitizer doesn't re-truncate
       const safeQuestion = sanitizeUserInput(question, "question");
-      const safeContext = sanitizeUserInput(contextText, "knowledge_context", CONTEXT_CHAR_LIMIT);
+      // sanitizeUserInput's maxLength is pre-expansion; XML entity encoding (&lt; etc.) can
+      // expand each char up to 4x. Check post-sanitization size and re-sanitize a smaller
+      // slice if the result exceeds the intended limit (covers notes with heavy HTML/Markdown).
+      let safeContext = sanitizeUserInput(contextText, "knowledge_context", CONTEXT_CHAR_LIMIT);
+      if (safeContext.length > CONTEXT_CHAR_LIMIT) {
+        safeContext = sanitizeUserInput(contextText.slice(0, Math.floor(CONTEXT_CHAR_LIMIT / 2)), "knowledge_context");
+      }
 
       const prompt = `You are a knowledge assistant. Answer the question below using ONLY the provided notes as context.
 
@@ -368,8 +375,9 @@ Answer the question directly and concisely. Cite which note(s) your answer draws
         }, null, 2);
       }
 
-      // Treat empty responses and ai-worker error strings as failures
-      if (!answer || !answer.trim() || answer.startsWith("Error:")) {
+      // Treat empty responses, ai-worker error strings, and raw A2A JSON envelopes as failures
+      const trimmedAnswer = answer.trimStart();
+      if (!answer || !answer.trim() || answer.startsWith("Error:") || trimmedAnswer.startsWith("{") || trimmedAnswer.startsWith("[")) {
         process.stderr.write(`[${NAME}] query_knowledge: ask_claude returned error/empty for question="${safeQuestion.slice(0, 80)}"\n`);
         return JSON.stringify({
           question, sourcesUsed: sources, answer: null,
