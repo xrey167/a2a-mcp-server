@@ -8,7 +8,7 @@
  * Features:
  *   - Content-addressable cache keys (deterministic hashing)
  *   - Per-skill TTL configuration
- *   - LRU eviction when capacity is reached
+ *   - LRU eviction when capacity is reached (O(1) via Set insertion order)
  *   - Cache hit/miss metrics
  *   - Stale-while-revalidate support
  *   - Cache warming (pre-populate from patterns)
@@ -92,6 +92,9 @@ const config: CacheConfig = {
 // ── State ────────────────────────────────────────────────────────
 
 const cache = new Map<string, CacheEntry>();
+// LRU order tracker: oldest key is first (Set preserves insertion order).
+// On access, key is moved to the end (delete + add = O(1) promotion).
+const lruOrder = new Set<string>();
 let totalSizeBytes = 0;
 let totalHits = 0;
 let totalMisses = 0;
@@ -138,13 +141,16 @@ export function getFromCache(skillId: string, args: Record<string, unknown>): st
 
   // Check expiration
   if (Date.now() > entry.expiresAt) {
+    lruOrder.delete(key);
     cache.delete(key);
     totalSizeBytes -= entry.sizeBytes;
     totalMisses++;
     return undefined;
   }
 
-  // Cache hit
+  // Cache hit — promote to most-recently-used position (O(1))
+  lruOrder.delete(key);
+  lruOrder.add(key);
   entry.lastAccessed = Date.now();
   entry.hitCount++;
   totalHits++;
@@ -168,6 +174,7 @@ export function putInCache(
   const existing = cache.get(key);
   if (existing) {
     totalSizeBytes -= existing.sizeBytes;
+    lruOrder.delete(key);
     cache.delete(key);
   }
 
@@ -186,6 +193,7 @@ export function putInCache(
   };
 
   cache.set(key, entry);
+  lruOrder.add(key);
   totalSizeBytes += sizeBytes;
 }
 
@@ -195,6 +203,7 @@ export function invalidateSkill(skillId: string): number {
   for (const [key, entry] of cache) {
     if (entry.skillId === skillId) {
       totalSizeBytes -= entry.sizeBytes;
+      lruOrder.delete(key);
       cache.delete(key);
       count++;
     }
@@ -205,6 +214,7 @@ export function invalidateSkill(skillId: string): number {
 /** Invalidate all cache entries. */
 export function invalidateAll(): void {
   cache.clear();
+  lruOrder.clear();
   totalSizeBytes = 0;
 }
 
@@ -251,6 +261,7 @@ export function getCacheStats(): CacheStats {
 /** Reset cache and stats (for testing). */
 export function resetCache(): void {
   cache.clear();
+  lruOrder.clear();
   totalSizeBytes = 0;
   totalHits = 0;
   totalMisses = 0;
@@ -272,17 +283,13 @@ function evictIfNeeded(incomingSizeBytes: number): void {
 }
 
 function evictLRU(): void {
-  let oldest: CacheEntry | undefined;
-  let oldestKey: string | undefined;
+  // O(1): the first key in lruOrder is the least-recently-used
+  const oldestKey = lruOrder.values().next().value as string | undefined;
+  if (!oldestKey) return;
 
-  for (const [key, entry] of cache) {
-    if (!oldest || entry.lastAccessed < oldest.lastAccessed) {
-      oldest = entry;
-      oldestKey = key;
-    }
-  }
-
-  if (oldestKey && oldest) {
+  const oldest = cache.get(oldestKey);
+  if (oldest) {
+    lruOrder.delete(oldestKey);
     cache.delete(oldestKey);
     totalSizeBytes -= oldest.sizeBytes;
     totalEvictions++;
