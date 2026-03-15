@@ -23,6 +23,9 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round, haversineKm } from "../worker-utils.js";
+import { callPeer } from "../peer.js";
+import { sanitizeForPrompt } from "../prompt-sanitizer.js";
+import { safeParse } from "../safe-json.js";
 
 const PORT = 8091;
 const NAME = "signal-agent";
@@ -191,6 +194,23 @@ const SignalSchemas = {
     windowHours: z.number().positive().optional().default(24),
     minConfidence: z.number().min(0).max(1).optional().default(0.3),
   }),
+
+  threat_brief: z.looseObject({
+    /** Pre-aggregated signals to summarise (optional — if omitted, live feeds are pulled) */
+    signals: z.array(z.object({
+      type: z.string(),
+      source: z.string().optional().default(""),
+      title: z.string().optional().default(""),
+      description: z.string().optional().default(""),
+      severity: z.enum(["critical", "high", "medium", "low", "info"]).optional().default("info"),
+      country: z.string().optional().default(""),
+      timestamp: z.string().optional().default(""),
+    })).optional(),
+    /** Region or country context for the brief (e.g. "Eastern Europe", "Global") */
+    context: z.string().optional().default("Global"),
+    /** Max signals to include in the prompt (default 40, caps prompt size) */
+    maxSignals: z.number().int().positive().optional().default(40),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -211,6 +231,7 @@ const AGENT_CARD = {
     { id: "fetch_cyber_c2", name: "Fetch Cyber C2", description: "Fetch live botnet C2 server data from Feodo Tracker (abuse.ch)" },
     { id: "fetch_malicious_urls", name: "Fetch Malicious URLs", description: "Fetch recent malicious URLs from URLhaus (abuse.ch)" },
     { id: "fetch_outages", name: "Fetch Outages", description: "Fetch internet outage signals from IODA (Internet Outage Detection and Analysis)" },
+    { id: "threat_brief", name: "Threat Brief", description: "AI-generated intelligence brief synthesising signals into an executive summary of active threats, patterns, and recommendations. Accepts pre-aggregated signals or pulls from live feeds (C2, malicious URLs, outages)." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -1186,6 +1207,40 @@ async function fetchIodaOutages(country?: string, days: number = 7): Promise<Rec
   }
 }
 
+// ── AI Synthesis: Threat Brief ───────────────────────────────────
+
+const THREAT_BRIEF_TIMEOUT = 90_000;
+
+async function generateThreatBrief(
+  signals: Array<{ type: string; source: string; title: string; severity: string; country: string; timestamp: string }>,
+  context: string,
+): Promise<string> {
+  const signalLines = signals.map((s, i) => {
+    const title = sanitizeForPrompt(s.title || "(no title)", "title");
+    const country = sanitizeForPrompt(s.country || "unknown", "country");
+    const source = sanitizeForPrompt(s.source || "unknown", "source");
+    return `${i + 1}. [${s.severity.toUpperCase()}] [${s.type}] [${country}] ${title} (source: ${source}, ${s.timestamp ? s.timestamp.slice(0, 10) : "n/a"})`;
+  }).join("\n");
+
+  const prompt = `You are a senior intelligence analyst producing an executive threat brief.
+
+Context: ${sanitizeForPrompt(context, "context")}
+
+IMPORTANT: Analyse only the signals below. Do not introduce external knowledge or invent events.
+
+Active signals (${signals.length} total):
+${signalLines}
+
+Produce a concise threat brief with these sections:
+1. **Executive Summary** (2-3 sentences)
+2. **Top Threats** (bullet list, severity-ordered)
+3. **Geographic Hotspots** (countries/regions with highest signal density)
+4. **Correlation Patterns** (any cross-domain patterns visible in the data)
+5. **Recommended Actions** (2-4 concrete steps)`;
+
+  return callPeer("ask_claude", { prompt }, prompt, THREAT_BRIEF_TIMEOUT);
+}
+
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
   if (memResult !== null) return memResult;
@@ -1269,6 +1324,72 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         totalSignals: signals.length,
         ...result,
       }, 2);
+    }
+
+    case "threat_brief": {
+      const { signals: inputSignals, context, maxSignals } = SignalSchemas.threat_brief.parse(args);
+
+      let signals = inputSignals;
+
+      // If no signals supplied, pull live feeds in parallel
+      if (!signals || signals.length === 0) {
+        const [c2Raw, urlsRaw, outagesRaw] = await Promise.allSettled([
+          fetchFeodoC2(50),
+          fetchUrlhaus(50),
+          fetchIodaOutages(undefined, 1),
+        ]);
+
+        const liveSignals: Array<{ type: string; source: string; title: string; severity: string; country: string; timestamp: string }> = [];
+
+        if (c2Raw.status === "fulfilled") {
+          for (const entry of c2Raw.value.entries.slice(0, 20)) {
+            liveSignals.push({
+              type: "cyber",
+              source: "Feodo Tracker",
+              title: `C2 botnet: ${entry.malware} @ ${entry.ip}`,
+              severity: "high",
+              country: entry.country ?? "",
+              timestamp: entry.firstSeen ?? "",
+            });
+          }
+        }
+        if (urlsRaw.status === "fulfilled") {
+          for (const entry of urlsRaw.value.entries.slice(0, 20)) {
+            liveSignals.push({
+              type: "cyber",
+              source: "URLhaus",
+              title: `Malicious URL: ${entry.threat} (${entry.urlStatus})`,
+              severity: entry.threat?.includes("malware") ? "high" : "medium",
+              country: "",
+              timestamp: entry.dateAdded ?? "",
+            });
+          }
+        }
+        if (outagesRaw.status === "fulfilled") {
+          for (const entry of outagesRaw.value.entries.slice(0, 20)) {
+            liveSignals.push({
+              type: "infrastructure",
+              source: "IODA",
+              title: `Internet outage: ${entry.entity?.name ?? outagesRaw.value.country}`,
+              severity: "medium",
+              country: outagesRaw.value.country,
+              timestamp: entry.time ?? "",
+            });
+          }
+        }
+
+        if (liveSignals.length === 0) return "Error: no signals available — live feeds returned no data and no signals were supplied";
+        signals = liveSignals;
+      }
+
+      const selected = signals.slice(0, maxSignals);
+
+      try {
+        return await generateThreatBrief(selected, context);
+      } catch (err) {
+        process.stderr.write(`[${NAME}] threat_brief: generateThreatBrief failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        return `Error: AI brief generation failed — ${err instanceof Error ? err.message : String(err)}`;
+      }
     }
 
     default:
