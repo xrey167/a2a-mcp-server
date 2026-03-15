@@ -54,6 +54,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           messages: [{ role: "user", content: prompt }],
         });
         const block = message.content[0];
+        if (!block) return "";
         return block.type === "text" ? block.text : safeStringify(block);
       } catch (anthropicErr) {
         // Try Ollama/LM Studio as second fallback (OpenAI-compatible API)
