@@ -40,7 +40,7 @@ import { compose, getPipeline, listPipelines as listComposerPipelines, removePip
 import { collaborate, type CollaborationRequest } from "./agent-collaboration.js";
 import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracingStats } from "./tracing.js";
 import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats, configureCacheSkill } from "./skill-cache.js";
-import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
+import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive, pruneCapabilities } from "./capability-negotiation.js";
 import { auditLog, auditQuery, auditStats, closeAuditDb } from "./audit.js";
 import { validateApiKey, lookupApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed, type ApiKeyEntry } from "./auth.js";
 import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace, isMember } from "./workspace.js";
@@ -278,8 +278,8 @@ const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 const workerFailures = new Map<string, number>();
 const respawning = new Set<string>();
 const respawnTimers = new Map<string, ReturnType<typeof setTimeout>>();
-let healthPollInterval: ReturnType<typeof setInterval>;
-let teePruneInterval: ReturnType<typeof setInterval>;
+let healthPollInterval: ReturnType<typeof setInterval> | undefined;
+let teePruneInterval: ReturnType<typeof setInterval> | undefined;
 let workerCards: AgentCard[] = [];
 
 interface WorkerHealth { healthy: boolean; failCount: number; lastCheck: number; uptime?: number; }
@@ -320,7 +320,7 @@ async function waitForWorker(w: typeof WORKERS[number], maxWaitMs = 10_000): Pro
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     try {
-      const res = await fetch(`http://localhost:${w.port}/healthz`);
+      const res = await fetch(`http://localhost:${w.port}/healthz`, { signal: AbortSignal.timeout(5_000) });
       if (res.ok) {
         workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
         return true;
@@ -489,7 +489,7 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
         skillId: params.skillId ?? "unknown",
         workerName,
         command: (params.args as Record<string, unknown>)?.command as string | undefined,
-        exitCode: typeof res === "string" && res.startsWith("Exit ") ? parseInt(res.split(":")[0].replace("Exit ", "")) : undefined,
+        exitCode: typeof res === "string" && res.startsWith("Exit ") ? parseInt((res.split(":")[0] ?? "").replace("Exit ", ""), 10) : undefined,
       };
       const filterResult = applyFilters(res, filterCtx);
       if (filterResult.filtersApplied.length > 0) {
@@ -797,7 +797,7 @@ const OrchestratorSchemas = {
   erp_connector_renew: z.object({
     type: z.enum(["business-central"]),
     webhookExpiresAt: z.string().optional(),
-    notificationUrl: z.string().url().optional(),
+    notificationUrl: z.url().optional(),
     resource: z.string().optional(),
   }).strict(),
   erp_connector_renew_due: z.object({
@@ -1005,26 +1005,26 @@ const OrchestratorSchemas = {
   osint_market_snapshot: OsintMarketSnapshotInputSchema,
   osint_freshness: OsintFreshnessInputSchema,
   // ── Porsche Consulting Feature Schemas ─────────────────────────
-  sop_demand_supply_match: z.object({ periods: z.array(z.string()).optional() }).passthrough(),
-  sop_scenario_compare: z.object({ period: z.string(), adjustment: z.object({ type: z.string(), percentage: z.number(), items: z.array(z.string()).optional() }) }).passthrough(),
-  sop_consensus_plan: z.object({ periods: z.array(z.string()).optional() }).passthrough(),
-  esg_score_entity: z.object({ entityId: z.string(), entityType: z.enum(["supplier", "region", "product"]).optional().default("supplier"), entityName: z.string(), country: z.string().optional() }).passthrough(),
-  esg_portfolio_overview: z.object({ entityIds: z.array(z.string()).optional() }).passthrough(),
-  esg_gap_analysis: z.object({ targetScore: z.number().optional().default(70) }).passthrough(),
-  carbon_footprint: z.object({ itemNo: z.string(), includeScenarios: z.boolean().optional().default(false) }).passthrough(),
-  nearshoring_evaluate: z.object({ vendorId: z.string(), targetCountries: z.array(z.object({ country: z.string(), region: z.string() })) }).passthrough(),
-  osint_regulatory_brief: z.object({ categories: z.array(z.string()).optional() }).passthrough(),
-  erp_customer360_clv: z.object({ workspaceId: z.string().optional(), customerExternalId: z.string().optional() }).passthrough(),
-  q2o_win_loss_analysis: z.object({ workspaceId: z.string().optional(), since: z.string().optional() }).passthrough(),
-  price_optimize: z.object({ workspaceId: z.string().optional() }).passthrough(),
-  erp_revenue_forecast: z.object({ workspaceId: z.string().optional(), horizonMonths: z.number().optional().default(6) }).passthrough(),
-  competitor_monitor: z.object({ name: z.string(), domains: z.array(z.string()).optional() }).passthrough(),
-  osint_competitor_brief: z.object({ name: z.string(), domains: z.array(z.string()).optional() }).passthrough(),
-  list_transformation_playbooks: z.object({ industry: z.string().optional(), category: z.string().optional() }).passthrough(),
-  execute_playbook: z.object({ playbookId: z.string(), params: z.record(z.string(), z.unknown()).optional() }).passthrough(),
-  playbook_progress: z.object({ workflowId: z.string() }).passthrough(),
-  workflow_performance: z.object({ workflowId: z.string().optional() }).passthrough(),
-  compliance_report: z.object({ workspaceId: z.string().optional(), since: z.string().optional(), until: z.string().optional() }).passthrough(),
+  sop_demand_supply_match: z.looseObject({ periods: z.array(z.string()).optional() }),
+  sop_scenario_compare: z.looseObject({ period: z.string(), adjustment: z.object({ type: z.string(), percentage: z.number(), items: z.array(z.string()).optional() }) }),
+  sop_consensus_plan: z.looseObject({ periods: z.array(z.string()).optional() }),
+  esg_score_entity: z.looseObject({ entityId: z.string(), entityType: z.enum(["supplier", "region", "product"]).optional().default("supplier"), entityName: z.string(), country: z.string().optional() }),
+  esg_portfolio_overview: z.looseObject({ entityIds: z.array(z.string()).optional() }),
+  esg_gap_analysis: z.looseObject({ targetScore: z.number().optional().default(70) }),
+  carbon_footprint: z.looseObject({ itemNo: z.string(), includeScenarios: z.boolean().optional().default(false) }),
+  nearshoring_evaluate: z.looseObject({ vendorId: z.string(), targetCountries: z.array(z.object({ country: z.string(), region: z.string() })) }),
+  osint_regulatory_brief: z.looseObject({ categories: z.array(z.string()).optional() }),
+  erp_customer360_clv: z.looseObject({ workspaceId: z.string().optional(), customerExternalId: z.string().optional() }),
+  q2o_win_loss_analysis: z.looseObject({ workspaceId: z.string().optional(), since: z.string().optional() }),
+  price_optimize: z.looseObject({ workspaceId: z.string().optional() }),
+  erp_revenue_forecast: z.looseObject({ workspaceId: z.string().optional(), horizonMonths: z.number().optional().default(6) }),
+  competitor_monitor: z.looseObject({ name: z.string(), domains: z.array(z.string()).optional() }),
+  osint_competitor_brief: z.looseObject({ name: z.string(), domains: z.array(z.string()).optional() }),
+  list_transformation_playbooks: z.looseObject({ industry: z.string().optional(), category: z.string().optional() }),
+  execute_playbook: z.looseObject({ playbookId: z.string(), params: z.record(z.string(), z.unknown()).optional() }),
+  playbook_progress: z.looseObject({ workflowId: z.string() }),
+  workflow_performance: z.looseObject({ workflowId: z.string().optional() }),
+  compliance_report: z.looseObject({ workspaceId: z.string().optional(), since: z.string().optional(), until: z.string().optional() }),
 } as const;
 
 function validateOrchestrator<K extends keyof typeof OrchestratorSchemas>(
@@ -2081,13 +2081,14 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             dispatchSkill("delegate", { skillId: "run_mrp", message: "Run MRP for S&OP reconciliation" }, text),
             dispatchSkill("delegate", { skillId: "q2o_pipeline_status", message: "Get pipeline for S&OP" }, text),
           ]);
-          const mrpData = mrpRaw.status === "fulfilled" ? (safeParseJSON(mrpRaw.value) ?? {}) : {};
-          const pipelineData = pipelineRaw.status === "fulfilled" ? (safeParseJSON(pipelineRaw.value) ?? {}) : {};
+          const mrpData = (mrpRaw.status === "fulfilled" ? (safeParseJSON(mrpRaw.value) ?? {}) : {}) as Record<string, unknown>;
+          const pipelineData = (pipelineRaw.status === "fulfilled" ? (safeParseJSON(pipelineRaw.value) ?? {}) : {}) as Record<string, unknown>;
 
           const demand = {
-            confirmedOrders: Array.isArray(pipelineData.orders) ? pipelineData.orders.map((o: Record<string, unknown>) => ({
-              itemNo: o.itemNo ?? o.product ?? "UNKNOWN", quantity: Number(o.quantity ?? 1), dueDate: String(o.dueDate ?? new Date().toISOString()),
-            })) : [],
+            confirmedOrders: Array.isArray(pipelineData.orders) ? (pipelineData.orders as unknown[]).map((o: unknown) => {
+              const ord = o as Record<string, unknown>;
+              return { itemNo: ord.itemNo ?? ord.product ?? "UNKNOWN", quantity: Number(ord.quantity ?? 1), dueDate: String(ord.dueDate ?? new Date().toISOString()) };
+            }) : [],
             forecastedDemand: [],
           };
           const supply = {
@@ -2101,7 +2102,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "SOP_MATCH_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "SOP_MATCH_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2140,7 +2141,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "SOP_SCENARIO_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "SOP_SCENARIO_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2181,7 +2182,7 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
           markCompleted(task.id, JSON.stringify(result, null, 2));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          try { markFailed(task.id, { code: "ESG_SCORE_ERROR", message: msg }); } catch {}
+          try { markFailed(task.id, { code: "ESG_SCORE_ERROR", message: msg }); } catch (mfErr) { process.stderr.write(`[server] markFailed error: ${mfErr}\n`); }
         }
       })();
       return JSON.stringify({ status: "accepted", taskId: task.id }, null, 2);
@@ -2686,6 +2687,8 @@ function isSearchThrottled(sessionId: string): { allowed: boolean; remaining: nu
   }
 
   state.timestamps.push(now);
+  // Clean up map entries that are no longer active (after push so we don't delete a live entry)
+  if (state.timestamps.length === 0 && state.blocked === 0) { searchThrottle.delete(sessionId); }
   return { allowed: true, remaining: max - total - 1 };
 }
 
@@ -4709,6 +4712,7 @@ async function exchangeWizardMailboxOAuthCode(input: {
       "Accept": "application/json",
     },
     body: form.toString(),
+    signal: AbortSignal.timeout(10_000),
   });
   const data = await res.json().catch(() => ({})) as Record<string, unknown>;
   if (!res.ok) {
@@ -8746,6 +8750,8 @@ async function main() {
     }
   }
 
+  pruneCapabilities();
+
   // Clean up old sandbox vars and populate adapter list
   sandboxStore.prune(7);
   const adapterList: Array<{ id: string; description: string }> = [];
@@ -8826,7 +8832,7 @@ async function main() {
   // Prune stale tee files at startup and every hour
   const teeMaxAgeMs = (CONFIG.outputFilter?.teeMaxAgeMins ?? 1440) * 60 * 1000;
   pruneTeeFiles(teeMaxAgeMs);
-  teePruneInterval = setInterval(() => pruneTeeFiles(teeMaxAgeMs), 60 * 60 * 1000);
+  teePruneInterval = setInterval(() => pruneTeeFiles(teeMaxAgeMs), TEE_PRUNE_INTERVAL_MS);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -8836,8 +8842,8 @@ async function main() {
 // and from the fatal-error handler below. SIGINT/SIGTERM are handled by
 // installShutdownHandlers() (cloud.ts) which runs the onShutdown callbacks above.
 function shutdownWorkers() {
-  clearInterval(healthPollInterval);
-  clearInterval(teePruneInterval);
+  if (healthPollInterval !== undefined) clearInterval(healthPollInterval);
+  if (teePruneInterval !== undefined) clearInterval(teePruneInterval);
   for (const timer of respawnTimers.values()) clearTimeout(timer);
   for (const proc of workerProcs.values()) proc.kill();
 }
