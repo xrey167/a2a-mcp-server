@@ -33,7 +33,7 @@ const UA = "A2A-Monitor-Agent/1.0";
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const MonitorSchemas = {
-  track_conflicts: z.object({
+  track_conflicts: z.looseObject({
     conflicts: z.array(z.object({
       name: z.string(),
       region: z.string().optional().default(""),
@@ -50,9 +50,9 @@ const MonitorSchemas = {
         severity: z.enum(["critical", "high", "medium", "low"]).optional().default("medium"),
       })).optional().default([]),
     })).min(1),
-  }).passthrough(),
+  }),
 
-  detect_surge: z.object({
+  detect_surge: z.looseObject({
     activities: z.array(z.object({
       theater: z.string(),
       type: z.enum(["transport", "fighter", "bomber", "tanker", "recon", "naval", "ground", "cyber", "other"]).optional().default("other"),
@@ -65,9 +65,9 @@ const MonitorSchemas = {
     baselineHours: z.number().positive().optional().default(48),
     surgeMultiplier: z.number().positive().optional().default(2),
     minCount: z.number().int().positive().optional().default(5),
-  }).passthrough(),
+  }),
 
-  theater_posture: z.object({
+  theater_posture: z.looseObject({
     theater: z.string(),
     activities: z.object({
       airSorties: z.number().optional().default(0),
@@ -91,9 +91,9 @@ const MonitorSchemas = {
       isNative: z.boolean().optional().default(true),
     })).optional().default([]),
     conflictProximity: z.boolean().optional().default(false),
-  }).passthrough(),
+  }),
 
-  track_vessels: z.object({
+  track_vessels: z.looseObject({
     vessels: z.array(z.object({
       mmsi: z.string(),
       name: z.string().optional().default(""),
@@ -107,9 +107,9 @@ const MonitorSchemas = {
     })).min(1),
     darkShipThresholdMin: z.number().positive().optional().default(60),
     clusterRadiusKm: z.number().positive().optional().default(20),
-  }).passthrough(),
+  }),
 
-  check_freshness: z.object({
+  check_freshness: z.looseObject({
     sources: z.array(z.object({
       name: z.string(),
       lastUpdate: z.string(),
@@ -119,24 +119,24 @@ const MonitorSchemas = {
     freshThresholdMin: z.number().positive().optional().default(15),
     staleThresholdMin: z.number().positive().optional().default(120),
     veryStaleThresholdMin: z.number().positive().optional().default(360),
-  }).passthrough(),
+  }),
 
-  watchlist_check: z.object({
+  watchlist_check: z.looseObject({
     entities: z.array(z.string()).min(1),
     watchlists: z.record(z.array(z.string())).optional().default({}),
     fuzzyMatch: z.boolean().optional().default(true),
-  }).passthrough(),
+  }),
 
   // ── Live Data Ingestion Skills ──────────────────────────────────
-  fetch_conflicts: z.object({
+  fetch_conflicts: z.looseObject({
     source: z.enum(["acled", "gdelt"]).optional().default("gdelt"),
     region: z.string().optional(),
     country: z.string().optional(),
     days: z.number().int().positive().optional().default(30),
     limit: z.number().int().positive().optional().default(100),
-  }).passthrough(),
+  }),
 
-  fetch_flights: z.object({
+  fetch_flights: z.looseObject({
     /** Bounding box: min lat, max lat, min lon, max lon */
     lamin: z.number().optional(),
     lamax: z.number().optional(),
@@ -144,7 +144,7 @@ const MonitorSchemas = {
     lomax: z.number().optional(),
     /** Filter military aircraft only */
     militaryOnly: z.boolean().optional().default(false),
-  }).passthrough(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────

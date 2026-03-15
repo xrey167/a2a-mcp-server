@@ -33,32 +33,32 @@ const UA = "A2A-Climate-Agent/1.0";
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const ClimateSchemas = {
-  fetch_earthquakes: z.object({
+  fetch_earthquakes: z.looseObject({
     minMagnitude: z.number().optional().default(4.0),
     maxResults: z.number().int().positive().optional().default(50),
     days: z.number().int().positive().optional().default(7),
     lat: z.number().optional(),
     lon: z.number().optional(),
     radiusKm: z.number().positive().optional(),
-  }).passthrough(),
+  }),
 
-  fetch_wildfires: z.object({
+  fetch_wildfires: z.looseObject({
     source: z.enum(["VIIRS_SNPP_NRT", "MODIS_NRT"]).optional().default("VIIRS_SNPP_NRT"),
     days: z.number().int().min(1).max(10).optional().default(2),
     lat: z.number().optional(),
     lon: z.number().optional(),
     radiusKm: z.number().positive().optional(),
     minConfidence: z.number().min(0).max(100).optional().default(50),
-  }).passthrough(),
+  }),
 
-  fetch_natural_events: z.object({
+  fetch_natural_events: z.looseObject({
     category: z.enum(["earthquakes", "volcanoes", "wildfires", "severeStorms", "floods", "drought", "landslides", "snow", "all"]).optional().default("all"),
     days: z.number().int().positive().optional().default(30),
     maxResults: z.number().int().positive().optional().default(50),
     status: z.enum(["open", "closed", "all"]).optional().default("open"),
-  }).passthrough(),
+  }),
 
-  assess_exposure: z.object({
+  assess_exposure: z.looseObject({
     hazards: z.array(z.object({
       type: z.string(),
       lat: z.number(),
@@ -74,9 +74,9 @@ const ClimateSchemas = {
       population: z.number().optional().default(0),
       criticality: z.enum(["critical", "high", "medium", "low"]).optional().default("medium"),
     })).min(1),
-  }).passthrough(),
+  }),
 
-  climate_anomalies: z.object({
+  climate_anomalies: z.looseObject({
     series: z.array(z.object({
       date: z.string(),
       temperature: z.number().optional(),
@@ -86,9 +86,9 @@ const ClimateSchemas = {
     })).min(5),
     baselinePeriod: z.number().int().positive().optional().default(30),
     zScoreThreshold: z.number().positive().optional().default(2),
-  }).passthrough(),
+  }),
 
-  event_correlate: z.object({
+  event_correlate: z.looseObject({
     naturalEvents: z.array(z.object({
       type: z.string(),
       lat: z.number(),
@@ -109,7 +109,7 @@ const ClimateSchemas = {
       radiusKm: z.number().optional().default(100),
     })).optional().default([]),
     correlationRadiusKm: z.number().positive().optional().default(200),
-  }).passthrough(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────

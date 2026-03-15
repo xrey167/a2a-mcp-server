@@ -9,9 +9,9 @@ import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { stripAnsi, applyCommandFilter } from "../output-filter.js";
 
 const ShellSchemas = {
-  run_shell: z.object({ command: z.string().min(1) }).passthrough(),
-  read_file: z.object({ path: z.string().min(1) }).passthrough(),
-  write_file: z.object({ path: z.string().min(1), content: z.string() }).passthrough(),
+  run_shell: z.looseObject({ command: z.string().min(1) }),
+  read_file: z.looseObject({ path: z.string().min(1) }),
+  write_file: z.looseObject({ path: z.string().min(1), content: z.string() }),
 };
 
 const PORT = 8081;
