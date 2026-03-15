@@ -5,6 +5,9 @@ import { randomUUID } from "crypto";
 import { z } from "zod";
 import type { WorkflowDefinition } from "./workflow-engine.js";
 
+const RENEWAL_FETCH_TIMEOUT_MS = 15_000;
+const CONNECTOR_FETCH_TIMEOUT_MS = 30_000;
+
 export type ConnectorType = "odoo" | "business-central" | "dynamics";
 export type ProductType = "quote-to-order" | "lead-to-cash" | "collections";
 export type QuoteToOrderState = "draft" | "submitted" | "approved" | "rejected" | "converted_to_order" | "fulfilled";
@@ -2292,7 +2295,7 @@ export async function renewBusinessCentralSubscription(input?: {
     const req = new Request(endpoint, { method, headers, body: JSON.stringify(body) });
     let nativeSubscriptionId = subscriptionId;
     try {
-      const res = await fetch(req, { signal: AbortSignal.timeout(15_000) });
+      const res = await fetch(req, { signal: AbortSignal.timeout(RENEWAL_FETCH_TIMEOUT_MS) });
       if (!res.ok) {
         throw new Error(`Business Central renewal failed: HTTP ${res.status}`);
       }
@@ -2523,7 +2526,7 @@ async function runNativeConnectorSync(
       ...resolveAuthHeader(row.auth_mode, config),
     },
     body: nativeReq.body,
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(CONNECTOR_FETCH_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -3335,7 +3338,7 @@ async function pullGmailMessages(input: {
   const listUrl = `https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(input.userId)}/messages?${params.toString()}`;
   const listRes = await fetch(listUrl, {
     headers: { Authorization: `Bearer ${input.accessToken}` },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(CONNECTOR_FETCH_TIMEOUT_MS),
   });
   if (!listRes.ok) {
     throw new Error(`Gmail list API failed: HTTP ${listRes.status}`);
@@ -3353,7 +3356,7 @@ async function pullGmailMessages(input: {
     const detailUrl = `https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(input.userId)}/messages/${encodeURIComponent(id)}?format=full`;
     const detailRes = await fetch(detailUrl, {
       headers: { Authorization: `Bearer ${input.accessToken}` },
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(CONNECTOR_FETCH_TIMEOUT_MS),
     });
     if (!detailRes.ok) continue;
     const detail = asObject(await detailRes.json());
@@ -3418,7 +3421,7 @@ async function pullOutlookMessages(input: {
   const url = `${base}/mailFolders/${encodeURIComponent(folderSegment)}/messages?${params.toString()}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${input.accessToken}` },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(CONNECTOR_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`Outlook list API failed: HTTP ${res.status}`);
