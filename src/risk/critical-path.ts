@@ -33,6 +33,9 @@ export function computeCriticalPath(
   // Recursively add component nodes
   addComponentNodes(rootItemNo, components, nodes, edges, nodeMap);
 
+  // Guard: Math.max(...[]) returns -Infinity, producing garbage downstream
+  if (nodes.length === 0) return { nodes: [], edges: [], criticalPath: [], totalDurationDays: 0 };
+
   // Forward pass: compute earliest start/finish
   const sorted = topologicalSort(nodes, edges);
   for (const nodeId of sorted) {
