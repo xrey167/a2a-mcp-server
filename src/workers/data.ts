@@ -68,6 +68,17 @@ const DataSchemas = {
     aggregation: z.enum(["sum", "avg", "count", "min", "max"]).optional().default("sum"),
   }),
 
+  export_csv: z.looseObject({
+    /** Array of objects to serialise as CSV */
+    data: z.unknown(),
+    /** Single-character column delimiter (default ","); use "\t" for TSV */
+    delimiter: z.string().length(1).optional().default(","),
+    /** Include header row (default true) */
+    includeHeader: z.boolean().optional().default(true),
+    /** Explicit column order; omitted columns are excluded (default: all keys from first row) */
+    fields: z.array(z.string()).optional(),
+  }),
+
   fetch_dataset: z.looseObject({
     /** URL of a CSV or JSON resource to fetch */
     url: z.string().url(),
@@ -124,6 +135,7 @@ const AGENT_CARD = {
     { id: "fetch_dataset", name: "Fetch Dataset", description: "Fetch a CSV or JSON dataset from a URL and parse it into structured records. Auto-detects format from Content-Type. Supports jsonPath drill-down for nested JSON APIs." },
     { id: "visualize_data", name: "Visualize Data", description: "Generate a Vega-Lite JSON chart specification from a dataset or analyze_data/pivot_table output. Claude picks the best chart type or you can specify bar/line/scatter/area/pie/histogram/heatmap." },
     { id: "data_brief", name: "Data Brief", description: "AI-generated narrative analysis of a dataset: runs statistical analysis then calls ask_claude to produce a plain-language summary of patterns, outliers, and insights. Accepts an optional question to focus the analysis." },
+    { id: "export_csv", name: "Export CSV", description: "Serialise an array of objects to CSV text. Optional fields param controls column selection and order. Completes the ETL loop: fetch_dataset/parse_csv → transform_data → export_csv." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -833,6 +845,50 @@ Requirements:
       }
       if (!Array.isArray(data)) throw new Error("data_brief: data must be an array of records");
       return generateDataBrief(data, question, fields, maxRecords);
+    }
+
+    case "export_csv": {
+      const { data, delimiter, includeHeader, fields } = DataSchemas.export_csv.parse(args);
+      if (!Array.isArray(data)) throw new Error("export_csv: data must be an array of objects");
+
+      // Strip sparse holes (undefined slots) before processing — for...of over a sparse array
+      // would produce undefined rows that silently serialise as all-empty-cell rows.
+      const dense = (data as unknown[]).filter(v => v !== undefined);
+
+      if (dense.length === 0) return includeHeader && fields && fields.length > 0
+        ? fields.join(delimiter)  // header-only CSV when fields are known
+        : "";
+
+      // Reject non-plain-object elements: primitives produce char-indexed columns;
+      // null/Array are misleading. data[0] === undefined is already stripped above.
+      const first = dense[0];
+      if (typeof first !== "object" || first === null || Array.isArray(first)) {
+        throw new Error("export_csv: data must be an array of plain objects, not primitives or nested arrays — use transform_data to flatten first");
+      }
+      if (fields !== undefined && fields.length === 0) {
+        throw new Error("export_csv: fields array is empty — provide at least one column name or omit fields to export all columns");
+      }
+      const cols = fields ?? Object.keys(first as Record<string, unknown>);
+      if (cols.length === 0) throw new Error("export_csv: first row has no enumerable keys — cannot derive column headers");
+
+      // RFC 4180 cell quoting: wrap in double-quotes if cell contains delimiter, quote, CR, or LF
+      const escapeCell = (v: unknown): string => {
+        if (v !== null && v !== undefined && typeof v === "object") {
+          // Nested object/array: throw rather than silently produce [object Object]
+          throw new Error(`export_csv: nested object/array value in column — use transform_data to flatten before exporting. Value: ${JSON.stringify(v).slice(0, 80)}`);
+        }
+        const s = v === null || v === undefined ? "" : String(v);
+        return s.includes(delimiter) || s.includes('"') || s.includes("\n") || s.includes("\r")
+          ? `"${s.replace(/"/g, '""')}"`
+          : s;
+      };
+
+      const rows: string[] = [];
+      if (includeHeader) rows.push(cols.map(c => escapeCell(c)).join(delimiter));
+      for (const row of dense as Record<string, unknown>[]) {
+        rows.push(cols.map(c => escapeCell(row[c])).join(delimiter));
+      }
+      return rows.join("\n");
     }
 
     default:
