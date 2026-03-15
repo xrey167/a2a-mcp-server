@@ -219,10 +219,16 @@ const askClaude: Skill = {
         max_tokens: 1024,
         messages: [{ role: "user", content: prompt }],
       });
+      if (message.content.length === 0) throw new Error("Anthropic returned empty content array");
       const block = message.content[0];
       if (!block) return "";
-      return block.type === "text" ? block.text : JSON.stringify(block);
-    } catch {
+      if (block.type === "text") {
+        if (!block.text) throw new Error("Anthropic returned empty text block");
+        return block.text;
+      }
+      return JSON.stringify(block);
+    } catch (err) {
+      process.stderr.write('[ask_claude] Anthropic API failed, falling back to CLI: ' + (err instanceof Error ? err.message : String(err)) + '\n');
       return await runClaudeCLI(prompt, model);
     }
   },
