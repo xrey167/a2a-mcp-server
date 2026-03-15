@@ -245,6 +245,10 @@ function computeUnifiedDiff(
   const hunks: string[] = [];
   for (const [hs, he] of ranges) {
     const slice = edits.slice(hs, he);
+    if (slice.length === 0) {
+      process.stderr.write(`[${NAME}] diff_files: BUG: empty hunk slice for range [${hs}, ${he}) — skipping\n`);
+      continue;
+    }
     const first = slice[0];
     const aCount = slice.filter(e => e.op !== "+").length;
     const bCount = slice.filter(e => e.op !== "-").length;
