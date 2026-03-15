@@ -140,7 +140,8 @@ async function runSubprocess(
     // are created after the timer is set up.
     const pendingReaders: { stderr?: { cancel(): void }; stdout?: { cancel(): void } } = {};
 
-    // Timeout handler
+    // Timeout handler — kill process and settle immediately; in-flight RPC
+    // promises will try to write to a dead stdin, which is silently swallowed.
     const timer = setTimeout(() => {
       pendingReaders.stderr?.cancel();
       pendingReaders.stdout?.cancel();
@@ -171,6 +172,11 @@ async function runSubprocess(
     pendingReaders.stdout = stdoutReader;
     let buffer = "";
 
+    // Track in-flight RPC promises so we can drain them before resolving on
+    // unexpected process exit.  finish() is idempotent, so concurrent RPCs
+    // that complete after a timeout/exit are harmless.
+    const inFlight = new Set<Promise<void>>();
+
     async function processLines() {
       try {
         while (true) {
@@ -184,11 +190,22 @@ async function runSubprocess(
             buffer = buffer.slice(newlineIdx + 1);
             if (!line) continue;
 
+            let msg: any;
             try {
-              const msg = JSON.parse(line);
-              await handleMessage(msg);
-            } catch (e) {
+              msg = JSON.parse(line);
+            } catch {
               process.stderr.write(`[sandbox] invalid JSON line: ${line}\n`);
+              continue;
+            }
+
+            if (msg.done) {
+              // Completion message — handle inline (fast, no async I/O)
+              handleDone(msg);
+            } else {
+              // RPC call — dispatch concurrently so the read loop keeps
+              // draining stdout and never deadlocks on a full pipe buffer.
+              const p = handleRpc(msg).finally(() => inFlight.delete(p));
+              inFlight.add(p);
             }
           }
         }
@@ -197,34 +214,36 @@ async function runSubprocess(
       }
     }
 
-    async function handleMessage(msg: any) {
-      if (msg.done) {
-        // Completion — persist vars and resolve
-        const newVars: string[] = [];
-        const indexed: string[] = [];
+    function handleDone(msg: any) {
+      // Completion — persist vars and resolve
+      const newVars: string[] = [];
+      const indexed: string[] = [];
 
-        if (msg.vars && typeof msg.vars === "object") {
-          for (const [name, value] of Object.entries(msg.vars)) {
-            const json = safeStringify(value);
-            sandboxStore.setVar(sessionId, name, json);
-            newVars.push(name);
-            if (json.length > getIndexThreshold()) indexed.push(name);
-          }
+      if (msg.vars && typeof msg.vars === "object") {
+        for (const [name, value] of Object.entries(msg.vars)) {
+          const json = safeStringify(value);
+          sandboxStore.setVar(sessionId, name, json);
+          newVars.push(name);
+          if (json.length > getIndexThreshold()) indexed.push(name);
         }
+      }
 
-        // Cap the result to prevent context window blow-up
-        let resultStr = msg.result != null ? safeStringify(msg.result) : null;
-        if (resultStr && resultStr.length > getMaxResultSize()) {
-          resultStr = smartTruncate(resultStr, { maxLength: getMaxResultSize() });
-        }
+      // Cap the result to prevent context window blow-up
+      let resultStr = msg.result != null ? safeStringify(msg.result) : null;
+      if (resultStr && resultStr.length > getMaxResultSize()) {
+        resultStr = smartTruncate(resultStr, { maxLength: getMaxResultSize() });
+      }
 
-        finish({
-          result: resultStr != null ? (typeof msg.result === "string" ? resultStr : JSON.parse(resultStr)) : null,
-          error: msg.error,
-          vars: newVars,
-          indexed,
-        });
-      } else if (msg.rpc === "skill") {
+      finish({
+        result: resultStr != null ? (typeof msg.result === "string" ? resultStr : JSON.parse(resultStr)) : null,
+        error: msg.error,
+        vars: newVars,
+        indexed,
+      });
+    }
+
+    async function handleRpc(msg: any): Promise<void> {
+      if (msg.rpc === "skill") {
         // Skill call — dispatch and respond
         try {
           const result = await dispatch(msg.id, msg.args ?? {});
