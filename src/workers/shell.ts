@@ -132,7 +132,9 @@ app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
       try {
         process.stderr.write('[shell] process did not exit after SIGTERM, sending SIGKILL\n');
         child.kill("SIGKILL");
-      } catch {}
+      } catch (err) {
+        process.stderr.write(`[shell] SIGKILL failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }, 5_000);
     reply.raw.write(`data: ${JSON.stringify({ type: "error", text: `Stream timeout after ${STREAM_TIMEOUT_MS}ms` })}\n\n`);
   }, STREAM_TIMEOUT_MS);
