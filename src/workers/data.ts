@@ -9,6 +9,7 @@
  *   transform_data — Apply map/filter/sort/group/aggregate operations on datasets
  *   analyze_data   — Compute statistics (mean, median, stddev, percentiles, correlations)
  *   pivot_table    — Create pivot table summaries from flat data
+ *   data_brief     — AI-generated narrative analysis of a dataset via ask_claude
  *   remember/recall — Shared persistent memory
  */
 
@@ -19,7 +20,7 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { callPeer } from "../peer.js";
-import { sanitizeForPrompt } from "../prompt-sanitizer.js";
+import { sanitizeForPrompt, sanitizeUserInput } from "../prompt-sanitizer.js";
 
 const PORT = 8088;
 const NAME = "data-agent";
@@ -67,6 +68,17 @@ const DataSchemas = {
     aggregation: z.enum(["sum", "avg", "count", "min", "max"]).optional().default("sum"),
   }),
 
+  export_csv: z.looseObject({
+    /** Array of objects to serialise as CSV */
+    data: z.unknown(),
+    /** Single-character column delimiter (default ","); use "\t" for TSV */
+    delimiter: z.string().length(1).optional().default(","),
+    /** Include header row (default true) */
+    includeHeader: z.boolean().optional().default(true),
+    /** Explicit column order; omitted columns are excluded (default: all keys from first row) */
+    fields: z.array(z.string()).optional(),
+  }),
+
   fetch_dataset: z.looseObject({
     /** URL of a CSV or JSON resource to fetch */
     url: z.string().url(),
@@ -94,6 +106,16 @@ const DataSchemas = {
     /** Height of the chart in pixels (default 300) */
     height: z.number().int().min(100).max(2000).optional().default(300),
   }),
+  data_brief: z.looseObject({
+    /** Dataset to analyse — array of records (objects or primitives) */
+    data: z.unknown(),
+    /** Optional question or focus for the AI (e.g. "what drives the revenue variance?") */
+    question: z.string().optional(),
+    /** Subset of fields to include in the analysis (default: all) */
+    fields: z.array(z.string()).optional(),
+    /** Max records to analyse — avoids huge prompt (default 500) */
+    maxRecords: z.number().int().positive().optional().default(500),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -112,6 +134,8 @@ const AGENT_CARD = {
     { id: "pivot_table", name: "Pivot Table", description: "Create pivot table summaries from flat data with configurable row/column/value fields and aggregation" },
     { id: "fetch_dataset", name: "Fetch Dataset", description: "Fetch a CSV or JSON dataset from a URL and parse it into structured records. Auto-detects format from Content-Type. Supports jsonPath drill-down for nested JSON APIs." },
     { id: "visualize_data", name: "Visualize Data", description: "Generate a Vega-Lite JSON chart specification from a dataset or analyze_data/pivot_table output. Claude picks the best chart type or you can specify bar/line/scatter/area/pie/histogram/heatmap." },
+    { id: "data_brief", name: "Data Brief", description: "AI-generated narrative analysis of a dataset: runs statistical analysis then calls ask_claude to produce a plain-language summary of patterns, outliers, and insights. Accepts an optional question to focus the analysis." },
+    { id: "export_csv", name: "Export CSV", description: "Serialise an array of objects to CSV text. Optional fields param controls column selection and order. Completes the ETL loop: fetch_dataset/parse_csv → transform_data → export_csv." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -571,6 +595,94 @@ async function fetchDataset(
   return { format: resolved, rowCount: rows.length, columns, data: rows };
 }
 
+// ── AI Data Brief ─────────────────────────────────────────────────
+
+/** Max characters of serialised stats sent to the AI prompt to stay within token budget. */
+const BRIEF_STATS_CHAR_LIMIT = 8_000;
+
+async function generateDataBrief(
+  data: unknown[],
+  question: string | undefined,
+  fields: string[] | undefined,
+  maxRecords: number,
+): Promise<string> {
+  if (data.length === 0) throw new Error("data_brief: dataset is empty");
+
+  const truncated = data.length > maxRecords;
+  const sample = truncated ? data.slice(0, maxRecords) : data;
+
+  // Guard: analyzeData expects object records — primitives produce garbage stats
+  if (sample.length > 0 && (typeof sample[0] !== "object" || sample[0] === null)) {
+    throw new Error(
+      `data_brief: expected an array of objects but received an array of ${typeof sample[0]}. ` +
+      `Wrap primitive values in objects (e.g. [{ value: 1 }, ...]).`,
+    );
+  }
+
+  let stats: Record<string, FieldStats>;
+  try {
+    stats = analyzeData(sample, fields);
+  } catch (err) {
+    const cause = err instanceof Error ? err : new Error(String(err));
+    process.stderr.write(`[${NAME}] data_brief: analyzeData failed: ${cause.stack ?? cause.message}\n`);
+    throw new Error(`data_brief: statistical analysis failed (${cause.message})`, { cause });
+  }
+
+  const fieldNames = Object.keys(stats);
+  if (fieldNames.length === 0) throw new Error("data_brief: no analysable fields found in dataset");
+
+  // Serialise stats with char-based truncation, then sanitize to neutralise any
+  // prompt-injection payloads embedded in user-supplied categorical values (topValues[].value)
+  let statsText = safeStringify(stats, 2);
+  if (statsText.length > BRIEF_STATS_CHAR_LIMIT) {
+    statsText = statsText.slice(0, BRIEF_STATS_CHAR_LIMIT) + "\n... (truncated for brevity)";
+  }
+  const safeStats = sanitizeUserInput(statsText, "statistical_summary");
+
+  const safeQuestion = question ? sanitizeUserInput(question, "question") : null;
+
+  const prompt = `You are a data analyst writing a concise executive briefing for a business audience.
+
+Dataset: ${sample.length} records${truncated ? ` (truncated from ${data.length})` : ""}, ${fieldNames.length} fields.
+${safeQuestion ? `\nAnalyst question: ${safeQuestion}\n` : ""}
+Statistical summary:
+${safeStats}
+
+Write a clear, factual narrative (3–6 sentences) covering:
+1. What the data represents and its scale
+2. Key numeric patterns: standout means, ranges, or distributions
+3. Notable categorical breakdowns or top values
+4. Any anomalies, skews, or outliers worth flagging
+${safeQuestion ? "5. A direct answer to the analyst question above" : ""}
+
+Be specific with numbers. Do not speculate beyond what the statistics show.`;
+
+  let brief: string;
+  try {
+    brief = await callPeer("ask_claude", { prompt }, prompt, 60_000);
+  } catch (err) {
+    const cause = err instanceof Error ? err : new Error(String(err));
+    process.stderr.write(`[${NAME}] data_brief: callPeer ask_claude failed: ${cause.stack ?? cause.message}\n`);
+    throw new Error(`data_brief: AI synthesis failed (${cause.message})`, { cause });
+  }
+
+  // Guard against empty narrative — callPeer returns string but ask_claude can return ""
+  if (!brief || brief.trim().length === 0) {
+    process.stderr.write(`[${NAME}] data_brief: ask_claude returned an empty response\n`);
+    throw new Error("data_brief: AI synthesis returned an empty narrative");
+  }
+
+  return safeStringify({
+    recordCount: data.length,
+    analysedRecords: sample.length,
+    fieldCount: fieldNames.length,
+    // "truncated" distinguishes deliberate size cap from data-quality issues
+    dataQuality: truncated ? "truncated" : "ok",
+    question: question ?? null,
+    brief,
+  }, 2);
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
@@ -719,6 +831,64 @@ Requirements:
       }
 
       return safeStringify({ chartType, width, height, spec }, 2);
+    }
+
+    case "data_brief": {
+      const { data: rawData, question, fields, maxRecords } = DataSchemas.data_brief.parse(args);
+      let data = rawData;
+      if (typeof data === "string") {
+        try { data = JSON.parse(data); } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[${NAME}] data_brief: JSON.parse failed: ${msg}\n`);
+          throw new Error(`data_brief: data must be a JSON array of records (parse error: ${msg})`);
+        }
+      }
+      if (!Array.isArray(data)) throw new Error("data_brief: data must be an array of records");
+      return generateDataBrief(data, question, fields, maxRecords);
+    }
+
+    case "export_csv": {
+      const { data, delimiter, includeHeader, fields } = DataSchemas.export_csv.parse(args);
+      if (!Array.isArray(data)) throw new Error("export_csv: data must be an array of objects");
+
+      // Strip sparse holes (undefined slots) before processing — for...of over a sparse array
+      // would produce undefined rows that silently serialise as all-empty-cell rows.
+      const dense = (data as unknown[]).filter(v => v !== undefined);
+
+      if (dense.length === 0) return includeHeader && fields && fields.length > 0
+        ? fields.join(delimiter)  // header-only CSV when fields are known
+        : "";
+
+      // Reject non-plain-object elements: primitives produce char-indexed columns;
+      // null/Array are misleading. data[0] === undefined is already stripped above.
+      const first = dense[0];
+      if (typeof first !== "object" || first === null || Array.isArray(first)) {
+        throw new Error("export_csv: data must be an array of plain objects, not primitives or nested arrays — use transform_data to flatten first");
+      }
+      if (fields !== undefined && fields.length === 0) {
+        throw new Error("export_csv: fields array is empty — provide at least one column name or omit fields to export all columns");
+      }
+      const cols = fields ?? Object.keys(first as Record<string, unknown>);
+      if (cols.length === 0) throw new Error("export_csv: first row has no enumerable keys — cannot derive column headers");
+
+      // RFC 4180 cell quoting: wrap in double-quotes if cell contains delimiter, quote, CR, or LF
+      const escapeCell = (v: unknown): string => {
+        if (v !== null && v !== undefined && typeof v === "object") {
+          // Nested object/array: throw rather than silently produce [object Object]
+          throw new Error(`export_csv: nested object/array value in column — use transform_data to flatten before exporting. Value: ${JSON.stringify(v).slice(0, 80)}`);
+        }
+        const s = v === null || v === undefined ? "" : String(v);
+        return s.includes(delimiter) || s.includes('"') || s.includes("\n") || s.includes("\r")
+          ? `"${s.replace(/"/g, '""')}"`
+          : s;
+      };
+
+      const rows: string[] = [];
+      if (includeHeader) rows.push(cols.map(c => escapeCell(c)).join(delimiter));
+      for (const row of dense as Record<string, unknown>[]) {
+        rows.push(cols.map(c => escapeCell(row[c])).join(delimiter));
+      }
+      return rows.join("\n");
     }
 
     default:

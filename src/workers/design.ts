@@ -11,6 +11,12 @@ const DesignSchemas = {
   enhance_ui_prompt: z.looseObject({ description: z.string().min(1), deviceType: z.string().optional().default("mobile") }),
   suggest_screens: z.looseObject({ appConcept: z.string().min(1), deviceType: z.string().optional().default("mobile") }),
   design_critique: z.looseObject({ description: z.string().min(1) }),
+  generate_brand: z.looseObject({
+    appName: z.string().min(1),
+    description: z.string().min(1),
+    industry: z.string().optional(),
+    targetAudience: z.string().optional(),
+  }),
 };
 
 const PORT = 8086;
@@ -26,6 +32,7 @@ const AGENT_CARD = {
     { id: "enhance_ui_prompt", name: "Enhance UI Prompt", description: "Expand a vague UI description into a detailed, structured Stitch-ready design prompt" },
     { id: "suggest_screens", name: "Suggest Screens", description: "Suggest essential screens for an app concept, each with a detailed design prompt" },
     { id: "design_critique", name: "Design Critique", description: "Critique a UI design description and return actionable improvements" },
+    { id: "generate_brand", name: "Generate Brand", description: "Generate a consistent brand identity (color palette, typography, visual style, tone) from an app name and description. Use the output to anchor all subsequent enhance_ui_prompt and suggest_screens calls." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory" },
   ],
@@ -134,6 +141,35 @@ ${sanitizeUserInput(description, "design_description")}`;
   return callGemini(systemInstruction, userPrompt);
 }
 
+// ── Generate a brand identity system for an app ──────────────────
+async function generateBrand(appName: string, description: string, industry?: string, targetAudience?: string): Promise<string> {
+  const systemInstruction = `You are a brand strategist and visual designer. Given an app concept, produce a complete brand identity system as JSON.
+
+Respond ONLY with a valid JSON object — no markdown fences, no explanation:
+{
+  "palette": ["descriptive color name 1", "descriptive color name 2", "descriptive color name 3"],
+  "primaryColor": "descriptive color name",
+  "accentColor": "descriptive color name",
+  "backgroundColor": "descriptive color name",
+  "typography": { "heading": "one-word style (e.g. bold geometric)", "body": "one-word style (e.g. light readable)" },
+  "visualStyle": "one of: minimal | material | glassmorphic | neumorphic | flat | vibrant | editorial",
+  "mood": ["adjective1", "adjective2", "adjective3"],
+  "voice": "one sentence describing the brand's communication style"
+}
+
+Use descriptive color names ("deep navy", "warm coral") — never hex codes. Palette must be 3-5 colors that work together.`;
+
+  const contextLines = [
+    `App name: ${sanitizeUserInput(appName, "app_name")}`,
+    industry ? `Industry: ${sanitizeUserInput(industry, "industry")}` : null,
+    targetAudience ? `Target audience: ${sanitizeUserInput(targetAudience, "target_audience")}` : null,
+    `Description: ${sanitizeUserInput(description, "app_description")}`,
+  ].filter(Boolean).join("\n");
+
+  const raw = await callGemini(systemInstruction, contextLines);
+  return raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+}
+
 // ── Skill dispatcher ─────────────────────────────────────────────
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
@@ -153,6 +189,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     case "design_critique": {
       const { description } = DesignSchemas.design_critique.parse({ description: args.description ?? text, ...args });
       return designCritique(description);
+    }
+
+    case "generate_brand": {
+      const { appName, description, industry, targetAudience } = DesignSchemas.generate_brand.parse({ appName: args.appName ?? text, ...args });
+      return generateBrand(appName, description, industry, targetAudience);
     }
 
     default:

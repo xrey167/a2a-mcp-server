@@ -5,6 +5,8 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
+import { callPeer } from "../peer.js";
+import { sanitizeUserInput } from "../prompt-sanitizer.js";
 
 const WebSchemas = {
   fetch_url: z.looseObject({ url: z.url(), format: z.enum(["text", "json"]).optional().default("text") }),
@@ -23,7 +25,16 @@ const WebSchemas = {
     /** Maximum number of results to return (default 10, max 20) */
     maxResults: z.number().int().min(1).max(20).optional().default(10),
   }),
+  summarize_url: z.looseObject({
+    /** URL to fetch, scrape, and summarize */
+    url: z.string().url(),
+    /** Optional question to steer the AI summary (e.g. "What are the key risks?") */
+    question: z.string().optional(),
+  }),
 };
+
+/** Max words sent to the AI to avoid context overflow (~6000 words ≈ ~8000 tokens). */
+const SUMMARIZE_MAX_WORDS = 6000;
 
 /** Block RFC-1918, loopback, APIPA, and cloud-metadata hostnames at the hostname level. */
 function isPrivateHostname(hostname: string): boolean {
@@ -218,6 +229,7 @@ const AGENT_CARD = {
     { id: "call_api", name: "Call API", description: "Make an HTTP request to an external API" },
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
+    { id: "summarize_url", name: "Summarize URL", description: "Fetch a web page, scrape its text, and return an AI-written summary. Pass an optional question to focus the summary on a specific aspect." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -281,7 +293,6 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     case "search_web": {
       const { query, maxResults } = WebSchemas.search_web.parse({ query: args.query ?? text, ...args });
       const trimmedQuery = query.trim();
-      // Encode query for URL; do NOT pass raw user input as a URL component without encoding
       const encodedQuery = encodeURIComponent(trimmedQuery);
       const searchUrl = `https://html.duckduckgo.com/html/?q=${encodedQuery}`;
       const ssrfBlock = await blockPrivateUrl(searchUrl);
@@ -294,7 +305,6 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         },
       });
       if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
-      // Validate content-type — rate-limit or bot-detection responses may return non-HTML
       const ct = res.headers.get("content-type") ?? "";
       if (!ct.includes("text/html") && !ct.includes("application/xhtml")) {
         process.stderr.write(`[${NAME}] search_web: unexpected content-type from DuckDuckGo: "${ct}" for query="${trimmedQuery}"\n`);
@@ -305,8 +315,6 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
       if (html === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
 
-      // Parse DuckDuckGo result blocks: each result is a <div class="result"> with
-      // an <a class="result__a"> (title+url) and <a class="result__snippet"> (snippet)
       const results: Array<{ title: string; url: string; snippet: string }> = [];
       const resultBlockRe = /<div[^>]+class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
       for (const m of html.matchAll(resultBlockRe)) {
@@ -321,24 +329,20 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         const snippet = snippetMatch && snippetMatch[1]
           ? decodeEntities(snippetMatch[1].replace(/<[^>]+>/g, "").trim())
           : "";
-        // DuckDuckGo wraps result URLs in a redirect; extract the real URL from uddg param.
-        // URLSearchParams.get() already percent-decodes values, so no decodeURIComponent needed.
         let url = rawUrl;
         try {
           const parsed = new URL(rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl);
           const uddg = parsed.searchParams.get("uddg");
-          if (uddg) url = uddg; // already decoded by URLSearchParams
+          if (uddg) url = uddg;
         } catch (parseErr) {
           process.stderr.write(`[${NAME}] search_web: URL parse failed for "${rawUrl.slice(0, 100)}", keeping raw href (${String(parseErr)})\n`);
         }
-        // Filter extracted URLs against SSRF blocklist — DDG results could include internal addresses
         const resultSsrf = await blockPrivateUrl(url);
         if (resultSsrf) continue;
         if (url && title) results.push({ title, url, snippet });
       }
 
       if (results.length === 0) {
-        // Distinguish genuine empty results from a broken HTML parser (structure change / bot detection)
         const likelyParserFailure = !html.includes("result__a");
         if (likelyParserFailure) {
           process.stderr.write(`[${NAME}] search_web: HTML parser appears broken — "result__a" not found in ${html.length}-byte response for query="${trimmedQuery}"; DuckDuckGo HTML structure may have changed\n`);
@@ -349,6 +353,58 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }
 
       return safeStringify({ query: trimmedQuery, results: results.slice(0, maxResults), resultCount: results.length }, 2);
+    }
+
+    case "summarize_url": {
+      const { url, question } = WebSchemas.summarize_url.parse({ url: args.url ?? text, ...args });
+      const block = await blockPrivateUrl(url);
+      if (block) return block;
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          headers: { "Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+        });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] summarize_url: fetch failed for ${url}: ${err}\n`);
+        return `summarize_url: could not fetch ${url} — ${err instanceof Error ? err.message : String(err)}`;
+      }
+      if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+      const ct = res.headers.get("content-type") ?? "";
+      if (!ct.includes("text/html") && !ct.includes("application/xhtml")) {
+        return `summarize_url expects HTML content (got ${ct}); use fetch_url for other content types`;
+      }
+      const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
+      if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
+      const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+      if (html === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
+      const scraped = scrapeHtml(html, true, 0);
+
+      if (scraped.wordCount === 0) {
+        process.stderr.write(`[${NAME}] summarize_url: scrapeHtml returned empty text for ${url}\n`);
+        return `summarize_url: no readable text found at ${url} — the page may be JavaScript-rendered or require authentication. Try scrape_page to inspect the raw content.`;
+      }
+
+      const words = scraped.text.split(/\s+/);
+      const truncated = words.length > SUMMARIZE_MAX_WORDS
+        ? words.slice(0, SUMMARIZE_MAX_WORDS).join(" ") + "\n\n[…content truncated…]"
+        : scraped.text;
+
+      const questionLine = question
+        ? `Focus question: ${sanitizeUserInput(question, "question")}\n\n`
+        : "";
+      const prompt = `You are a research assistant. Summarize the following web page concisely and accurately.\n\nURL: ${sanitizeUserInput(url, "url")}\nTitle: ${sanitizeUserInput(scraped.title, "title")}\n\n${questionLine}Page content:\n${sanitizeUserInput(truncated, "page_content")}`;
+
+      let summary: string;
+      try {
+        summary = await callPeer("ask_claude", { prompt }, prompt, 60_000);
+      } catch (err) {
+        const cause = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] summarize_url: callPeer ask_claude failed: ${cause}\n`);
+        return `summarize_url: AI summary unavailable — the AI worker could not be reached (${cause}). Try again in a moment or use scrape_page to get the raw text.`;
+      }
+
+      return safeStringify({ url, title: scraped.title, wordCount: scraped.wordCount, summary }, 2);
     }
     default:
       return `Unknown skill: ${skillId}`;

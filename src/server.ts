@@ -645,7 +645,25 @@ function startDesignWorkflow(args: Record<string, unknown>): string {
     try {
       emitProgress(task.id, screensOnly
         ? "Creating project and enhancing prompt…"
-        : "Creating project and planning screens…");
+        : "Generating brand identity and planning screens…");
+
+      // For multi-screen flows, generate a brand identity first so all screen
+      // prompts share a consistent palette, typography, and visual style.
+      let conceptWithBrand = appConcept;
+      if (!screensOnly) {
+        try {
+          const brandRaw = await sendWithResilience(designWorkerUrl, {
+            skillId: "generate_brand",
+            args: { appName: title, description: appConcept },
+            message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
+          }, { timeoutMs: 60_000 });
+          conceptWithBrand = `${appConcept}\n\nBrand identity (use these tokens consistently across all screens):\n${brandRaw}`;
+          lines.push(`Brand identity generated.\n`);
+        } catch (err) {
+          // Non-fatal: fall back to concept-only if brand generation fails
+          process.stderr.write(`[orchestrator] design_workflow: generate_brand failed (non-fatal, continuing without brand): ${err}\n`);
+        }
+      }
 
       const [projectRaw, promptResult] = await Promise.all([
         callMcpTool("create_project", { title }),
@@ -657,8 +675,8 @@ function startDesignWorkflow(args: Record<string, unknown>): string {
             }, { timeoutMs: 60_000 })
           : sendWithResilience(designWorkerUrl, {
               skillId: "suggest_screens",
-              args: { appConcept, deviceType: deviceType.toLowerCase() },
-              message: { role: "user" as const, parts: [{ kind: "text" as const, text: appConcept }] },
+              args: { appConcept: conceptWithBrand, deviceType: deviceType.toLowerCase() },
+              message: { role: "user" as const, parts: [{ kind: "text" as const, text: conceptWithBrand }] },
             }, { timeoutMs: 60_000 }),
       ]);
 
@@ -2588,7 +2606,7 @@ const memoryCleanupSkill = {
 const designWorkflowSkill = {
   id: "design_workflow",
   name: "Design Workflow",
-  description: "Full design pipeline: Gemini suggests screens → creates a Stitch project → generates each screen. Returns {taskId} immediately — poll with get_task_result until status is 'completed'.",
+  description: "Full design pipeline: Gemini generates brand identity → suggests screens with consistent brand tokens → creates a Stitch project → generates each screen. Returns {taskId} immediately — poll with get_task_result until status is 'completed'.",
   inputSchema: {
     type: "object" as const,
     properties: {

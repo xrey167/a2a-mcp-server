@@ -7,12 +7,23 @@ import { getPersona, watchPersonas } from "../persona-loader.js";
 import { sanitizePath } from "../path-utils.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { stripAnsi, applyCommandFilter } from "../output-filter.js";
+import { callPeer } from "../peer.js";
+import { sanitizeUserInput } from "../prompt-sanitizer.js";
+import { safeStringify } from "../safe-json.js";
 
 const ShellSchemas = {
   run_shell: z.looseObject({ command: z.string().min(1) }),
   read_file: z.looseObject({ path: z.string().min(1) }),
   write_file: z.looseObject({ path: z.string().min(1), content: z.string() }),
   list_dir: z.looseObject({ path: z.string().optional().default(".") }),
+  shell_brief: z.looseObject({
+    /** Shell command to execute and explain */
+    command: z.string().min(1),
+    /** Optional context to help the AI interpret the output (e.g. "this is a git diff") */
+    context: z.string().optional(),
+    /** Timeout for the shell command in ms (default 15000, max 60000) */
+    timeoutMs: z.number().int().positive().max(60_000).optional().default(15_000),
+  }),
 };
 
 const PORT = 8081;
@@ -28,13 +39,19 @@ const AGENT_CARD = {
     { id: "run_shell", name: "Run Shell", description: "Execute a shell command and return its output" },
     { id: "read_file", name: "Read File", description: "Read the contents of a file" },
     { id: "write_file", name: "Write File", description: "Write content to a file" },
+
     { id: "list_dir", name: "List Directory", description: "List files and subdirectories in a directory (non-recursive). Returns name and type (file/dir) for each entry." },
+    { id: "shell_brief", name: "Shell Brief", description: "Execute a shell command and ask Claude to explain the output in plain language. Useful for interpreting git log, diff, ps, df, netstat, and other diagnostic commands." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
 };
 
-function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string {
+/** Character limit for shell output sent to AI prompt — avoids token budget overrun.
+ *  Char-based (not word-based) preserves column alignment in tabular output (ps, df, ls). */
+const SHELL_BRIEF_CHAR_LIMIT = 30_000;
+
+async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
   if (memResult !== null) return memResult;
   switch (skillId) {
@@ -66,6 +83,7 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       writeFileSync(safePath, content, "utf-8");
       return `Written ${content.length} bytes to ${safePath}`;
     }
+
     case "list_dir": {
       const { path } = ShellSchemas.list_dir.parse({ path: args.path ?? text || ".", ...args });
       const safePath = sanitizePath(path);
@@ -80,6 +98,81 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
         }
       });
       return lines.length > 0 ? lines.join("\n") : "(empty directory)";
+    }
+    case "shell_brief": {
+      const { command, context, timeoutMs } = ShellSchemas.shell_brief.parse({ command: args.command ?? text, ...args });
+      // Sanitize user inputs early — safeCommand used in both prompt and response
+      const safeCommand = sanitizeUserInput(command, "command");
+      const safeContext = context ? sanitizeUserInput(context, "context") : null;
+
+      const result = spawnSync(command, { shell: true, timeout: timeoutMs, encoding: "utf-8" });
+      if (result.error) {
+        const isTimeout = (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
+        process.stderr.write(`[${NAME}] shell_brief: spawnSync error (${result.error.message}) for command: ${command}\n`);
+        return isTimeout
+          ? `shell_brief: command timed out after ${timeoutMs}ms — increase timeoutMs (max 60000) or use run_shell for long-running commands`
+          : `shell_brief: command execution failed — ${result.error.message}`;
+      }
+
+      const rawOut = stripAnsi((result.stdout ?? "").trim());
+      const rawErr = stripAnsi((result.stderr ?? "").trim());
+      const combined = rawOut + (rawErr ? `\n[stderr]\n${rawErr}` : "");
+      const exitCode = result.status ?? 0;
+      const commandFailed = exitCode !== 0;
+
+      if (combined.trim().length === 0) {
+        process.stderr.write(`[${NAME}] shell_brief: command produced no output (exit ${exitCode})\n`);
+        return `shell_brief: command produced no output (exit ${exitCode})`;
+      }
+
+      // Truncate with char-based limit to preserve column alignment in tabular output
+      const truncated = combined.length > SHELL_BRIEF_CHAR_LIMIT;
+      const trimmedOutput = truncated
+        ? combined.slice(0, SHELL_BRIEF_CHAR_LIMIT) + "\n... (output truncated)"
+        : combined;
+
+      // Sanitize output before embedding in prompt — shell output is untrusted user-controlled data
+      const safeOutput = sanitizeUserInput(trimmedOutput, "shell_output");
+
+      const prompt = `You are a systems engineer explaining shell command output to a developer.
+
+Command: ${safeCommand}
+Exit code: ${exitCode}
+${safeContext ? `Context: ${safeContext}\n` : ""}
+Output:
+${safeOutput}
+
+Explain what this output means in 2–5 plain-language sentences. Focus on:
+- What the command reported (status, counts, sizes, errors)
+- Any warnings, failures, or anomalies
+- What action (if any) a developer should take
+
+Be specific about numbers and file names. Do not speculate beyond what the output shows.`;
+
+      const outputLines = combined.split("\n").length;
+      const dataQuality = truncated ? "partial" : commandFailed ? "error" : "ok";
+
+      if (commandFailed) {
+        process.stderr.write(`[${NAME}] shell_brief: command exited ${exitCode}: ${command}\n`);
+      }
+
+      let brief: string;
+      try {
+        brief = await callPeer("ask_claude", { prompt }, prompt, 60_000);
+      } catch (err) {
+        const cause = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] shell_brief: callPeer ask_claude failed: ${err instanceof Error ? err.stack : cause}\n`);
+        // Return structured JSON on failure to match success contract
+        return safeStringify({ command: safeCommand, exitCode, outputLines, dataQuality, brief: null, error: `AI explanation unavailable — ${cause}. Try again or use run_shell to view raw output.` }, 2);
+      }
+
+      // Guard against empty narrative — callPeer can return "" without throwing
+      if (!brief || !brief.trim()) {
+        process.stderr.write(`[${NAME}] shell_brief: ask_claude returned empty brief for command: ${command}\n`);
+        return safeStringify({ command: safeCommand, exitCode, outputLines, dataQuality, brief: null, error: "AI explanation unavailable — the model returned an empty response. Try again or use run_shell to view raw output." }, 2);
+      }
+
+      return safeStringify({ command: safeCommand, exitCode, outputLines, dataQuality, brief }, 2);
     }
     default:
       return `Unknown skill: ${skillId}`;
@@ -112,7 +205,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const sid = skillId ?? "run_shell";
   let resultText: string;
   try {
-    resultText = handleSkill(sid, args ?? { command: text }, text);
+    resultText = await handleSkill(sid, args ?? { command: text }, text);
   } catch (err) {
     resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
   }
