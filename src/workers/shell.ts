@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { spawnSync, spawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "fs";
 import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
@@ -12,6 +12,7 @@ const ShellSchemas = {
   run_shell: z.looseObject({ command: z.string().min(1) }),
   read_file: z.looseObject({ path: z.string().min(1) }),
   write_file: z.looseObject({ path: z.string().min(1), content: z.string() }),
+  list_dir: z.looseObject({ path: z.string().optional().default(".") }),
 };
 
 const PORT = 8081;
@@ -27,6 +28,7 @@ const AGENT_CARD = {
     { id: "run_shell", name: "Run Shell", description: "Execute a shell command and return its output" },
     { id: "read_file", name: "Read File", description: "Read the contents of a file" },
     { id: "write_file", name: "Write File", description: "Write content to a file" },
+    { id: "list_dir", name: "List Directory", description: "List files and subdirectories in a directory (non-recursive). Returns name and type (file/dir) for each entry." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -63,6 +65,21 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       const safePath = sanitizePath(path);
       writeFileSync(safePath, content, "utf-8");
       return `Written ${content.length} bytes to ${safePath}`;
+    }
+    case "list_dir": {
+      const { path } = ShellSchemas.list_dir.parse({ path: args.path ?? text || ".", ...args });
+      const safePath = sanitizePath(path);
+      if (!existsSync(safePath)) return `Directory not found: ${safePath}`;
+      const entries = readdirSync(safePath);
+      const lines = entries.map(name => {
+        try {
+          const type = statSync(`${safePath}/${name}`).isDirectory() ? "dir" : "file";
+          return `${type}\t${name}`;
+        } catch {
+          return `unknown\t${name}`;
+        }
+      });
+      return lines.length > 0 ? lines.join("\n") : "(empty directory)";
     }
     default:
       return `Unknown skill: ${skillId}`;
