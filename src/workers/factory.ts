@@ -112,6 +112,10 @@ function log(msg: string) {
   process.stderr.write(`[${NAME}] ${msg}\n`);
 }
 
+function getErrMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 async function askClaude(prompt: string, systemPrompt?: string): Promise<string> {
   const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
   return sendTask(WORKER_URLS.ai, {
@@ -218,7 +222,7 @@ Rules:
     };
   } catch (err) {
     log(`template matching failed: ${err}`);
-    return { variantId: null, variantSpec: null, confidence: "none", reason: `Matching failed for pipeline "${pipelineId}": ${err instanceof Error ? err.message : String(err)}, using base template` };
+    return { variantId: null, variantSpec: null, confidence: "none", reason: `Matching failed for pipeline "${pipelineId}": ${getErrMsg(err)}, using base template` };
   }
 }
 
@@ -360,7 +364,7 @@ Be strict. A score of ${threshold}+ means production-ready quality. Deduct point
   try {
     parsed = JSON.parse(stripJsonFences(raw));
   } catch (err) {
-    log(`qualityGate: failed to parse LLM response as JSON — treating as failed gate: ${err instanceof Error ? err.message : String(err)}`);
+    log(`qualityGate: failed to parse LLM response as JSON — treating as failed gate: ${getErrMsg(err)}`);
     return { passed: false, scores: {}, average: 0, issues: [{ dimension: "parse", severity: "critical", description: "LLM returned non-JSON response", fix: "Retry generation" }], summary: "Quality gate could not parse LLM response" };
   }
 
@@ -542,7 +546,7 @@ async function createProject(
         message: { role: "user" as const, parts: [{ kind: "text" as const, text: `read ${file}` }] },
       });
       allCode += `\n// === ${file} ===\n${content}`;
-    } catch (err) { log(`read_file skipped for ${file}: ${err instanceof Error ? err.message : String(err)}`); }
+    } catch (err) { log(`read_file skipped for ${file}: ${getErrMsg(err)}`); }
   }
 
   if (allCode.trim()) {
@@ -881,7 +885,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     const result = await handleSkill(sid, args ?? {}, text);
     return buildA2AResponse(data.id, taskId, result);
   } catch (err) {
-    log(`skill ${sid} failed: ${err instanceof Error ? err.message : String(err)}`);
+    log(`skill ${sid} failed: ${getErrMsg(err)}`);
     reply.code(500);
     return buildA2AError(data.id, err);
   }
