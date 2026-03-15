@@ -416,10 +416,12 @@ ${safeText}`;
         return "Error: detect_language: model did not return valid JSON — retry";
       }
 
-      // Verify structure: single → must have language+code, multi → must have non-empty languages array
+      // Verify structure: single → must have language+code strings, multi → array with first element having those fields
+      const langs = topN > 1 ? (parsed2.languages as Array<Record<string, unknown>> | undefined) : undefined;
       const hasStructure = topN === 1
         ? typeof parsed2.language === "string" && typeof parsed2.code === "string"
-        : Array.isArray(parsed2.languages) && (parsed2.languages as unknown[]).length > 0;
+        : Array.isArray(langs) && langs.length > 0
+          && typeof langs[0]?.language === "string" && typeof langs[0]?.code === "string";
       if (!hasStructure) {
         process.stderr.write(`[${NAME}] detect_language: JSON has degenerate structure (topN=${topN}): ${stripped.slice(0, 120)}\n`);
         return "Error: detect_language: model returned unexpected structure — retry";
