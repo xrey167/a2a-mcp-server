@@ -911,7 +911,7 @@ Requirements:
         throw new Error(`deduplicate: dataset has ${data.length} rows — exceeds ${MAX_ROWS} row limit`);
       }
 
-      type DataRow = Record<string, unknown>;
+      // Use the file-scope DataRow alias (defined at the top of the module)
       const totalRows = data.length;
       const seen = new Set<string>();
       const unique: DataRow[] = [];
@@ -921,16 +921,20 @@ Requirements:
       // Build composite key: encode each field as [1, value] when present, [0] when absent.
       // This prevents JSON.stringify from colliding undefined (missing field) with explicit null
       // since JSON.stringify([undefined]) === "[null]" === JSON.stringify([null]).
-      const rowKey = (row: DataRow): string =>
-        JSON.stringify(keys.map(k => (k in row ? [1, row[k]] : [0])));
-
-      const rows = data as (DataRow | unknown)[];
+      // Throws with context if a key field contains a non-serialisable value (BigInt, circular ref).
+      const rowKey = (row: DataRow): string => {
+        try {
+          return JSON.stringify(keys.map(k => (k in row ? [1, row[k]] : [0])));
+        } catch (e) {
+          throw new Error(`deduplicate: key field contains a non-serialisable value (e.g. BigInt, circular reference): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      };
 
       if (keep === "last") {
         // Reverse pass: collect in reverse order, then reverse to restore original order.
         // Using push+reverse is O(n) total; unshift would be O(n^2) due to shifting on each call.
-        for (let i = rows.length - 1; i >= 0; i--) {
-          const row = rows[i];
+        for (let i = (data as unknown[]).length - 1; i >= 0; i--) {
+          const row = (data as unknown[])[i];
           if (row === null || typeof row !== "object" || Array.isArray(row)) { skippedRows++; continue; }
           const r = row as DataRow;
           const anyMissing = keys.some(k => !(k in r));
@@ -944,7 +948,7 @@ Requirements:
         unique.reverse();
       } else {
         // Forward pass (keep === "first")
-        for (const row of rows) {
+        for (const row of data as unknown[]) {
           if (row === null || typeof row !== "object" || Array.isArray(row)) { skippedRows++; continue; }
           const r = row as DataRow;
           const anyMissing = keys.some(k => !(k in r));
