@@ -187,7 +187,9 @@ export function runMRP(input: MRPInput): MRPRunResult {
           const deduct = Math.min(remaining, bucket.netRequirement);
           bucket.netRequirement -= deduct;
           bucket.plannedOrderReceipt = Math.max(0, bucket.plannedOrderReceipt - deduct);
-          bucket.plannedOrderRelease = Math.max(0, bucket.plannedOrderRelease - deduct);
+          // plannedOrderRelease is a bucket INDEX (set by gross-to-net), not a quantity —
+          // do NOT subtract deduct from it or the release-bucket lookup at generatePlannedOrders
+          // will silently use the wrong (corrupted) bucket index.
           remaining -= deduct;
         }
       }

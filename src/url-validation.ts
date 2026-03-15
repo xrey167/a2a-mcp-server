@@ -27,7 +27,9 @@ export function isAllowedUrl(url: string): boolean {
     for (const allowed of allowedRemoteUrls) {
       try {
         if (new URL(allowed).origin === origin) return true;
-      } catch {}
+      } catch (e) {
+        process.stderr.write(`[url-validation] malformed allowed URL in config "${allowed}": ${e}\n`);
+      }
     }
 
     return false;

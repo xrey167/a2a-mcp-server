@@ -159,7 +159,7 @@ const fetchUrl: Skill = {
   },
   run: async (raw) => {
     const { url, format } = validate(FetchUrlSchema, raw);
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
     return format === "json"
       ? JSON.stringify(await res.json(), null, 2)
@@ -187,6 +187,7 @@ const callApi: Skill = {
       method,
       headers: { "Content-Type": "application/json", ...headers },
       body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(30_000),
     });
     return `HTTP ${res.status}\n${await res.text()}`;
   },

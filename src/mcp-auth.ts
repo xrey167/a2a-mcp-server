@@ -88,6 +88,7 @@ async function refreshOAuth2(serverName: string, auth: OAuth2Auth): Promise<OAut
       client_id: auth.clientId,
       client_secret: auth.clientSecret,
     }),
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {

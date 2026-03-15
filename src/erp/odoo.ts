@@ -48,6 +48,7 @@ export class OdooConnector implements ERPConnector {
         params: { service, method, args },
       }),
       redirect: "manual",
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (res.status >= 300 && res.status < 400) {
