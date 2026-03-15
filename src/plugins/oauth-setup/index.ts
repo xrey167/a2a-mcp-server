@@ -73,7 +73,10 @@ const PROVIDERS: Record<string, ProviderPreset> = {
 
 function readAuthFile(): Record<string, unknown> {
   if (!existsSync(AUTH_FILE)) return {};
-  try { return JSON.parse(readFileSync(AUTH_FILE, "utf-8")); } catch { return {}; }
+  try { return JSON.parse(readFileSync(AUTH_FILE, "utf-8")); } catch (e: any) {
+    if (e?.code !== "ENOENT") process.stderr.write(`[oauth-setup] failed to load auth file: ${e}\n`);
+    return {};
+  }
 }
 
 function writeAuthFile(data: Record<string, unknown>) {
@@ -152,6 +155,7 @@ async function exchangeCode(
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
     body: body.toString(),
+    signal: AbortSignal.timeout(15_000),
   });
 
   const data = await res.json() as any;
@@ -176,6 +180,7 @@ async function refreshToken(
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
     body: body.toString(),
+    signal: AbortSignal.timeout(15_000),
   });
 
   const data = await res.json() as any;

@@ -10,6 +10,31 @@ const WebSchemas = {
   call_api: z.object({ url: z.string().url(), method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).optional().default("GET"), headers: z.record(z.string()).optional().default({}), body: z.unknown().optional() }).passthrough(),
 };
 
+/** Block RFC-1918, loopback, APIPA, and cloud-metadata hostnames at the hostname level. */
+function isPrivateHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return (
+    h === "localhost" ||
+    /^127\./.test(h) ||
+    /^10\./.test(h) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+    /^192\.168\./.test(h) ||
+    /^169\.254\./.test(h) ||  // APIPA + AWS/GCP metadata
+    h === "::1" ||
+    /^fd[0-9a-f]{2}:/i.test(h) || // ULA IPv6
+    /^fe80:/i.test(h)              // link-local IPv6
+  );
+}
+
+function blockPrivateUrl(url: string): string | null {
+  try {
+    const { hostname } = new URL(url);
+    return isPrivateHostname(hostname) ? `Blocked: private/internal URLs are not allowed (${hostname})` : null;
+  } catch {
+    return "Blocked: invalid URL";
+  }
+}
+
 const PORT = 8082;
 const NAME = "web-agent";
 
@@ -80,6 +105,8 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
   switch (skillId) {
     case "fetch_url": {
       const { url, format } = WebSchemas.fetch_url.parse({ url: args.url ?? text, ...args });
+      const block = blockPrivateUrl(url);
+      if (block) return block;
       const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
       // Early reject if content-length header is set and exceeds limit
@@ -94,6 +121,8 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
     case "call_api": {
       const { url, method, headers, body } = WebSchemas.call_api.parse({ url: args.url ?? text, ...args });
+      const blockMsg = blockPrivateUrl(url);
+      if (blockMsg) return blockMsg;
       const res = await fetch(url, {
         method,
         headers: { "Content-Type": "application/json", ...headers },

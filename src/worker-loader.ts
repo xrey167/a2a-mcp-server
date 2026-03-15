@@ -2,7 +2,7 @@
 // Discovers and loads user-space workers from ~/.a2a-mcp/workers/
 // Each subdirectory should contain an index.ts with a Fastify server exporting AGENT_CARD.
 
-import { existsSync, readdirSync, statSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, statSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -37,12 +37,11 @@ export function discoverUserWorkers(): UserWorker[] {
     // Check for worker.json config
     let port = USER_PORT_BASE + i;
     const configPath = join(dir, "worker.json");
-    if (existsSync(configPath)) {
-      try {
-        const config = JSON.parse(require("fs").readFileSync(configPath, "utf-8"));
-        if (config.port) port = config.port;
-      } catch {}
-    }
+    try {
+      const config = JSON.parse(readFileSync(configPath, "utf-8"));
+      const p = config.port;
+      if (Number.isInteger(p) && p >= 1025 && p <= 65535 && (p < 8081 || p > 8094)) port = p;
+    } catch (e: any) { if (e?.code !== "ENOENT") process.stderr.write(`[worker-loader] failed to parse ${configPath}: ${e}\n`); }
     return { name, path: join(dir, "index.ts"), port };
   });
 }

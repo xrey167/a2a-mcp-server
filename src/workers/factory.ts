@@ -579,6 +579,7 @@ ${issuesList}`,
         // Parse fixed files and write them
         const fileBlocks = fixed.split(/\/\/ === (.+?) ===/);
         for (let j = 1; j < fileBlocks.length; j += 2) {
+          if (!fileBlocks[j]) continue;
           const filePath = fileBlocks[j].trim();
           const fileContent = fileBlocks[j + 1]?.trim();
           if (filePath && fileContent) {
@@ -674,6 +675,7 @@ For each file, use this exact format:
   // Parse file blocks
   const blocks = raw.split(/\/\/ === (.+?) ===/);
   for (let i = 1; i < blocks.length; i += 2) {
+    if (!blocks[i]) continue;
     const relPath = blocks[i].trim();
     const content = blocks[i + 1]?.trim();
     if (relPath && content) {

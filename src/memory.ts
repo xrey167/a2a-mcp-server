@@ -32,19 +32,21 @@ END`);
 // Rebuild FTS index from existing data (idempotent, fast for small tables)
 try {
   db.run(`INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`);
-} catch {}
+} catch (e: unknown) {
+  const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+  process.stderr.write(`[memory] FTS5 rebuild failed, search may be degraded: ${msg}\n`);
+}
 
 /** Sanitize a path component to prevent directory traversal. */
 export function safeName(name: string): string {
   return name.replace(/[\/\\\.]+/g, "_").replace(/^_+|_+$/g, "") || "unnamed";
 }
 
-function noteFile(agent: string, key: string) {
+/** Returns validated path without creating directories. */
+function noteFilePath(agent: string, key: string) {
   const safeAgent = safeName(agent);
   const safeKey = safeName(key);
-  const dir = join(MEMORY_DIR, safeAgent);
-  mkdirSync(dir, { recursive: true });
-  const filePath = join(dir, `${safeKey}.md`);
+  const filePath = join(MEMORY_DIR, safeAgent, `${safeKey}.md`);
   // Ensure the resolved path is still within MEMORY_DIR
   const resolvedFile = resolve(filePath);
   const resolvedBase = resolve(MEMORY_DIR);
@@ -54,10 +56,32 @@ function noteFile(agent: string, key: string) {
   return filePath;
 }
 
+/** Returns validated path, ensuring parent directory exists (for write operations). */
+function noteFile(agent: string, key: string) {
+  const filePath = noteFilePath(agent, key);
+  mkdirSync(join(MEMORY_DIR, safeName(agent)), { recursive: true });
+  return filePath;
+}
+
+function safeUnlink(filePath: string) {
+  try {
+    unlinkSync(filePath);
+  } catch (e: unknown) {
+    if (e && typeof e === "object" && "code" in e && e.code === "ENOENT") return;
+    const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    process.stderr.write(`[memory] Obsidian sync failed: ${msg}\n`);
+  }
+}
+
 export const memory = {
   set(agent: string, key: string, value: string) {
     db.run(`INSERT OR REPLACE INTO memory VALUES (?,?,?,unixepoch())`, [agent, key, value]);
-    try { writeFileSync(noteFile(agent, key), `# ${key}\n\n${value}\n`); } catch {}
+    try {
+      writeFileSync(noteFile(agent, key), `# ${key}\n\n${value}\n`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+      process.stderr.write(`[memory] Obsidian sync failed: ${msg}\n`);
+    }
   },
   get(agent: string, key: string): string | null {
     return (db.query<{value:string},[string,string]>(
@@ -72,7 +96,7 @@ export const memory = {
   },
   forget(agent: string, key: string) {
     db.run(`DELETE FROM memory WHERE agent=? AND key=?`, [agent, key]);
-    try { unlinkSync(noteFile(agent, key)); } catch {}
+    safeUnlink(noteFilePath(agent, key));
   },
 
   /** Full-text search across all memories. Optionally filter by agent. */
@@ -117,7 +141,7 @@ export const memory = {
     db.run(`DELETE FROM memory WHERE ts < ?`, [cutoff]);
     // Clean up Obsidian files
     for (const r of rows) {
-      try { unlinkSync(noteFile(r.agent, r.key)); } catch {}
+      safeUnlink(noteFilePath(r.agent, r.key));
     }
     return rows.length;
   },
