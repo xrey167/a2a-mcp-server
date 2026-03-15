@@ -101,13 +101,13 @@ export const sandboxStore = {
       }
     }
 
-    // Build vocabulary for fuzzy correction — delete stale terms first to prevent unbounded growth
-    db.run("DELETE FROM sandbox_vocabulary WHERE session = ? AND name = ?", [session, name]);
+    // Build vocabulary for fuzzy correction — delete stale terms and insert new ones atomically
     const vocab = buildVocabulary(value);
     const insertVocab = db.prepare(
       `INSERT OR REPLACE INTO sandbox_vocabulary (session, name, term, freq) VALUES (?,?,?,1)`
     );
     const txn = db.transaction(() => {
+      db.run("DELETE FROM sandbox_vocabulary WHERE session = ? AND name = ?", [session, name]);
       for (const term of vocab) {
         insertVocab.run(session, name, term);
       }
