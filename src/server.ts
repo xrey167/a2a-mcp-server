@@ -303,6 +303,7 @@ function spawnWorker(w: typeof WORKERS[number]) {
     getBreaker(w.name).recordFailure();
     const delayMs = Math.min(1_000 * (2 ** (n - 1)), 60_000);
     process.stderr.write(`[orchestrator] ${w.name} exited (code ${exitCode}, failure #${n}) — respawning in ${delayMs}ms\n`);
+    clearTimeout(respawnTimers.get(w.name));
     const timer = setTimeout(() => spawnWorker(w), delayMs);
     respawnTimers.set(w.name, timer);
   }).catch((err) => {

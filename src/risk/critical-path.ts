@@ -50,8 +50,9 @@ export function computeCriticalPath(
     }
   }
 
-  // Total project duration
-  const totalDurationDays = Math.max(...nodes.map((n) => n.earliestFinish ?? 0));
+  // Total project duration — guard against Math.max(...[]) = -Infinity if nodes is ever empty
+  const finishes = nodes.map((n) => n.earliestFinish ?? 0);
+  const totalDurationDays = finishes.length > 0 ? Math.max(...finishes) : 0;
 
   // Backward pass: compute latest start/finish
   for (const nodeId of sorted.reverse()) {
