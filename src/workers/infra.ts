@@ -847,7 +847,7 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
         const normalizedFilter = new Set(filter.types.map(t => normalizeNodeType(t)));
         nodes = nodes.filter(n => normalizedFilter.has(normalizeNodeType(n.type)));
         const nodeIds = new Set(nodes.map(n => n.id));
-        edges = edges.filter(e => nodeIds.has(e.from) || nodeIds.has(e.to));
+        edges = edges.filter(e => nodeIds.has(e.from) && nodeIds.has(e.to));
       }
 
       if (filter.region) {
@@ -860,7 +860,7 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
           return country.includes(regionLower) || landing.includes(regionLower) || name.includes(regionLower);
         });
         const nodeIds = new Set(nodes.map(n => n.id));
-        edges = edges.filter(e => nodeIds.has(e.from) || nodeIds.has(e.to));
+        edges = edges.filter(e => nodeIds.has(e.from) && nodeIds.has(e.to));
       }
 
       return safeStringify({
