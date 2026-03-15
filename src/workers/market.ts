@@ -20,6 +20,8 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round, validateUrlNotInternal } from "../worker-utils.js";
+import { callPeer } from "../peer.js";
+import { sanitizeUserInput } from "../prompt-sanitizer.js";
 
 const PORT = 8090;
 const NAME = "market-agent";
@@ -95,6 +97,13 @@ const MarketSchemas = {
       trend: z.number().optional().default(0.15),
     }).optional().default({}),
   }),
+
+  market_brief: z.looseObject({
+    /** Ticker symbols to fetch live quotes for (e.g. ["AAPL", "BTC-USD", "GC=F"]) */
+    symbols: z.array(z.string().min(1).max(20)).min(1).max(10),
+    /** Optional focus to steer the AI brief (e.g. "tech sector rotation", "commodity rally") */
+    focus: z.string().max(300).optional(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -113,6 +122,7 @@ const AGENT_CARD = {
     { id: "detect_anomalies", name: "Detect Anomalies", description: "Detect price and volume anomalies using z-score against rolling baseline" },
     { id: "correlation", name: "Correlation Matrix", description: "Compute Pearson correlation matrix between multiple price series" },
     { id: "market_composite", name: "Market Composite", description: "Compute a composite 0-100 market score combining RSI, MACD, volume anomaly, momentum, volatility, and trend" },
+    { id: "market_brief", name: "Market Brief", description: "Fetch live quotes for a list of symbols and return an AI-written market intelligence brief. Covers price action, notable movers, and a short outlook." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -653,6 +663,82 @@ function screenAssets(
 
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
+// ── AI Market Brief ──────────────────────────────────────────────
+
+async function generateMarketBrief(symbols: string[], focus?: string): Promise<string> {
+  // Fetch live quotes in parallel — tolerate individual symbol failures
+  const results = await Promise.allSettled(
+    symbols.map(sym => {
+      if (process.env.ALPHAVANTAGE_API_KEY) return fetchAlphaVantageQuote(sym);
+      return fetchYahooQuote(sym);
+    })
+  );
+
+  const quotes: Record<string, unknown>[] = [];
+  const quoteErrors: string[] = [];
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") {
+      quotes.push(r.value);
+    } else {
+      const msg = `${symbols[i]}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`;
+      process.stderr.write(`[${NAME}] market_brief: quote failed — ${msg}\n`);
+      quoteErrors.push(msg);
+    }
+  });
+
+  if (quotes.length === 0) {
+    throw new Error("market_brief: no quotes available — all symbol fetches failed");
+  }
+
+  // Build prompt context from quote data
+  const quoteLines = quotes
+    .map(q => {
+      const sym = sanitizeUserInput(String(q.symbol ?? ""), "symbol");
+      const price = String(q.price ?? "N/A");
+      const change = String(q.changePercent ?? "N/A");
+      const currency = String(q.currency ?? "USD");
+      const sign = Number(q.changePercent ?? 0) >= 0 ? "+" : "";
+      return `${sym}: ${price} ${currency} (${sign}${change}%)`;
+    })
+    .join("\n");
+
+  // Find biggest mover
+  const sorted = [...quotes].sort((a, b) =>
+    Math.abs(Number(b.changePercent ?? 0)) - Math.abs(Number(a.changePercent ?? 0))
+  );
+  const topMover = sorted[0];
+  const topMoverLine = topMover
+    ? `Biggest mover: ${sanitizeUserInput(String(topMover.symbol ?? ""), "symbol")} at ${topMover.changePercent}%`
+    : "";
+
+  const focusLine = focus ? `\nAnalyst focus: ${sanitizeUserInput(focus, "focus")}` : "";
+
+  const prompt = `You are a financial analyst writing a concise market brief. Summarize the following market data in 3-4 paragraphs.
+
+Quotes (${new Date().toUTCString()}):
+${quoteLines}
+
+${topMoverLine}${focusLine}
+
+Cover: overall market tone, notable movers and their likely drivers, any divergences or patterns across asset classes, and one short outlook sentence. Be factual and specific. Do not fabricate data not present above.`;
+
+  let brief: string;
+  try {
+    brief = await callPeer("ask_claude", { prompt }, prompt, 60_000);
+  } catch (err) {
+    process.stderr.write(`[${NAME}] market_brief: callPeer ask_claude failed for symbols=[${symbols.join(",")}]: ${(err as Error).stack ?? err}\n`);
+    throw new Error("market_brief: AI synthesis failed", { cause: err });
+  }
+
+  return safeStringify({
+    symbols,
+    quotesRetrieved: quotes.length,
+    dataQuality: quoteErrors.length === symbols.length ? "all_quotes_failed" : quoteErrors.length > 0 ? "partial" : "ok",
+    quoteErrors: quoteErrors.length > 0 ? quoteErrors : undefined,
+    brief,
+  }, 2);
+}
+
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
   if (memResult !== null) return memResult;
@@ -880,8 +966,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }, 2);
     }
 
+    case "market_brief": {
+      const { symbols, focus } = MarketSchemas.market_brief.parse(args);
+      process.stderr.write(`[${NAME}] market_brief: fetching quotes for [${symbols.join(", ")}]\n`);
+      return generateMarketBrief(symbols, focus);
+    }
+
     default:
-      return `Unknown skill: ${skillId}`;
+      throw new Error(`Unknown skill: ${skillId}`);
   }
 }
 
