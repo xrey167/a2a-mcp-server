@@ -57,6 +57,7 @@ import {
 
 const PORT = 8087;
 const NAME = "factory-agent";
+const MAX_PROJECT_NAME_LENGTH = 64;
 
 // Worker URLs for direct calls — avoids routing through orchestrator.
 // Configurable via env vars (set by orchestrator on spawn) with sensible defaults.
@@ -512,7 +513,7 @@ async function createProject(
   const projectName = (spec.name as string ?? "my-project")
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
-    .slice(0, 64)
+    .slice(0, MAX_PROJECT_NAME_LENGTH)
     .replace(/^-+|-+$/g, "") || "my-project";
   const targetDir = outputDir ?? `/tmp/factory/${projectName}-${Date.now()}`;
 
