@@ -45,7 +45,7 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 | `src/workers/knowledge.ts` | 8085 | create_note, read_note, update_note, delete_note, search_notes, list_notes, summarize_notes |
 | `src/workers/design.ts` | 8086 | enhance_ui_prompt, suggest_screens, design_critique (Gemini-powered) |
 | `src/workers/factory.ts` | 8087 | normalize_intent, create_project, quality_gate, list_pipelines, list_templates (AppFactory-style project gen) |
-| `src/workers/data.ts` | 8088 | parse_csv, parse_json, transform_data, analyze_data, pivot_table, fetch_dataset |
+| `src/workers/data.ts` | 8088 | parse_csv, parse_json, transform_data, analyze_data, pivot_table, fetch_dataset, export_csv |
 | `src/workers/news.ts` | 8089 | fetch_rss, aggregate_feeds, classify_news, cluster_news, detect_signals, regulatory_scan |
 | `src/workers/market.ts` | 8090 | fetch_quote, price_history, technical_analysis, screen_market, detect_anomalies, correlation, market_composite |
 | `src/workers/signal.ts` | 8091 | aggregate_signals, classify_threat, detect_convergence, baseline_compare, instability_index, correlate_signals, fetch_cyber_c2, fetch_malicious_urls, fetch_outages |

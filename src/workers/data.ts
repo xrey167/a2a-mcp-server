@@ -65,6 +65,17 @@ const DataSchemas = {
     aggregation: z.enum(["sum", "avg", "count", "min", "max"]).optional().default("sum"),
   }),
 
+  export_csv: z.looseObject({
+    /** Array of objects to serialise as CSV */
+    data: z.unknown(),
+    /** Column delimiter (default ",") */
+    delimiter: z.string().optional().default(","),
+    /** Include header row (default true) */
+    includeHeader: z.boolean().optional().default(true),
+    /** Explicit column order; omitted columns are excluded (default: all keys from first row) */
+    fields: z.array(z.string()).optional(),
+  }),
+
   fetch_dataset: z.looseObject({
     /** URL of a CSV or JSON resource to fetch */
     url: z.string().url(),
@@ -96,6 +107,7 @@ const AGENT_CARD = {
     { id: "analyze_data", name: "Analyze Data", description: "Compute statistical summaries: count, mean, median, stddev, min, max, percentiles, and value distributions" },
     { id: "pivot_table", name: "Pivot Table", description: "Create pivot table summaries from flat data with configurable row/column/value fields and aggregation" },
     { id: "fetch_dataset", name: "Fetch Dataset", description: "Fetch a CSV or JSON dataset from a URL and parse it into structured records. Auto-detects format from Content-Type. Supports jsonPath drill-down for nested JSON APIs." },
+    { id: "export_csv", name: "Export CSV", description: "Serialise an array of objects to CSV text. Optional fields param controls column selection and order. Completes the ETL loop: fetch_dataset/parse_csv → transform_data → export_csv." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -626,6 +638,27 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { url, format, delimiter, hasHeader, limit, jsonPath } = DataSchemas.fetch_dataset.parse(args);
       const result = await fetchDataset(url, format, delimiter, hasHeader, limit, jsonPath);
       return safeStringify(result, 2);
+    }
+
+    case "export_csv": {
+      const { data, delimiter, includeHeader, fields } = DataSchemas.export_csv.parse(args);
+      if (!Array.isArray(data)) return "Error: data must be an array of objects";
+      if (data.length === 0) return "";
+      const cols = fields ?? Object.keys(data[0] as Record<string, unknown>);
+      if (cols.length === 0) return "Error: no columns to export";
+      // Escape a single cell value: wrap in quotes if it contains delimiter, quote, or newline
+      const escapeCell = (v: unknown): string => {
+        const s = v === null || v === undefined ? "" : String(v);
+        return s.includes(delimiter) || s.includes('"') || s.includes("\n")
+          ? `"${s.replace(/"/g, '""')}`+ `"`
+          : s;
+      };
+      const rows: string[] = [];
+      if (includeHeader) rows.push(cols.map(escapeCell).join(delimiter));
+      for (const row of data as Record<string, unknown>[]) {
+        rows.push(cols.map(c => escapeCell(row[c])).join(delimiter));
+      }
+      return rows.join("\n");
     }
 
     default:
