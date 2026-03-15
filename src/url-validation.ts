@@ -4,7 +4,7 @@
 let allowedPorts = new Set<number>();
 let allowedRemoteOrigins = new Set<string>();
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "[::ffff:7f00:1]"]);
 
 /** Configure the allowed ports and remote URLs (called during server startup). */
 export function configureAllowedUrls(ports: number[], remoteUrls: string[]): void {
