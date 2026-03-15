@@ -21,7 +21,7 @@ describe("A2A helpers", () => {
       capturedBody = JSON.parse(opts.body);
       return new Response(JSON.stringify({
         result: {
-          artifacts: [{ parts: [{ text: "ok" }] }],
+          artifacts: [{ parts: [{ kind: "text", text: "ok" }] }],
         },
       }), { headers: { "Content-Type": "application/json" } });
     }) as any;
