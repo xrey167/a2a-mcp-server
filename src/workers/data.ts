@@ -908,7 +908,11 @@ Requirements:
 
       const MAX_ROWS = 200_000;
       if (data.length > MAX_ROWS) {
-        throw new Error(`deduplicate: dataset has ${data.length} rows — exceeds ${MAX_ROWS} row limit`);
+        throw new Error(
+          `deduplicate: raw array has ${data.length} rows — exceeds ${MAX_ROWS} row limit. ` +
+          `If the array contains non-object entries (nulls, primitives), filter them first. ` +
+          `For large datasets, split into batches of ≤${MAX_ROWS} rows and merge the unique sets.`
+        );
       }
 
       // Use the file-scope DataRow alias (defined at the top of the module)
@@ -921,8 +925,25 @@ Requirements:
       // Build composite key: encode each field as [1, value] when present, [0] when absent.
       // This prevents JSON.stringify from colliding undefined (missing field) with explicit null
       // since JSON.stringify([undefined]) === "[null]" === JSON.stringify([null]).
+      // Validates that key fields are scalar on the first row processed — object/array values
+      // produce order-dependent keys and are rejected with a descriptive error.
       // Throws with context if a key field contains a non-serialisable value (BigInt, circular ref).
+      let firstRowChecked = false;
       const rowKey = (row: DataRow): string => {
+        if (!firstRowChecked) {
+          firstRowChecked = true;
+          for (const k of keys) {
+            if (k in row) {
+              const v = row[k];
+              if (v !== null && typeof v === "object") {
+                throw new Error(
+                  `deduplicate: key field "${k}" contains a non-scalar value (${Array.isArray(v) ? "array" : "object"}) — ` +
+                  `key fields must be scalar (string, number, boolean, null) for reliable deduplication`
+                );
+              }
+            }
+          }
+        }
         try {
           return JSON.stringify(keys.map(k => (k in row ? [1, row[k]] : [0])));
         } catch (e) {
@@ -937,11 +958,11 @@ Requirements:
           const row = (data as unknown[])[i];
           if (row === null || typeof row !== "object" || Array.isArray(row)) { skippedRows++; continue; }
           const r = row as DataRow;
-          const anyMissing = keys.some(k => !(k in r));
-          if (anyMissing) missingKeyRows++;
           const k = rowKey(r);
           if (!seen.has(k)) {
             seen.add(k);
+            // Count missing-key rows only for kept rows — duplicates with missing keys are not counted
+            if (keys.some(key => !(key in r))) missingKeyRows++;
             unique.push(r);
           }
         }
@@ -951,11 +972,11 @@ Requirements:
         for (const row of data as unknown[]) {
           if (row === null || typeof row !== "object" || Array.isArray(row)) { skippedRows++; continue; }
           const r = row as DataRow;
-          const anyMissing = keys.some(k => !(k in r));
-          if (anyMissing) missingKeyRows++;
           const k = rowKey(r);
           if (!seen.has(k)) {
             seen.add(k);
+            // Count missing-key rows only for kept rows — duplicates with missing keys are not counted
+            if (keys.some(key => !(key in r))) missingKeyRows++;
             unique.push(r);
           }
         }
