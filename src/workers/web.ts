@@ -294,6 +294,12 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         },
       });
       if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+      // Validate content-type — rate-limit or bot-detection responses may return non-HTML
+      const ct = res.headers.get("content-type") ?? "";
+      if (!ct.includes("text/html") && !ct.includes("application/xhtml")) {
+        process.stderr.write(`[${NAME}] search_web: unexpected content-type from DuckDuckGo: "${ct}" for query="${trimmedQuery}"\n`);
+        return `search_web: DuckDuckGo returned unexpected content type (${ct}); this may indicate rate limiting`;
+      }
       const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
       if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
       const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
@@ -315,21 +321,31 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         const snippet = snippetMatch && snippetMatch[1]
           ? decodeEntities(snippetMatch[1].replace(/<[^>]+>/g, "").trim())
           : "";
-        // DuckDuckGo wraps result URLs in a redirect; extract the real URL from uddg param
+        // DuckDuckGo wraps result URLs in a redirect; extract the real URL from uddg param.
+        // URLSearchParams.get() already percent-decodes values, so no decodeURIComponent needed.
         let url = rawUrl;
         try {
           const parsed = new URL(rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl);
           const uddg = parsed.searchParams.get("uddg");
-          if (uddg) url = decodeURIComponent(uddg);
-        } catch {
-          // keep rawUrl as-is
+          if (uddg) url = uddg; // already decoded by URLSearchParams
+        } catch (parseErr) {
+          process.stderr.write(`[${NAME}] search_web: URL parse failed for "${rawUrl.slice(0, 100)}", keeping raw href (${String(parseErr)})\n`);
         }
+        // Filter extracted URLs against SSRF blocklist — DDG results could include internal addresses
+        const resultSsrf = await blockPrivateUrl(url);
+        if (resultSsrf) continue;
         if (url && title) results.push({ title, url, snippet });
       }
 
       if (results.length === 0) {
-        process.stderr.write(`[${NAME}] search_web: no results parsed from DuckDuckGo HTML for query\n`);
-        return safeStringify({ query: trimmedQuery, results: [], resultCount: 0, note: "No results found or page structure changed" }, 2);
+        // Distinguish genuine empty results from a broken HTML parser (structure change / bot detection)
+        const likelyParserFailure = !html.includes("result__a");
+        if (likelyParserFailure) {
+          process.stderr.write(`[${NAME}] search_web: HTML parser appears broken — "result__a" not found in ${html.length}-byte response for query="${trimmedQuery}"; DuckDuckGo HTML structure may have changed\n`);
+          return safeStringify({ query: trimmedQuery, results: [], resultCount: 0, note: "HTML parser may be broken — DuckDuckGo page structure may have changed" }, 2);
+        }
+        process.stderr.write(`[${NAME}] search_web: no results from DuckDuckGo for query="${trimmedQuery}"\n`);
+        return safeStringify({ query: trimmedQuery, results: [], resultCount: 0, note: "No results found" }, 2);
       }
 
       return safeStringify({ query: trimmedQuery, results: results.slice(0, maxResults), resultCount: results.length }, 2);
@@ -367,7 +383,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   try {
     resultText = await handleSkill(sid, args ?? { url: text }, text);
   } catch (err) {
-    resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[${NAME}] unhandled error in skill "${sid}": ${msg}\n`);
+    resultText = `Error: ${msg}`;
   }
 
   return buildA2AResponse(data.id, taskId, resultText);
