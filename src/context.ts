@@ -140,10 +140,10 @@ function parseMarkdown(md: string): ProjectContext {
   }
 
   const notesMatch = md.match(/## Notes\s*\n+([\s\S]*?)(?=\n## |\n*$)/);
-  if (notesMatch) ctx.notes = notesMatch[1].trim().replace(/^\(none\)$/, "");
+  if (notesMatch) ctx.notes = notesMatch[1]!.trim().replace(/^\(none\)$/, "");
 
   const updatedMatch = md.match(/Last updated: ([^\n]+)/);
-  if (updatedMatch) ctx.updatedAt = updatedMatch[1].trim();
+  if (updatedMatch) ctx.updatedAt = updatedMatch[1]!.trim();
 
   return ctx;
 }

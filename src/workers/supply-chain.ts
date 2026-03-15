@@ -70,7 +70,7 @@ import { analyzeSMEDOpportunities } from "../mrp/smed-analysis.js";
 import { analyzeLineBalance } from "../mrp/line-balancing.js";
 import { generateAuditChecklist } from "../risk/supplier-audit.js";
 import { optimizeDualSourcing } from "../risk/interventions.js";
-import type { MRPRunResult, LotSizingPolicy, BucketSize, PlannedOrder, CapacityLoad } from "../mrp/types.js";
+import type { MRPRunResult, LotSizingPolicy, BucketSize, PlannedOrder } from "../mrp/types.js";
 
 const PORT = 8095;
 const NAME = "supply-chain-agent";
@@ -606,6 +606,7 @@ async function handleCriticalPath(args: Record<string, unknown>): Promise<string
   if (depth && depth !== 3) {
     for (let i = 0; i < targetOrders.length; i++) {
       const order = targetOrders[i];
+      if (!order) continue;
       try {
         const deepComponents = await erp.getBOMComponents(order.itemNo, depth);
         if (deepComponents.length > 0) {
