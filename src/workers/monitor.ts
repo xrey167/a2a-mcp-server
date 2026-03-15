@@ -1049,26 +1049,38 @@ async function generateMonitorBrief(
   days: number,
   focus?: string,
 ): Promise<string> {
+  // Detect ACLED credential absence early to avoid mislabelled response data
+  let effectiveSource = source;
+  if (source === "acled" && (!process.env.ACLED_API_KEY || !process.env.ACLED_EMAIL)) {
+    process.stderr.write(`[${NAME}] monitor_brief: ACLED credentials missing, using gdelt for region="${region}"\n`);
+    effectiveSource = "gdelt";
+  }
+
   let conflicts: Conflict[];
   try {
-    if (source === "acled") {
+    if (effectiveSource === "acled") {
       conflicts = await fetchAcledConflicts(region, undefined, days, 50);
     } else {
       conflicts = await fetchGdeltConflicts(region, undefined, days, 50);
     }
   } catch (err) {
-    process.stderr.write(`[${NAME}] monitor_brief: fetchConflicts (${source}) failed: ${err}\n`);
-    throw new Error(`monitor_brief: conflict fetch failed: ${err}`);
+    process.stderr.write(`[${NAME}] monitor_brief: fetchConflicts (${effectiveSource}) failed for region="${region}" days=${days}: ${err}\n`);
+    throw new Error(`monitor_brief: conflict fetch failed (${effectiveSource})`, { cause: err });
   }
 
   const scored = scoreConflicts(conflicts);
+
+  if (scored.length === 0) {
+    process.stderr.write(`[${NAME}] monitor_brief: ${effectiveSource} returned 0 conflicts for region="${region}" days=${days} — briefing will reflect empty dataset\n`);
+  }
+
   const escalating = scored.filter(c => c.escalationTrend === "escalating");
   const totalCasualties = scored.reduce((s, c) => s + c.casualties, 0);
   const totalDisplaced = scored.reduce((s, c) => s + c.displaced, 0);
 
   const topConflicts = scored
     .slice(0, 5)
-    .map(c => `${c.name} (${c.status}, intensity ${c.intensityScore}, trend: ${c.escalationTrend})`)
+    .map(c => `${sanitizeForPrompt(c.name, "conflict_name")} (${c.status}, intensity ${c.intensityScore}, trend: ${c.escalationTrend})`)
     .join("; ");
 
   const byStatus: Record<string, number> = {};
@@ -1079,7 +1091,7 @@ async function generateMonitorBrief(
 
   const dataContext = `Region: ${sanitizeForPrompt(region, "region")}
 Period: last ${days} days
-Source: ${source}${focusLine}
+Source: ${effectiveSource}${focusLine}
 
 Active conflicts: ${scored.length} total
 By status: ${statusSummary || "none"}
@@ -1101,13 +1113,14 @@ Cover: most significant active conflicts, escalation dynamics, humanitarian impa
     analysis = await callPeer("ask_claude", { prompt });
   } catch (err) {
     process.stderr.write(`[${NAME}] monitor_brief: callPeer ask_claude failed: ${err}\n`);
-    throw new Error(`monitor_brief: AI synthesis failed: ${err}`);
+    throw new Error("monitor_brief: AI synthesis failed", { cause: err });
   }
 
   return safeStringify({
     region,
     period: `last ${days} days`,
-    source,
+    source: effectiveSource,
+    dataQuality: scored.length === 0 ? "no_data" : "ok",
     totalConflicts: scored.length,
     escalatingConflicts: escalating.length,
     totalCasualties,
@@ -1244,7 +1257,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
 
     default:
-      return `Unknown skill: ${skillId}`;
+      throw new Error(`Unknown skill: ${skillId}`);
   }
 }
 
