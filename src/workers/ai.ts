@@ -12,8 +12,12 @@ const AiSchemas = {
   search_files: z.looseObject({ pattern: z.string().min(1), directory: z.string().optional().default(".") }),
   query_sqlite: z.looseObject({ database: z.string().min(1), sql: z.string().min(1) }),
 };
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runClaudeCLI } from "../claude-cli.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = dirname(__dirname); // src/ → project root
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
 import { sanitizePath } from "../path-utils.js";
@@ -98,7 +102,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
     case "search_files": {
       const { pattern, directory } = AiSchemas.search_files.parse({ pattern: args.pattern ?? text, ...args });
-      const safeBase = process.cwd();
+      const safeBase = PROJECT_ROOT;
       const resolvedDir = resolve(safeBase, directory);
       if (resolvedDir !== safeBase && !resolvedDir.startsWith(safeBase + "/")) {
         return "Error: directory traversal outside working directory is not allowed";
