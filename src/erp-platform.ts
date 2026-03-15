@@ -1635,55 +1635,24 @@ db.run(`CREATE TABLE IF NOT EXISTS customer360_health_history (
 )`);
 db.run("CREATE INDEX IF NOT EXISTS idx_c360_health_history_scope ON customer360_health_history(workspace_id, customer_external_id, created_at DESC)");
 
-function ensureColumn(table: string, column: string, alterSql: string): void {
+function ensureColumn(table: string, column: string, columnDef: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) throw new Error(`Invalid table name: ${table}`);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(column)) throw new Error(`Invalid column name: ${column}`);
   const cols = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
   if (!cols.some((c) => c.name === column)) {
-    db.run(alterSql);
+    db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${columnDef}`);
   }
 }
 
-ensureColumn("workflow_sla_incidents", "resolved_at", "ALTER TABLE workflow_sla_incidents ADD COLUMN resolved_at TEXT");
-ensureColumn(
-  "quote_communication_events",
-  "estimated_deal_probability_pct",
-  "ALTER TABLE quote_communication_events ADD COLUMN estimated_deal_probability_pct REAL",
-);
-ensureColumn(
-  "quote_communication_events",
-  "personality_type",
-  "ALTER TABLE quote_communication_events ADD COLUMN personality_type TEXT",
-);
-ensureColumn(
-  "quote_communication_events",
-  "personality_confidence",
-  "ALTER TABLE quote_communication_events ADD COLUMN personality_confidence REAL",
-);
-ensureColumn(
-  "quote_followup_actions",
-  "writeback_run_id",
-  "ALTER TABLE quote_followup_actions ADD COLUMN writeback_run_id TEXT",
-);
-ensureColumn(
-  "quote_followup_actions",
-  "writeback_connector",
-  "ALTER TABLE quote_followup_actions ADD COLUMN writeback_connector TEXT",
-);
-ensureColumn(
-  "quote_followup_actions",
-  "writeback_status",
-  "ALTER TABLE quote_followup_actions ADD COLUMN writeback_status TEXT",
-);
-ensureColumn(
-  "quote_followup_actions",
-  "writeback_synced_at",
-  "ALTER TABLE quote_followup_actions ADD COLUMN writeback_synced_at TEXT",
-);
-ensureColumn(
-  "quote_followup_actions",
-  "writeback_error",
-  "ALTER TABLE quote_followup_actions ADD COLUMN writeback_error TEXT",
-);
+ensureColumn("workflow_sla_incidents", "resolved_at", "TEXT");
+ensureColumn("quote_communication_events", "estimated_deal_probability_pct", "REAL");
+ensureColumn("quote_communication_events", "personality_type", "TEXT");
+ensureColumn("quote_communication_events", "personality_confidence", "REAL");
+ensureColumn("quote_followup_actions", "writeback_run_id", "TEXT");
+ensureColumn("quote_followup_actions", "writeback_connector", "TEXT");
+ensureColumn("quote_followup_actions", "writeback_status", "TEXT");
+ensureColumn("quote_followup_actions", "writeback_synced_at", "TEXT");
+ensureColumn("quote_followup_actions", "writeback_error", "TEXT");
 
 function nowIso(): string {
   return new Date().toISOString();
