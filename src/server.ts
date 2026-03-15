@@ -494,7 +494,7 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
         skillId: params.skillId ?? "unknown",
         workerName,
         command: (params.args as Record<string, unknown>)?.command as string | undefined,
-        exitCode: typeof res === "string" && res.startsWith("Exit ") ? parseInt((res.split(":")[0] ?? "").replace("Exit ", ""), 10) : undefined,
+        exitCode: (() => { const m = typeof res === "string" ? res.match(/^Exit (\d+)/) : null; return m ? parseInt(m[1]!, 10) : undefined; })(),
       };
       const filterResult = applyFilters(res, filterCtx);
       if (filterResult.filtersApplied.length > 0) {
@@ -2683,6 +2683,12 @@ function isSearchThrottled(sessionId: string): { allowed: boolean; remaining: nu
   // Prune timestamps outside the window
   state.timestamps = state.timestamps.filter(t => now - t < SEARCH_WINDOW_MS);
 
+  // Clean up fully-inactive sessions to prevent unbounded Map growth
+  if (state.timestamps.length === 0 && state.blocked === 0) {
+    searchThrottle.delete(sessionId);
+    return { allowed: true, remaining: SEARCH_MAX_NORMAL };
+  }
+
   const total = state.timestamps.length;
   const max = total >= SEARCH_MAX_NORMAL ? SEARCH_MAX_BURST : SEARCH_MAX_NORMAL;
 
@@ -2692,8 +2698,6 @@ function isSearchThrottled(sessionId: string): { allowed: boolean; remaining: nu
   }
 
   state.timestamps.push(now);
-  // Clean up map entries that are no longer active (after push so we don't delete a live entry)
-  if (state.timestamps.length === 0 && state.blocked === 0) { searchThrottle.delete(sessionId); }
   return { allowed: true, remaining: max - total - 1 };
 }
 
