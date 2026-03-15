@@ -7,11 +7,22 @@ import { getPersona, watchPersonas } from "../persona-loader.js";
 import { sanitizePath } from "../path-utils.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { stripAnsi, applyCommandFilter } from "../output-filter.js";
+import { callPeer } from "../peer.js";
+import { sanitizeUserInput } from "../prompt-sanitizer.js";
+import { safeStringify } from "../safe-json.js";
 
 const ShellSchemas = {
   run_shell: z.looseObject({ command: z.string().min(1) }),
   read_file: z.looseObject({ path: z.string().min(1) }),
   write_file: z.looseObject({ path: z.string().min(1), content: z.string() }),
+  shell_brief: z.looseObject({
+    /** Shell command to execute and explain */
+    command: z.string().min(1),
+    /** Optional context to help the AI interpret the output (e.g. "this is a git diff") */
+    context: z.string().optional(),
+    /** Timeout for the shell command in ms (default 15000, max 60000) */
+    timeoutMs: z.number().int().positive().max(60_000).optional().default(15_000),
+  }),
 };
 
 const PORT = 8081;
@@ -27,12 +38,16 @@ const AGENT_CARD = {
     { id: "run_shell", name: "Run Shell", description: "Execute a shell command and return its output" },
     { id: "read_file", name: "Read File", description: "Read the contents of a file" },
     { id: "write_file", name: "Write File", description: "Write content to a file" },
+    { id: "shell_brief", name: "Shell Brief", description: "Execute a shell command and ask Claude to explain the output in plain language. Useful for interpreting git log, diff, ps, df, netstat, and other diagnostic commands." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
 };
 
-function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string {
+/** Word limit for shell output sent to AI prompt — avoids token budget overrun. */
+const SHELL_BRIEF_WORD_LIMIT = 6_000;
+
+async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
   if (memResult !== null) return memResult;
   switch (skillId) {
@@ -63,6 +78,65 @@ function handleSkill(skillId: string, args: Record<string, unknown>, text: strin
       const safePath = sanitizePath(path);
       writeFileSync(safePath, content, "utf-8");
       return `Written ${content.length} bytes to ${safePath}`;
+    }
+    case "shell_brief": {
+      const { command, context, timeoutMs } = ShellSchemas.shell_brief.parse({ command: args.command ?? text, ...args });
+      const result = spawnSync(command, { shell: true, timeout: timeoutMs, encoding: "utf-8" });
+      if (result.error) {
+        process.stderr.write(`[${NAME}] shell_brief: spawnSync failed for command: ${result.error.message}\n`);
+        return `shell_brief: command execution failed — ${result.error.message}`;
+      }
+
+      const rawOut = stripAnsi((result.stdout ?? "").trim());
+      const rawErr = stripAnsi((result.stderr ?? "").trim());
+      const combined = rawOut + (rawErr ? `\n[stderr]\n${rawErr}` : "");
+
+      if (combined.trim().length === 0) {
+        process.stderr.write(`[${NAME}] shell_brief: command produced no output (exit ${result.status})\n`);
+        return `shell_brief: command produced no output (exit ${result.status ?? 0})`;
+      }
+
+      // Truncate to word limit so AI prompt stays within token budget
+      const words = combined.split(/\s+/);
+      const truncated = words.length > SHELL_BRIEF_WORD_LIMIT;
+      const outputText = truncated
+        ? words.slice(0, SHELL_BRIEF_WORD_LIMIT).join(" ") + "\n... (output truncated)"
+        : combined;
+
+      const safeContext = context ? sanitizeUserInput(context, "context") : null;
+      const safeCommand = sanitizeUserInput(command, "command");
+
+      const prompt = `You are a systems engineer explaining shell command output to a developer.
+
+Command: ${safeCommand}
+Exit code: ${result.status ?? 0}
+${safeContext ? `Context: ${safeContext}\n` : ""}
+Output:
+${outputText}
+
+Explain what this output means in 2–5 plain-language sentences. Focus on:
+- What the command reported (status, counts, sizes, errors)
+- Any warnings, failures, or anomalies
+- What action (if any) a developer should take
+
+Be specific about numbers and file names. Do not speculate beyond what the output shows.`;
+
+      let brief: string;
+      try {
+        brief = await callPeer("ask_claude", { prompt }, prompt, 60_000);
+      } catch (err) {
+        const cause = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] shell_brief: callPeer ask_claude failed: ${err instanceof Error ? err.stack : cause}\n`);
+        return `shell_brief: AI explanation unavailable — ${cause}. Try again or use run_shell to view raw output.`;
+      }
+
+      return safeStringify({
+        command,
+        exitCode: result.status ?? 0,
+        outputLines: combined.split("\n").length,
+        dataQuality: truncated ? "partial" : "ok",
+        brief,
+      }, 2);
     }
     default:
       return `Unknown skill: ${skillId}`;
@@ -95,7 +169,7 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   const sid = skillId ?? "run_shell";
   let resultText: string;
   try {
-    resultText = handleSkill(sid, args ?? { command: text }, text);
+    resultText = await handleSkill(sid, args ?? { command: text }, text);
   } catch (err) {
     resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
   }
