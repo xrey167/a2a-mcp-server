@@ -180,7 +180,9 @@ export function transformPayload(
 }
 
 function getNestedValue(obj: unknown, path: string): unknown {
+  const MAX_PATH_DEPTH = 10;
   const parts = path.split(".");
+  if (parts.length > MAX_PATH_DEPTH) return undefined;
   let current = obj;
   for (const part of parts) {
     if (current === null || current === undefined) return undefined;

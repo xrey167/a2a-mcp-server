@@ -5,7 +5,7 @@
 The a2a-mcp-server is a **multi-protocol automation runtime** that unifies three communication paradigms:
 
 - **MCP (Model Context Protocol)** — stdio-based JSON-RPC for Claude Code integration
-- **A2A (Agent-to-Agent)** — HTTP/Fastify REST API on port 8080 for inter-agent orchestration
+- **A2A (Agent-to-Agent)** — JSON-RPC 2.0 over HTTP (Fastify) on port 8080 for inter-agent orchestration
 
 Built entirely on **Bun + TypeScript** with no build step, no Node.js dependency. The single entry point (`src/server.ts`) serves as both the MCP server and the A2A orchestrator, spawning a fleet of 15 specialized worker processes (ports 8081-8095) on startup.
 
@@ -118,7 +118,7 @@ At startup, `src/server.ts` performs the following sequence:
 Each worker is a **standalone Fastify HTTP server** with:
 
 - **Agent Card** at `/.well-known/agent.json` (OpenAPI-style skill definitions)
-- **Skill Handlers** at POST `/skills/:skillId`
+- **Skill Handlers** at `POST /` accepting JSON-RPC 2.0 `tasks/send` method
 - **Health Endpoint** at `/healthz`
 - **Memory Endpoints** (remember/recall) shared across all workers
 - **Circuit Breaker Status** (when unhealthy, orchestrator routes around it)
@@ -134,7 +134,7 @@ src/server.ts spawns via Bun.spawn()
   ↓
 Worker process starts Fastify on assigned port
   ↓
-Orchestrator discovers agent card (exponential backoff)
+Orchestrator discovers agent card (linear backoff)
   ↓
 Health polling begins (every 30s)
   ↓
@@ -557,20 +557,25 @@ const result = await sandbox_execute({
 **Prelude** (`src/sandbox-prelude.ts`) injected:
 
 ```typescript
-async function skill(skillId, params) {
-  return await fetch(`http://localhost:8080/delegate`, {
-    method: 'POST',
-    body: JSON.stringify({ skillId, skillParams: params })
-  }).then(r => r.json())
+// Skill calls use stdin/stdout JSON-line IPC — no HTTP:
+// stdout → {"rpc":"skill","id":"...","args":{...},"seq":N}
+// stdout → {"rpc":"search","varName":"results","query":"error rate","session":"sess-abc123","seq":2}
+// stdin  ← {"seq":N,"result":...} or {"seq":N,"error":"..."}
+
+async function skill(id: string, args: Record<string, unknown> = {}): Promise<any> {
+  const seq = ++__seq;
+  return new Promise((resolve, reject) => {
+    __pending.set(seq, { resolve, reject });
+    process.stdout.write(JSON.stringify({ rpc: "skill", id, args, seq }) + "\n");
+  });
 }
 
-function search(varName, query) {
-  // FTS5 search in ~/a2a-sandbox.db
-  return db.query(`
-    SELECT * FROM sandbox_results
-    WHERE var_name = ? AND content MATCH ?
-    LIMIT 100
-  `, [varName, query])
+async function search(varName: string, query: string): Promise<any[]> {
+  const seq = ++__seq;
+  return new Promise((resolve, reject) => {
+    __pending.set(seq, { resolve, reject });
+    process.stdout.write(JSON.stringify({ rpc: "search", varName, query, session: __sessionId, seq }) + "\n");
+  });
 }
 ```
 
@@ -1081,9 +1086,9 @@ On SIGTERM/SIGINT:
 
 **Trade-off:** 15+ worker processes = higher memory footprint (vs. single monolith).
 
-### 18.4 Exponential Backoff Discovery
+### 18.4 Linear Backoff Discovery
 
-**Decision:** Worker discovery retries with exponential backoff (100ms → 1.6s).
+**Decision:** Worker discovery retries with linear backoff (500ms × attempt: 500ms, 1000ms, 1500ms, 2000ms, 2500ms — 5 attempts max).
 
 **Rationale:**
 - Bun JIT compilation can take 1-2 seconds
@@ -1210,7 +1215,7 @@ a2a-mcp-server/
 │   ├── server.ts                # Main entry: MCP + A2A orchestrator
 │   ├── a2a.ts                   # sendTask(), discoverAgent(), fetchWithTimeout()
 │   ├── types.ts                 # A2A protocol types: Part, Message, Task, AgentCard
-│   ├── config.ts                # Zod-validated config loader (loadConfig, loadConfig)
+│   ├── config.ts                # Zod-validated config loader (loadConfig)
 │   ├── memory.ts                # Dual-write (SQLite + Obsidian)
 │   ├── skills.ts                # Built-in SKILL_MAP (fallback routing)
 │   ├── sandbox.ts               # Isolated Bun subprocess executor

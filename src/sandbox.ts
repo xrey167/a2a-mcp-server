@@ -131,8 +131,14 @@ async function runSubprocess(
       resolve(result);
     };
 
+    // Mutable ref so the timeout handler can cancel readers even though they
+    // are created after the timer is set up.
+    const pendingReaders: { stderr?: { cancel(): void }; stdout?: { cancel(): void } } = {};
+
     // Timeout handler
     const timer = setTimeout(() => {
+      pendingReaders.stderr?.cancel();
+      pendingReaders.stdout?.cancel();
       proc.kill();
       finish({ result: null, error: `Sandbox timed out after ${timeout}ms`, vars: [], indexed: [] });
     }, timeout);
@@ -140,6 +146,7 @@ async function runSubprocess(
     // Read stderr for debug
     const stderrChunks: string[] = [];
     const stderrReader = proc.stderr.getReader();
+    pendingReaders.stderr = stderrReader;
     (async () => {
       try {
         while (true) {
@@ -154,6 +161,7 @@ async function runSubprocess(
 
     // Read stdout line-by-line for IPC
     const stdoutReader = proc.stdout.getReader();
+    pendingReaders.stdout = stdoutReader;
     let buffer = "";
 
     async function processLines() {
@@ -253,7 +261,7 @@ async function runSubprocess(
       }
     }
 
-    processLines();
+    processLines().catch((e) => process.stderr.write(`[sandbox] IPC stream error: ${e}\n`));
 
     // Handle unexpected exit
     proc.exited.then((exitCode) => {
