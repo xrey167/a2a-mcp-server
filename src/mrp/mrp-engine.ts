@@ -343,7 +343,10 @@ function generatePlannedOrders(
       counter++;
       const dueBucket = horizon.buckets[bucket.bucketIndex];
       const releaseBucket = horizon.buckets[bucket.plannedOrderRelease] ?? horizon.buckets[0];
-      if (!dueBucket || !releaseBucket) continue;
+      if (!dueBucket || !releaseBucket) {
+        log(`skipping planned order PO-${String(counter).padStart(5, "0")} for item "${itemNo}": bucket index out of range (bucketIndex=${bucket.bucketIndex}, releaseIndex=${bucket.plannedOrderRelease}, horizonBuckets=${horizon.buckets.length})`);
+        continue;
+      }
 
       const orderType = meta?.replenishmentMethod === "production" || meta?.replenishmentMethod === "assembly"
         ? "production" as const
