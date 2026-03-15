@@ -269,7 +269,7 @@ ${safeText}`;
         return `Error: text input is ${rawText.length} characters — exceeds 20,000 character limit for sentiment analysis`;
       }
 
-      const safeText = sanitizeUserInput(rawText, "text_to_analyse");
+      const safeText = sanitizeUserInput(rawText, "text_to_analyse", 20_000);
       const domainLine = domain ? `\nDomain context: ${sanitizeUserInput(domain, "domain_hint", 200)}` : "";
 
       const sentenceSchema = granularity === "sentence"
