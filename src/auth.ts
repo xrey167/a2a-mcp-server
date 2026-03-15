@@ -95,8 +95,9 @@ function readStore(): AuthStore {
     if (authCacheSignature !== diskSignature) {
       try {
         authCache = JSON.parse(readFileSync(AUTH_FILE, "utf-8")) as AuthStore;
-      } catch (e) {
-        process.stderr.write(`[auth] failed to parse key store on reload, resetting: ${e}\n`);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+        process.stderr.write(`[auth] failed to parse key store on reload, resetting: ${msg}\n`);
         authCache = { keys: [] };
       }
       authCacheSignature = diskSignature;
@@ -112,8 +113,9 @@ function readStore(): AuthStore {
     authCache = JSON.parse(readFileSync(AUTH_FILE, "utf-8")) as AuthStore;
     authCacheSignature = diskSignature;
     return authCache;
-  } catch (e) {
-    process.stderr.write(`[auth] failed to read key store, resetting: ${e}\n`);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    process.stderr.write(`[auth] failed to read key store, resetting: ${msg}\n`);
     authCache = { keys: [] };
     authCacheSignature = diskSignature;
     return authCache;
