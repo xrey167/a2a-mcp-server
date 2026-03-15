@@ -404,6 +404,10 @@ components:
             contextId:
               type: string
               description: Session ID for conversation continuity
+            id:
+              type: string
+              description: Optional caller-assigned task ID (UUID recommended). If omitted, the server generates one.
+          required: [skillId]
       required: [jsonrpc, method, params]
 
     TasksGetRequest:

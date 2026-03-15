@@ -559,6 +559,7 @@ const result = await sandbox_execute({
 ```typescript
 // Skill calls use stdin/stdout JSON-line IPC — no HTTP:
 // stdout → {"rpc":"skill","id":"...","args":{...},"seq":N}
+// stdout → {"rpc":"search","varName":"results","query":"error rate","session":"sess-abc123","seq":2}
 // stdin  ← {"seq":N,"result":...} or {"seq":N,"error":"..."}
 
 async function skill(id: string, args: Record<string, unknown> = {}): Promise<any> {
@@ -573,7 +574,7 @@ async function search(varName: string, query: string): Promise<any[]> {
   const seq = ++__seq;
   return new Promise((resolve, reject) => {
     __pending.set(seq, { resolve, reject });
-    process.stdout.write(JSON.stringify({ rpc: "search", varName, query, seq }) + "\n");
+    process.stdout.write(JSON.stringify({ rpc: "search", varName, query, session: __sessionId, seq }) + "\n");
   });
 }
 ```
