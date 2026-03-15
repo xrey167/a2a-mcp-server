@@ -923,7 +923,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
               price,
               changePercent,
               currency,
-              rsi: latestRsi !== null ? round(latestRsi) : null,
+              rsi: latestRsi,  // computeRSI already rounds internally
               macdSignal: macdCross,
               dataPoints: closes.length,
               error: null as string | null,
