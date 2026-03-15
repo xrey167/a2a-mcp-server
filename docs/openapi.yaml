@@ -4,22 +4,46 @@ info:
   title: a2a-mcp-server
   version: 3.0.0
   description: |
-    A2A MCP Server — MCP + A2A orchestrator that spawns local worker agents and routes
-    skills between them. Two protocol surfaces are exposed:
+    A2A MCP Server — a Bun-only MCP server and A2A orchestrator that spawns up to 15 local
+    worker agents and routes skills between them. Two protocol surfaces are exposed:
 
     1. **MCP (stdio)** — consumed by Claude Code via `claude mcp add`. All tool calls use
-       JSON-RPC over stdin/stdout.
-    2. **A2A HTTP (port 8080)** — JSON-RPC 2.0 over HTTP. Workers expose the same protocol
-       on their own ports (8081–8095).
+       JSON-RPC over stdin/stdout. The ~80 MCP tools are documented in this spec as
+       virtual paths under `/mcp/tools/` for discoverability.
+    2. **A2A HTTP (port 8080)** — JSON-RPC 2.0 over HTTP. Workers expose the same
+       protocol on their own ports (8081–8095).
 
     ## Authentication
 
-    **Remote callers (non-loopback):** Send `Authorization: Bearer <A2A_API_KEY>` or a
-    key generated with `createApiKey` (prefix `a2a_k_`).
+    **Remote callers (non-loopback):** Send `Authorization: Bearer <token>` where the
+    token is either:
+    - The `A2A_API_KEY` environment variable value (server-level access)
+    - An `a2a_k_...` key created via the `manage_api_keys` MCP tool (RBAC-gated)
 
-    **Loopback:** Always trusted; no header required.
+    **Loopback (127.0.0.1 / ::1):** Always trusted — no header required.
 
-    **RBAC roles:** `admin` (all), `operator` (most), `viewer` (read-only).
+    **RBAC roles:** `admin` (all skills), `operator` (delegation, sync, most tools),
+    `viewer` (read-only metrics, reports, and recall).
+
+    ## Worker Ports
+
+    | Worker | Port | Key Skills |
+    |--------|------|-----------|
+    | shell | 8081 | run_shell, read_file, write_file |
+    | web | 8082 | fetch_url, call_api |
+    | ai | 8083 | ask_claude, search_files, query_sqlite |
+    | code | 8084 | codex_exec, codex_review |
+    | knowledge | 8085 | create_note, read_note, search_notes |
+    | design | 8086 | enhance_ui_prompt, suggest_screens, design_critique |
+    | factory | 8087 | normalize_intent, create_project, quality_gate |
+    | data | 8088 | parse_csv, parse_json, transform_data, analyze_data |
+    | news | 8089 | fetch_rss, aggregate_feeds, classify_news, cluster_news |
+    | market | 8090 | fetch_quote, price_history, technical_analysis, screen_market |
+    | signal | 8091 | aggregate_signals, classify_threat, detect_convergence |
+    | monitor | 8092 | track_conflicts, detect_surge, theater_posture |
+    | infra | 8093 | cascade_analysis, supply_chain_map, chokepoint_assess |
+    | climate | 8094 | fetch_earthquakes, fetch_wildfires, fetch_natural_events |
+    | supply-chain | 8095 | supply chain advanced analytics |
 
   contact:
     name: a2a-mcp-server
@@ -42,28 +66,66 @@ servers:
     description: Knowledge worker
   - url: http://localhost:8086
     description: Design worker
+  - url: http://localhost:8087
+    description: Factory worker
+  - url: http://localhost:8088
+    description: Data worker
+  - url: http://localhost:8089
+    description: News worker
+  - url: http://localhost:8090
+    description: Market worker
+  - url: http://localhost:8091
+    description: Signal worker
+  - url: http://localhost:8092
+    description: Monitor worker
+  - url: http://localhost:8093
+    description: Infra worker
+  - url: http://localhost:8094
+    description: Climate worker
+  - url: http://localhost:8095
+    description: Supply-chain worker
 
 tags:
   - name: agent-discovery
     description: Agent card discovery and registry management
   - name: task-lifecycle
-    description: A2A task creation, polling, cancellation, and streaming
+    description: A2A task creation, polling, cancellation, and SSE streaming
   - name: webhooks
-    description: Webhook ingestion from external services
+    description: Webhook ingestion from external services (GitHub, Stripe, etc.)
   - name: health
     description: Health checks and readiness probes
   - name: metrics
-    description: Skill execution metrics
+    description: Skill execution metrics and observability
+  - name: mcp-core
+    description: |
+      MCP tools — Core delegation, sandbox execution, and agent management.
+      These are invoked over stdio JSON-RPC by Claude Code, not over HTTP.
+  - name: mcp-workflows
+    description: MCP tools — Workflow engine, design pipeline, and factory pipeline
+  - name: mcp-events
+    description: MCP tools — Event bus pub/sub
+  - name: mcp-observability
+    description: MCP tools — Traces, cache, circuit breakers, audit log, metrics
+  - name: mcp-erp
+    description: MCP tools — ERP connector management (Odoo, Business Central, Dynamics)
+  - name: mcp-osint
+    description: MCP tools — OSINT intelligence orchestration
+  - name: mcp-enterprise
+    description: MCP tools — Workspaces, RBAC, licensing, compliance
+  - name: mcp-consulting
+    description: MCP tools — S&OP, ESG, supply chain, revenue intelligence
 
 paths:
-  # ── Agent Discovery ──────────────────────────────────────────────
+  # ── Agent Discovery ──────────────────────────────────────────────────────────
+
   /.well-known/agent.json:
     get:
       tags: [agent-discovery]
       summary: Get agent card
       description: |
         Returns the orchestrator's A2A agent card listing all skills across all
-        registered workers. Workers expose the same endpoint on their own ports.
+        registered workers. Every worker exposes the same endpoint on its own port.
+        The orchestrator aggregates all worker skill descriptors into a single card.
       operationId: getAgentCard
       security: []
       responses:
@@ -88,8 +150,8 @@ paths:
                     name: "Run Shell"
                     description: "Execute a shell command and return its output"
 
-  # ── A2A JSON-RPC endpoint ─────────────────────────────────────────
-  # POST / — orchestrator handles tasks/send, tasks/get, tasks/cancel at root path
+  # ── A2A JSON-RPC endpoint ────────────────────────────────────────────────────
+
   /:
     post:
       tags: [task-lifecycle]
@@ -101,7 +163,18 @@ paths:
         - **tasks/get** — poll an existing task by ID
         - **tasks/cancel** — cancel an in-progress task
 
-        All methods share the same path and are distinguished by `method`.
+        All methods share the same path and are distinguished by the `method` field.
+
+        ### tasks/send params
+        | Field | Type | Required | Description |
+        |-------|------|----------|-------------|
+        | skillId | string | yes* | Skill to invoke |
+        | args | object | no | Skill arguments |
+        | message | object | no | A2A message envelope (alternative to skillId+args) |
+        | contextId | string | no | Session ID for conversation continuity |
+        | id | string | no | Caller-assigned task ID (UUID recommended) |
+
+        *`skillId` required unless using the `message` envelope form.
       operationId: a2aJsonRpc
       security:
         - BearerAuth: []
@@ -114,6 +187,25 @@ paths:
                 - $ref: '#/components/schemas/TasksSendRequest'
                 - $ref: '#/components/schemas/TasksGetRequest'
                 - $ref: '#/components/schemas/TasksCancelRequest'
+            examples:
+              tasks_send:
+                summary: Run a shell command
+                value:
+                  jsonrpc: "2.0"
+                  method: "tasks/send"
+                  id: "req-1"
+                  params:
+                    skillId: "run_shell"
+                    args:
+                      command: "echo hello"
+              tasks_get:
+                summary: Poll an async task
+                value:
+                  jsonrpc: "2.0"
+                  method: "tasks/get"
+                  id: "req-2"
+                  params:
+                    id: "task-uuid-here"
       responses:
         '200':
           description: JSON-RPC response
@@ -121,31 +213,58 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JsonRpcResponse'
+              examples:
+                success:
+                  summary: Completed task
+                  value:
+                    jsonrpc: "2.0"
+                    id: "req-1"
+                    result:
+                      id: "task-abc123"
+                      status:
+                        state: "completed"
+                      artifacts:
+                        - parts:
+                            - kind: "text"
+                              text: "hello\n"
+                error:
+                  summary: Skill not found
+                  value:
+                    jsonrpc: "2.0"
+                    id: "req-1"
+                    error:
+                      code: -32601
+                      message: "Skill not found: unknown_skill"
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  # ── Task SSE streaming ────────────────────────────────────────────
+  # ── Task SSE streaming ───────────────────────────────────────────────────────
+
   /tasks/{taskId}/events:
     get:
       tags: [task-lifecycle]
       summary: Stream task events (SSE)
       description: |
-        Server-Sent Events stream for a running task. Sends `state` events as the
+        Server-Sent Events stream for a running async task. Sends events as the
         task progresses, plus a terminal `result` or `error` event.
+
+        **Event types:**
 
         ```
         event: state
         data: {"taskId":"...","state":"working","progress":"Step 1 of 3"}
 
         event: progress
-        data: {"taskId":"...","message":"Step 2 of 3"}
+        data: {"taskId":"...","message":"Generating screen 2 of 5…"}
 
         event: result
-        data: {"taskId":"...","result":"..."}
+        data: {"taskId":"...","result":"<final output>"}
 
         event: error
-        data: {"taskId":"...","error":"..."}
+        data: {"taskId":"...","error":"Workflow failed: ..."}
         ```
+
+        The stream closes after the terminal event.
       operationId: streamTaskEvents
       security:
         - BearerAuth: []
@@ -155,10 +274,11 @@ paths:
           required: true
           schema:
             type: string
-          description: Task ID returned by tasks/send or delegate_async
+            example: "task-abc123"
+          description: Task ID returned by `tasks/send` or any `*_workflow` MCP tool
       responses:
         '200':
-          description: SSE stream
+          description: SSE stream (closes after terminal result/error event)
           content:
             text/event-stream:
               schema:
@@ -168,22 +288,27 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  # ── Webhook ingestion ─────────────────────────────────────────────
+  # ── Webhook ingestion ────────────────────────────────────────────────────────
+
   /webhooks/{webhookId}:
     post:
       tags: [webhooks]
       summary: Receive an incoming webhook
       description: |
         Accepts a JSON payload from an external service (GitHub, Stripe, etc.).
-        Validates HMAC-SHA256 signature via the `X-Hub-Signature-256` header,
-        transforms the payload using field mappings, then asynchronously dispatches
-        the configured skill.
+        Validates the HMAC-SHA256 signature in the `X-Hub-Signature-256` header,
+        transforms the payload using configured field mappings, then asynchronously
+        dispatches the configured skill.
 
-        Rate limited at 60 requests/minute per IP.
+        **Rate limit:** 60 requests/minute per IP.
 
-        **Blocked skills (defense-in-depth):** run_shell, run_shell_stream, write_file,
-        read_file, codex_exec, sandbox_execute, sandbox_vars, search_files, query_sqlite,
-        workflow_execute, fetch_rss, aggregate_feeds, regulatory_scan.
+        **Blocked skills (defense-in-depth):** run_shell, run_shell_stream,
+        write_file, read_file, codex_exec, sandbox_execute, sandbox_vars,
+        search_files, query_sqlite, workflow_execute, fetch_rss, aggregate_feeds,
+        regulatory_scan.
+
+        Register webhooks with the `register_webhook` MCP tool. The secret used
+        during registration must be the same one used to compute the signature.
       operationId: receiveWebhook
       security: []
       parameters:
@@ -192,13 +317,15 @@ paths:
           required: true
           schema:
             type: string
-          description: Webhook ID (8-char UUID prefix) from register_webhook
+            example: "a1b2c3d4"
+          description: Webhook ID (8-char UUID prefix) from `register_webhook`
         - name: X-Hub-Signature-256
           in: header
           required: true
           schema:
             type: string
-          description: HMAC-SHA256 of the raw request body using the webhook secret
+            example: "sha256=abc123def456..."
+          description: HMAC-SHA256 of the raw request body (prefix with `sha256=`)
       requestBody:
         required: true
         content:
@@ -206,6 +333,11 @@ paths:
             schema:
               type: object
               description: Arbitrary JSON payload from the external service
+            example:
+              action: "push"
+              ref: "refs/heads/main"
+              repository:
+                full_name: "org/repo"
       responses:
         '200':
           description: Webhook accepted (async) or completed (sync)
@@ -220,6 +352,7 @@ paths:
                         enum: [accepted]
                       taskId:
                         type: string
+                    required: [status, taskId]
                   - type: object
                     properties:
                       status:
@@ -227,14 +360,22 @@ paths:
                         enum: [completed]
                       result:
                         type: string
+                    required: [status, result]
+              examples:
+                async:
+                  value:
+                    status: "accepted"
+                    taskId: "task-abc123"
         '401':
-          description: Missing or invalid signature
+          description: Missing or invalid HMAC-SHA256 signature
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Invalid signature"
         '403':
-          description: Webhook disabled or blocked skill
+          description: Webhook disabled or skill is on the blocklist
           content:
             application/json:
               schema:
@@ -242,18 +383,21 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '429':
-          description: Rate limit exceeded
+          description: Rate limit exceeded (60 req/min per IP)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Rate limit exceeded"
 
-  # ── Health ─────────────────────────────────────────────────────────
+  # ── Health ───────────────────────────────────────────────────────────────────
+
   /healthz:
     get:
       tags: [health]
-      summary: Basic health check
-      description: Returns HTTP 200 with `{"status":"alive","timestamp":"<ISO8601>"}` if the service is running.
+      summary: Basic liveness check
+      description: Returns HTTP 200 with `{"status":"alive"}` if the service process is running. Suitable for container liveness probes.
       operationId: healthCheck
       security: []
       responses:
@@ -270,7 +414,6 @@ paths:
                   timestamp:
                     type: string
                     format: date-time
-                    description: ISO 8601 timestamp of the health check response
                 required: [status, timestamp]
               example:
                 status: "alive"
@@ -281,7 +424,8 @@ paths:
       tags: [health]
       summary: Detailed health snapshot
       description: |
-        Returns uptime, per-worker health, active task counts, and ERP connector KPIs.
+        Returns uptime, per-worker health status, active task counts, and ERP
+        connector KPIs. Suitable for readiness probes and monitoring dashboards.
       operationId: healthDetails
       security: []
       responses:
@@ -291,14 +435,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthDetails'
+              example:
+                status: "ok"
+                uptime: 3600
+                workers:
+                  shell: true
+                  web: true
+                  ai: false
+                tasks:
+                  total: 42
+                  active: 3
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      description: Returns HTTP 200 only after all configured workers have been discovered and are ready to accept tasks. Returns 503 during startup.
+      operationId: readinessCheck
+      security: []
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ready]
+                  workersReady:
+                    type: integer
+                  workersTotal:
+                    type: integer
+        '503':
+          description: Not yet ready — workers still starting up
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Metrics ──────────────────────────────────────────────────────────────────
 
   /metrics:
     get:
       tags: [metrics]
       summary: Skill execution metrics
       description: |
-        Returns per-skill call counts, p50/p95/p99 latencies, and error rates.
-        Also accessible as MCP resource `a2a://metrics`.
+        Returns per-skill call counts, p50/p95/p99 latencies (in ms), and error
+        rates. Also accessible as MCP resource `a2a://metrics`.
       operationId: getMetrics
       security: []
       responses:
@@ -308,6 +493,2065 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MetricsSnapshot'
+              example:
+                run_shell:
+                  calls: 150
+                  errors: 2
+                  p50Ms: 45
+                  p95Ms: 320
+                  p99Ms: 1100
+                fetch_url:
+                  calls: 88
+                  errors: 5
+                  p50Ms: 210
+                  p95Ms: 980
+                  p99Ms: 2400
+
+  # ── MCP Tools (virtual paths — invoked over stdio, not HTTP) ─────────────────
+  # These paths document the MCP tool interface for discoverability.
+  # Actual calls go via JSON-RPC over stdin/stdout (Claude Code integration).
+
+  /mcp/tools/sandbox_execute:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: sandbox_execute"
+      description: |
+        Execute TypeScript code in an isolated Bun subprocess with access to all
+        worker skills via `skill(id, args)`. Variables persist across calls per
+        session in SQLite. Results >4 KB are auto-indexed for FTS5 full-text search.
+
+        **Sandbox API surface:**
+        - `skill(id, args)` — call any registered skill
+        - `search(varName, query)` — FTS5 search over stored vars
+        - `adapters()` — list all skills with descriptions
+        - `describe(id)` — full input schema for a skill
+        - `batch(items, fn, {concurrency})` — parallel processing
+        - `$vars` — persistent variable store
+        - `pick`, `sum`, `count`, `first`, `last`, `table` — data helpers
+
+        Prefer this tool over `delegate` when you need to filter or transform
+        results — return only what matters to save tokens.
+      operationId: mcpSandboxExecute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SandboxExecuteInput'
+            examples:
+              run_code:
+                summary: Fetch a URL and summarize
+                value:
+                  code: |
+                    const html = await skill("fetch_url", { url: "https://example.com" });
+                    return html.slice(0, 500);
+                  sessionId: "my-session"
+              list_vars:
+                summary: List persisted variables
+                value:
+                  action: "list_vars"
+                  sessionId: "my-session"
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/delegate:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: delegate"
+      description: |
+        Route a task to the appropriate worker agent. Supports three routing modes:
+
+        1. **Direct URL** (`agentUrl`) — send to a specific worker, bypassing skill lookup
+        2. **Skill ID** (`skillId`) — look up which worker owns the skill → forward
+        3. **Neither** — ask the AI worker to pick the best agent (auto-routing)
+
+        The call goes through the circuit breaker, skill cache (idempotent skills),
+        and is recorded in distributed traces and metrics.
+
+        Set `async: true` for fire-and-forget (returns `taskId`). Pass `taskId` to
+        poll the result of a previous async call.
+      operationId: mcpDelegate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DelegateInput'
+            examples:
+              sync_skill:
+                summary: Run shell command synchronously
+                value:
+                  skillId: "run_shell"
+                  args:
+                    command: "ls -la /tmp"
+              async_workflow:
+                summary: Fire-and-forget async task
+                value:
+                  skillId: "ask_claude"
+                  args:
+                    prompt: "Summarize the latest news"
+                  async: true
+              poll_result:
+                summary: Poll previous async task
+                value:
+                  taskId: "task-abc123"
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/list_agents:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: list_agents"
+      description: List all worker agents (local and external), their URLs, health status, and available skills.
+      operationId: mcpListAgents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/register_agent:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: register_agent"
+      description: |
+        Register an external A2A agent by URL. The orchestrator will discover its
+        agent card and add its skills to the routing table. Optionally store an API
+        key used when forwarding tasks to that agent.
+      operationId: mcpRegisterAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  description: Agent URL (e.g. http://host:port)
+                  example: "http://remote-agent:8100"
+                apiKey:
+                  type: string
+                  description: Optional Bearer token for the agent
+              required: [url]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/unregister_agent:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: unregister_agent"
+      description: Unregister a previously registered external agent and remove its skills from the routing table.
+      operationId: mcpUnregisterAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url:
+                  type: string
+                  description: Agent URL to unregister
+              required: [url]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/run_shell_stream:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: run_shell_stream"
+      description: |
+        Execute a shell command with real-time streaming output via MCP progress
+        events. Proxies the shell worker's `/stream` SSE endpoint.
+      operationId: mcpRunShellStream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                command:
+                  type: string
+                  description: Shell command to execute
+                  example: "tail -f /var/log/app.log"
+                timeoutMs:
+                  type: number
+                  description: Timeout in milliseconds (default 120000)
+                  default: 120000
+              required: [command]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/get_session_history:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: get_session_history"
+      description: Retrieve conversation history for a session ID. History is stored in SQLite + Obsidian with a 30-day TTL. Returns up to the last 40 messages (20 turns).
+      operationId: mcpGetSessionHistory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sessionId:
+                  type: string
+                  description: Session ID to retrieve
+              required: [sessionId]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/clear_session:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: clear_session"
+      description: Clear conversation history for a session ID.
+      operationId: mcpClearSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sessionId:
+                  type: string
+              required: [sessionId]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/memory_search:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: memory_search"
+      description: Full-text search over agent memory (notes/knowledge) stored in SQLite and Obsidian. Returns matching entries with agent name and content.
+      operationId: mcpMemorySearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                  description: Search query string
+                agent:
+                  type: string
+                  description: Limit search to a specific agent namespace
+                limit:
+                  type: number
+                  description: Max results (default 10)
+              required: [query]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/memory_list:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: memory_list"
+      description: List all memory entries with optional tag filtering.
+      operationId: mcpMemoryList
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tag:
+                  type: string
+                  description: Optional tag to filter by
+                limit:
+                  type: number
+                  description: Max results (default 50)
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/memory_cleanup:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: memory_cleanup"
+      description: Remove stale or orphaned memory entries. No parameters required.
+      operationId: mcpMemoryCleanup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/get_project_context:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: get_project_context"
+      description: Get current project context (summary, goals, tech stack, notes). Stored as JSON + Obsidian note.
+      operationId: mcpGetProjectContext
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/set_project_context:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: set_project_context"
+      description: Update one or more project context fields (summary, goals, stack, notes).
+      operationId: mcpSetProjectContext
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                summary:
+                  type: string
+                goals:
+                  type: array
+                  items:
+                    type: string
+                stack:
+                  type: array
+                  items:
+                    type: string
+                notes:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/sandbox_vars:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: sandbox_vars"
+      description: Manage sandbox persisted variables — list all variables in a session, get a specific variable's value, or delete a variable.
+      operationId: mcpSandboxVars
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [list, get, delete]
+                  description: Action to perform
+                sessionId:
+                  type: string
+                  description: Session ID
+                name:
+                  type: string
+                  description: Variable name (required for get/delete)
+              required: [action, sessionId]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/list_mcp_servers:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: list_mcp_servers"
+      description: List all registered MCP servers and their available tools.
+      operationId: mcpListMcpServers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/use_mcp_tool:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: use_mcp_tool"
+      description: Call a tool on any registered MCP server. Enables composing tools across multiple MCP registrations.
+      operationId: mcpUseMcpTool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                server:
+                  type: string
+                  description: MCP server name
+                tool:
+                  type: string
+                  description: Tool name to call
+                args:
+                  type: object
+                  description: Tool arguments
+              required: [server, tool]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  # ── MCP: Workflow tools ──────────────────────────────────────────────────────
+
+  /mcp/tools/workflow_execute:
+    post:
+      tags: [mcp-workflows]
+      summary: "MCP: workflow_execute"
+      description: |
+        Execute a multi-step workflow as a directed acyclic graph (DAG). Steps
+        run in parallel where dependencies allow. Returns `{taskId}` immediately —
+        poll with `delegate(taskId: "...")` or the SSE stream.
+
+        **Step features:**
+        - `dependsOn: [stepId]` — declare execution order
+        - `args: { key: "{{stepId.result}}" }` — pipe outputs between steps
+        - `onError: "fail" | "skip" | "retry"` — per-step error handling
+        - `when: "{{stepId.result}}"` — conditional execution
+        - `maxConcurrency` — limit parallel step execution
+      operationId: mcpWorkflowExecute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowExecuteInput'
+            example:
+              workflow:
+                id: "research-and-save"
+                name: "Research and Save"
+                steps:
+                  - id: "fetch"
+                    skillId: "fetch_url"
+                    args:
+                      url: "https://example.com/data.json"
+                  - id: "analyze"
+                    skillId: "ask_claude"
+                    args:
+                      prompt: "Summarize: {{fetch.result}}"
+                    dependsOn: ["fetch"]
+                  - id: "save"
+                    skillId: "create_note"
+                    args:
+                      title: "Research"
+                      content: "{{analyze.result}}"
+                    dependsOn: ["analyze"]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/design_workflow:
+    post:
+      tags: [mcp-workflows]
+      summary: "MCP: design_workflow"
+      description: |
+        Full design pipeline: Gemini suggests screens → creates a Stitch project →
+        generates each screen in parallel. Returns `{taskId}` immediately — poll
+        with `delegate(taskId)` or SSE stream.
+
+        Requires the design worker (port 8086) and Stitch MCP server to be running.
+        Auth: `GOOGLE_API_KEY` or Gemini OAuth via `~/.gemini/`.
+      operationId: mcpDesignWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DesignWorkflowInput'
+            example:
+              appConcept: "A fitness tracking app with social features"
+              title: "FitSync"
+              deviceType: "MOBILE"
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/factory_workflow:
+    post:
+      tags: [mcp-workflows]
+      summary: "MCP: factory_workflow"
+      description: |
+        Full project generation pipeline: normalize idea → scaffold → generate
+        code → quality review ("Ralph Mode" multi-dimension scoring with fix
+        loops). Returns `{taskId}` immediately.
+
+        **Pipelines:** `app` (Expo), `website` (Next.js), `mcp-server` (MCP + Bun),
+        `agent` (AI agent), `api` (REST API), `cli` (CLI tool).
+
+        Timeout: up to 10 minutes for large pipelines.
+      operationId: mcpFactoryWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FactoryWorkflowInput'
+            example:
+              idea: "A CLI tool that converts markdown to PDF with syntax highlighting"
+              pipeline: "cli"
+              outputDir: "/tmp/my-cli-tool"
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/compose_pipeline:
+    post:
+      tags: [mcp-workflows]
+      summary: "MCP: compose_pipeline"
+      description: |
+        Create a reusable named skill pipeline. Each step's output feeds the
+        next. Supports template references: `{{prev.result}}`, `{{input.*}}`,
+        `{{steps.alias.result}}`. Pipelines are persisted in memory and can be
+        executed with `execute_pipeline`.
+      operationId: mcpComposePipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Pipeline name
+                description:
+                  type: string
+                steps:
+                  type: array
+                  description: "Pipeline steps: [{ skillId, args?, transform?, as?, when?, onError? }]"
+                  items:
+                    type: object
+              required: [name, steps]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/execute_pipeline:
+    post:
+      tags: [mcp-workflows]
+      summary: "MCP: execute_pipeline"
+      description: Execute a composed pipeline by ID or name. Returns `{taskId}` — poll with `delegate(taskId)`.
+      operationId: mcpExecutePipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pipeline:
+                  type: string
+                  description: Pipeline ID or name
+                input:
+                  type: object
+                  description: "Input data available as {{input.*}} in steps"
+              required: [pipeline]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/list_pipelines:
+    post:
+      tags: [mcp-workflows]
+      summary: "MCP: list_pipelines"
+      description: List all registered skill composition pipelines.
+      operationId: mcpListPipelines
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/collaborate:
+    post:
+      tags: [mcp-workflows]
+      summary: "MCP: collaborate"
+      description: |
+        Multi-agent collaboration using configurable strategies:
+
+        - **fan_out** — query all agents in parallel, merge results
+        - **consensus** — fan out, score each response with an AI judge, return the best
+        - **debate** — agents critique each other's answers iteratively
+        - **map_reduce** — distribute items across agents, aggregate results
+
+        Returns `{taskId}` — poll with `delegate(taskId)`.
+      operationId: mcpCollaborate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollaborateInput'
+            example:
+              strategy: "consensus"
+              query: "What is the best approach to handle rate limiting in a distributed system?"
+              agents: ["ask_claude", "codex_review"]
+              mergeStrategy: "best_score"
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/agency_workflow_templates:
+    post:
+      tags: [mcp-workflows]
+      summary: "MCP: agency_workflow_templates"
+      description: Return three pre-built agency workflow templates (reporting, client approval gate, client handoff) with ready-to-adapt `workflow_execute` definitions.
+      operationId: mcpAgencyWorkflowTemplates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/agency_roi_snapshot:
+    post:
+      tags: [mcp-workflows]
+      summary: "MCP: agency_roi_snapshot"
+      description: Compute agency KPI snapshot — runs completed, failure rate, estimated hours saved, manual steps removed, and token savings.
+      operationId: mcpAgencyRoiSnapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                since:
+                  type: string
+                  format: date-time
+                  description: Optional ISO timestamp lower bound
+                assumedMinutesSavedPerSuccessfulRun:
+                  type: number
+                  description: Minutes saved per run (default 20)
+                assumedManualStepsRemovedPerRun:
+                  type: number
+                  description: Manual steps removed per run (default 4)
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  # ── MCP: Event Bus ───────────────────────────────────────────────────────────
+
+  /mcp/tools/event_publish:
+    post:
+      tags: [mcp-events]
+      summary: "MCP: event_publish"
+      description: |
+        Publish an event to the agent event bus. Subscribers whose topic pattern
+        matches will be notified. Topics use dot-separated segments.
+
+        Events are auto-published on agent completion/failure in the `delegate` flow.
+      operationId: mcpEventPublish
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                topic:
+                  type: string
+                  description: "Dot-separated topic (e.g. 'agent.shell.completed')"
+                  example: "workflow.step.done"
+                data:
+                  type: object
+                  description: Event payload
+                source:
+                  type: string
+                  description: Source agent name (default 'user')
+                correlationId:
+                  type: string
+                  description: Correlation ID for tracing event chains
+              required: [topic]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/event_subscribe:
+    post:
+      tags: [mcp-events]
+      summary: "MCP: event_subscribe"
+      description: |
+        Subscribe to events matching a topic pattern. Returns a subscription ID.
+        Wildcard support: `*` matches one segment, `#` matches multiple segments.
+
+        Examples: `agent.*` matches `agent.shell`, `agent.web`.
+        `workflow.#` matches `workflow.step.done`, `workflow.completed`.
+      operationId: mcpEventSubscribe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pattern:
+                  type: string
+                  description: "Topic pattern (e.g. 'agent.*', 'workflow.#')"
+                name:
+                  type: string
+                  description: Subscriber name for debugging
+                filter:
+                  type: object
+                  description: "Field-level filter: { 'data.status': 'completed' }"
+              required: [pattern]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/event_unsubscribe:
+    post:
+      tags: [mcp-events]
+      summary: "MCP: event_unsubscribe"
+      description: Remove an event bus subscription by ID.
+      operationId: mcpEventUnsubscribe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                subscriptionId:
+                  type: string
+              required: [subscriptionId]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/event_replay:
+    post:
+      tags: [mcp-events]
+      summary: "MCP: event_replay"
+      description: Replay events matching a topic pattern from the in-memory event history. Useful for catching up after reconnection or debugging missed events.
+      operationId: mcpEventReplay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pattern:
+                  type: string
+                  description: Topic pattern to replay
+                since:
+                  type: string
+                  format: date-time
+                  description: ISO timestamp to replay from
+                limit:
+                  type: number
+                  description: Max events to return (default 50)
+              required: [pattern]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/event_bus_stats:
+    post:
+      tags: [mcp-events]
+      summary: "MCP: event_bus_stats"
+      description: Get event bus statistics — subscription count, history size, dead letter count, per-topic event counts.
+      operationId: mcpEventBusStats
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/dead_letter_replay:
+    post:
+      tags: [mcp-events]
+      summary: "MCP: dead_letter_replay"
+      description: Retry failed event deliveries from the dead letter queue.
+      operationId: mcpDeadLetterReplay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit:
+                  type: number
+                  description: Max dead letters to retry (default 50)
+                olderThanMs:
+                  type: number
+                  description: Only retry dead letters older than this many ms
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  # ── MCP: Observability ───────────────────────────────────────────────────────
+
+  /mcp/tools/get_metrics:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: get_metrics"
+      description: Get skill execution metrics — call counts, p50/p95/p99 latencies (ms), error rates, and worker utilization. Same data as the `/metrics` HTTP endpoint.
+      operationId: mcpGetMetrics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/list_traces:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: list_traces"
+      description: List recent distributed traces across agent calls. Shows timing, status, and span counts.
+      operationId: mcpListTraces
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit:
+                  type: number
+                  description: Max traces to return (default 50)
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/get_trace:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: get_trace"
+      description: Get the waterfall visualization of a trace — shows the full call chain with timing for every span.
+      operationId: mcpGetTrace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                traceId:
+                  type: string
+                  description: Trace ID from list_traces
+              required: [traceId]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/search_traces:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: search_traces"
+      description: Search distributed traces by skill ID, status, or time range.
+      operationId: mcpSearchTraces
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                skillId:
+                  type: string
+                  description: Filter by skill ID
+                status:
+                  type: string
+                  enum: [ok, error]
+                since:
+                  type: string
+                  format: date-time
+                limit:
+                  type: number
+                  description: Max results (default 20)
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/cache_stats:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: cache_stats"
+      description: Get skill cache statistics — hit rate, entry count, memory size, and top cached skills.
+      operationId: mcpCacheStats
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/cache_invalidate:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: cache_invalidate"
+      description: Invalidate cached results. Specify `skillId` to target a specific skill, or omit to clear the entire cache.
+      operationId: mcpCacheInvalidate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                skillId:
+                  type: string
+                  description: Skill ID to invalidate (omit to clear all)
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/cache_configure:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: cache_configure"
+      description: Configure per-skill cache TTL. Set `ttlMs: 0` to disable caching for a skill.
+      operationId: mcpCacheConfigure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                skillId:
+                  type: string
+                  description: Skill to configure
+                ttlMs:
+                  type: number
+                  description: Cache TTL in ms (0 to disable)
+              required: [skillId, ttlMs]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/get_circuit_breakers:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: get_circuit_breakers"
+      description: Get circuit breaker states for all workers — `closed` (healthy), `open` (failing fast), or `half_open` (testing recovery).
+      operationId: mcpGetCircuitBreakers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/reset_circuit_breakers:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: reset_circuit_breakers"
+      description: Reset all circuit breakers to the `closed` state, allowing traffic to all workers immediately.
+      operationId: mcpResetCircuitBreakers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/negotiate_capability:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: negotiate_capability"
+      description: Find the best agent for a skill based on SemVer version, required/preferred features, health, and active call load. Returns ranked candidates.
+      operationId: mcpNegotiateCapability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                skillId:
+                  type: string
+                  description: Skill to negotiate
+                minVersion:
+                  type: string
+                  description: Minimum SemVer version (e.g. "1.2.0")
+                requiredFeatures:
+                  type: array
+                  items:
+                    type: string
+                  description: Features the agent must support
+                preferredFeatures:
+                  type: array
+                  items:
+                    type: string
+                  description: Preferred features (bonus scoring)
+              required: [skillId]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/list_capabilities:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: list_capabilities"
+      description: List all registered agent capabilities in the negotiation registry.
+      operationId: mcpListCapabilities
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/capability_stats:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: capability_stats"
+      description: Get capability negotiation statistics — total capabilities, agents, and health summary.
+      operationId: mcpCapabilityStats
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/audit_query:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: audit_query — Enterprise"
+      description: |
+        Query the immutable SQLite audit log (`~/.a2a-mcp/audit.db`). Filter by
+        actor (API key prefix), skill, workspace, time range, and success/failure.
+        Enterprise feature.
+      operationId: mcpAuditQuery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuditQueryInput'
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/audit_stats:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: audit_stats — Enterprise"
+      description: Get audit statistics — total calls, success rate, top skills, and top actors.
+      operationId: mcpAuditStats
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                since:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/token_savings:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: token_savings"
+      description: Get token savings statistics from RTK-style output filtering. Shows total tokens saved, savings rate, and top skills by savings.
+      operationId: mcpTokenSavings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                since:
+                  type: string
+                  format: date-time
+                skillId:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/read_raw_output:
+    post:
+      tags: [mcp-observability]
+      summary: "MCP: read_raw_output"
+      description: Read raw unfiltered output from a tee file. Call with no args to list available tee files, or provide a `path` to read a specific file.
+      operationId: mcpReadRawOutput
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path:
+                  type: string
+                  description: Path to the tee file
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  # ── MCP: Webhook management ──────────────────────────────────────────────────
+
+  /mcp/tools/register_webhook:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: register_webhook"
+      description: |
+        Register a webhook endpoint. Returns the URL to configure in your external
+        service. All incoming requests must carry a valid HMAC-SHA256
+        `X-Hub-Signature-256` header computed with the provided secret.
+
+        Use `fieldMappings` to map webhook payload fields to skill args:
+        `{ "argName": "payload.path.to.field" }`.
+      operationId: mcpRegisterWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Human-readable webhook name
+                skillId:
+                  type: string
+                  description: Skill to invoke when the webhook fires (default 'delegate')
+                secret:
+                  type: string
+                  description: HMAC-SHA256 secret for signature verification (required)
+                staticArgs:
+                  type: object
+                  description: Static args merged with transformed payload
+                fieldMappings:
+                  type: object
+                  description: "Map webhook payload fields to skill args: { argName: 'payload.path' }"
+              required: [name, secret]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/list_webhooks:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: list_webhooks"
+      description: List all registered webhooks and their endpoints. Secrets are redacted.
+      operationId: mcpListWebhooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/unregister_webhook:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: unregister_webhook"
+      description: Remove a registered webhook by ID.
+      operationId: mcpUnregisterWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                  description: Webhook ID to remove
+              required: [id]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/webhook_log:
+    post:
+      tags: [mcp-core]
+      summary: "MCP: webhook_log"
+      description: Get delivery log for a specific webhook — shows timestamps, payloads, and skill results.
+      operationId: mcpWebhookLog
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                webhookId:
+                  type: string
+                limit:
+                  type: number
+                  description: Max entries (default 20)
+              required: [webhookId]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  # ── MCP: ERP ─────────────────────────────────────────────────────────────────
+
+  /mcp/tools/erp_connector_connect:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_connector_connect"
+      description: |
+        Connect or update an ERP connector (Odoo, Business Central, Dynamics 365).
+        Enforces Odoo Custom-plan gating via `metadata.odooPlan`.
+      operationId: mcpErpConnectorConnect
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ErpConnectorConnectInput'
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/erp_connector_sync:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_connector_sync"
+      description: Run an ERP connector sync with idempotency key, configurable retry policy, and dead-letter safety.
+      operationId: mcpErpConnectorSync
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ErpConnectorSyncInput'
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/erp_connector_status:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_connector_status"
+      description: Get ERP connector health, token expiry state, and renewal warnings. Omit `type` to return all connectors.
+      operationId: mcpErpConnectorStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [odoo, business-central, dynamics]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/erp_connector_renew:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_connector_renew"
+      description: Renew a Business Central webhook subscription. Uses the native subscription API when `baseUrl`, `accessToken`, `notificationUrl`, and `resource` are configured.
+      operationId: mcpErpConnectorRenew
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [business-central]
+                webhookExpiresAt:
+                  type: string
+                  format: date-time
+                notificationUrl:
+                  type: string
+                resource:
+                  type: string
+              required: [type]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/erp_connector_renew_due:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_connector_renew_due"
+      description: Scan connectors with `renewalDue=true` and renew automatically. Use `dryRun: true` for planning without performing renewals.
+      operationId: mcpErpConnectorRenewDue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dryRun:
+                  type: boolean
+                  description: Report what would be renewed without acting
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/erp_workflow_run:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_workflow_run"
+      description: Run a packaged ERP product workflow (quote-to-order, lead-to-cash, collections). Returns `{taskId}`.
+      operationId: mcpErpWorkflowRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                product:
+                  type: string
+                  enum: [quote-to-order, lead-to-cash, collections]
+                context:
+                  type: object
+                  description: Optional product context
+              required: [product]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/erp_kpis:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_kpis"
+      description: Get KPI snapshot for ERP product lines — workflow success, sync outcomes, revenue proxy signals.
+      operationId: mcpErpKpis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                product:
+                  type: string
+                  enum: [quote-to-order, lead-to-cash, collections]
+                since:
+                  type: string
+                  format: date-time
+              required: [product]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/erp_connector_kpis:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_connector_kpis"
+      description: Get connector health and renewal KPIs — success/failure rates, due renewal backlog, alert flags.
+      operationId: mcpErpConnectorKpis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                since:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/erp_analytics_executive:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_analytics_executive"
+      description: Executive analytics dashboard — pipeline health, revenue forecasts, and top-level KPI trends.
+      operationId: mcpErpAnalyticsExecutive
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workspaceId:
+                  type: string
+                since:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/erp_analytics_ops:
+    post:
+      tags: [mcp-erp]
+      summary: "MCP: erp_analytics_ops"
+      description: Operational analytics — sync throughput, error patterns, connector uptime, and SLA compliance.
+      operationId: mcpErpAnalyticsOps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workspaceId:
+                  type: string
+                since:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  # ── MCP: OSINT ───────────────────────────────────────────────────────────────
+
+  /mcp/tools/osint_brief:
+    post:
+      tags: [mcp-osint]
+      summary: "MCP: osint_brief"
+      description: |
+        Generate a multi-source OSINT intelligence brief by orchestrating the
+        news, market, signal, monitor, infra, and climate workers in parallel.
+        Returns `{taskId}` — poll with `delegate(taskId)`.
+      operationId: mcpOsintBrief
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OsintBriefInput'
+            example:
+              region: "UA"
+              since: "2026-01-01T00:00:00Z"
+              sources: ["news", "signal", "monitor"]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/osint_alert_scan:
+    post:
+      tags: [mcp-osint]
+      summary: "MCP: osint_alert_scan"
+      description: Scan all OSINT sources for alerts exceeding a severity threshold. Aggregates signals, classifies threats, checks data freshness, and tracks conflicts. Returns `{taskId}`.
+      operationId: mcpOsintAlertScan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                severityThreshold:
+                  type: string
+                  enum: [critical, high, medium, low]
+                  description: Minimum severity to alert on (default 'high')
+                region:
+                  type: string
+                  description: ISO country code or region filter
+                since:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/osint_threat_assess:
+    post:
+      tags: [mcp-osint]
+      summary: "MCP: osint_threat_assess"
+      description: Regional threat assessment combining signal convergence, conflict tracking, instability index, military surges, infrastructure cascades, and climate hazards. Returns `{taskId}`.
+      operationId: mcpOsintThreatAssess
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                region:
+                  type: string
+                  description: ISO country code or region name (required)
+                includeClimate:
+                  type: boolean
+                  default: true
+                includeInfra:
+                  type: boolean
+                  default: true
+              required: [region]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/osint_market_snapshot:
+    post:
+      tags: [mcp-osint]
+      summary: "MCP: osint_market_snapshot"
+      description: Market intelligence snapshot — fetch quotes, detect anomalies, and compute correlation matrix for a list of ticker symbols. Returns `{taskId}`.
+      operationId: mcpOsintMarketSnapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                symbols:
+                  type: array
+                  items:
+                    type: string
+                  description: Ticker symbols to analyze
+                detectAnomalies:
+                  type: boolean
+                  default: true
+              required: [symbols]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/osint_freshness:
+    post:
+      tags: [mcp-osint]
+      summary: "MCP: osint_freshness"
+      description: Check OSINT data source freshness across all feeds. Returns fresh/stale/very_stale status per source with alerts for essential sources.
+      operationId: mcpOsintFreshness
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sources:
+                  type: array
+                  items:
+                    type: object
+                  description: Custom data sources to check (default all OSINT sources)
+                maxStaleMinutes:
+                  type: number
+                  description: Minutes before a source is stale (default 60)
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/osint_workflow_templates:
+    post:
+      tags: [mcp-osint]
+      summary: "MCP: osint_workflow_templates"
+      description: Return OSINT workflow templates (intelligence-gather, regional-monitor, supply-chain-risk) with ready-to-adapt `workflow_execute` definitions.
+      operationId: mcpOsintWorkflowTemplates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/osint_regulatory_brief:
+    post:
+      tags: [mcp-osint]
+      summary: "MCP: osint_regulatory_brief"
+      description: Scan regulatory feeds for changes affecting supply chain, ESG, automotive, data, and trade. Returns classified alerts with impact levels.
+      operationId: mcpOsintRegulatoryBrief
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                categories:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/competitor_monitor:
+    post:
+      tags: [mcp-osint]
+      summary: "MCP: competitor_monitor"
+      description: Monitor a competitor via OSINT news and market signals. Returns classified signals with threat level assessment.
+      operationId: mcpCompetitorMonitor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Competitor name
+                domains:
+                  type: array
+                  items:
+                    type: string
+              required: [name]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/osint_competitor_brief:
+    post:
+      tags: [mcp-osint]
+      summary: "MCP: osint_competitor_brief"
+      description: Generate a structured competitor intelligence brief — SWOT analysis, market position, recent strategic moves, and recommendations.
+      operationId: mcpOsintCompetitorBrief
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                domains:
+                  type: array
+                  items:
+                    type: string
+              required: [name]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  # ── MCP: Enterprise ──────────────────────────────────────────────────────────
+
+  /mcp/tools/workspace_manage:
+    post:
+      tags: [mcp-enterprise]
+      summary: "MCP: workspace_manage"
+      description: |
+        Manage team workspaces — create, list, get, add/remove members, and update
+        settings. Workspaces support shared environment variables, skill allowlists,
+        and shared knowledge directories.
+      operationId: mcpWorkspaceManage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkspaceManageInput'
+            examples:
+              create:
+                value:
+                  action: "create"
+                  name: "Alpha Team"
+                  ownerName: "Alice"
+              add_member:
+                value:
+                  action: "add_member"
+                  id: "ws-abc123"
+                  name: "Bob"
+                  keyPrefix: "a2a_k_bob1"
+                  role: "member"
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/license_info:
+    post:
+      tags: [mcp-enterprise]
+      summary: "MCP: license_info"
+      description: Show current license tier (free/pro/enterprise), skill tier requirements, and upgrade information.
+      operationId: mcpLicenseInfo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  # ── MCP: Consulting / S&OP / ESG / Revenue ───────────────────────────────────
+
+  /mcp/tools/sop_demand_supply_match:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: sop_demand_supply_match"
+      description: S&OP Dashboard — reconcile demand (orders + forecasts) vs supply (MRP + inventory + POs) for given periods. Identifies gaps and revenue-at-risk.
+      operationId: mcpSopDemandSupplyMatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                periods:
+                  type: array
+                  items:
+                    type: string
+                  description: Periods in YYYY-MM format
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/sop_scenario_compare:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: sop_scenario_compare"
+      description: Simulate what-if S&OP adjustments (demand increase, capacity loss, supply delay) on a base reconciliation.
+      operationId: mcpSopScenarioCompare
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                period:
+                  type: string
+                  description: Period in YYYY-MM format
+                adjustment:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    percentage:
+                      type: number
+                    items:
+                      type: array
+                      items:
+                        type: string
+                  required: [type, percentage]
+              required: [period, adjustment]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/sop_consensus_plan:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: sop_consensus_plan"
+      description: Generate an S&OP consensus plan with prioritized recommendations and actions across all periods.
+      operationId: mcpSopConsensusPlan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                periods:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/esg_score_entity:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: esg_score_entity"
+      description: Calculate ESG score for a supplier/region using OSINT data (climate, conflict, governance). Returns E/S/G sub-scores, overall rating (AAA–C), and regulatory flags (CSRD, LkSG).
+      operationId: mcpEsgScoreEntity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entityId:
+                  type: string
+                entityType:
+                  type: string
+                  enum: [supplier, region, product]
+                entityName:
+                  type: string
+                country:
+                  type: string
+                  description: ISO country code
+              required: [entityId, entityName]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/esg_portfolio_overview:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: esg_portfolio_overview"
+      description: ESG portfolio overview across all scored entities — rating distribution, worst/best performers, CSRD/LkSG entity counts.
+      operationId: mcpEsgPortfolioOverview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entityIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/esg_gap_analysis:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: esg_gap_analysis"
+      description: Identify ESG dimensions below target across scored entities. Returns prioritized recommendations.
+      operationId: mcpEsgGapAnalysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targetScore:
+                  type: number
+                  description: Target ESG score (default 70)
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/carbon_footprint:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: carbon_footprint"
+      description: Calculate CO2e footprint for a product's supply chain (Scope 1/2/3). Breakdown by transport/manufacturing/raw material, by supplier, with optional nearshoring scenarios.
+      operationId: mcpCarbonFootprint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                itemNo:
+                  type: string
+                  description: Product/item number
+                includeScenarios:
+                  type: boolean
+              required: [itemNo]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/nearshoring_evaluate:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: nearshoring_evaluate"
+      description: Multi-dimensional nearshoring analysis comparing a vendor's current location against target countries across labor cost, transport, ESG, carbon, geopolitical risk, quality, and IP protection.
+      operationId: mcpNearshoringEvaluate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                vendorId:
+                  type: string
+                targetCountries:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      country:
+                        type: string
+                      region:
+                        type: string
+              required: [vendorId, targetCountries]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/erp_revenue_forecast:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: erp_revenue_forecast"
+      description: Revenue forecasting with confidence intervals using exponential smoothing and trend decomposition for monthly time series.
+      operationId: mcpErpRevenueForecast
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workspaceId:
+                  type: string
+                horizonMonths:
+                  type: number
+                  description: Months to forecast (default 6)
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/price_optimize:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: price_optimize"
+      description: Price optimization from historical quote data — returns price bands, elasticity estimates, and pricing recommendations per product group.
+      operationId: mcpPriceOptimize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workspaceId:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/list_transformation_playbooks:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: list_transformation_playbooks"
+      description: List available transformation playbook templates (PPAP, ERP Go-Live, Kaizen, S&OP, Supplier Qualification, Digital Twin). Filter by industry or category.
+      operationId: mcpListTransformationPlaybooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                industry:
+                  type: string
+                category:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
+
+  /mcp/tools/execute_playbook:
+    post:
+      tags: [mcp-consulting]
+      summary: "MCP: execute_playbook"
+      description: Execute a transformation playbook as a multi-step workflow. Returns `{taskId}` for progress tracking.
+      operationId: mcpExecutePlaybook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                playbookId:
+                  type: string
+                params:
+                  type: object
+              required: [playbookId]
+      responses:
+        '200':
+          $ref: '#/components/responses/McpTaskIdResult'
+
+  /mcp/tools/compliance_report:
+    post:
+      tags: [mcp-enterprise]
+      summary: "MCP: compliance_report — Enterprise"
+      description: Generate a compliance report covering access control audit, audit trail analysis, data protection status, operational metrics, and ESG compliance summary.
+      operationId: mcpComplianceReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workspaceId:
+                  type: string
+                since:
+                  type: string
+                  format: date-time
+                until:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          $ref: '#/components/responses/McpToolResult'
 
 components:
   securitySchemes:
@@ -316,21 +2560,32 @@ components:
       scheme: bearer
       description: |
         Pass `Authorization: Bearer <token>` where `<token>` is either:
-        - `A2A_API_KEY` env var value (for server-level access)
-        - An `a2a_k_...` key created via `createApiKey` (RBAC-gated)
+        - `A2A_API_KEY` env var value (server-level, `admin` role)
+        - An `a2a_k_...` key created via `createApiKey` (RBAC-gated: admin/operator/viewer)
 
-        Loopback (127.0.0.1 / ::1) is always trusted.
+        Loopback addresses (127.0.0.1, ::1) are always trusted without a token.
+
+        **RBAC roles:**
+        | Role | Permissions |
+        |------|-------------|
+        | admin | All skills |
+        | operator | Delegation, sync, workflows, pipelines, events, tracing, metrics |
+        | viewer | Read-only: list_agents, get_metrics, recall, reports |
 
   schemas:
+
+    # ── Agent Card ─────────────────────────────────────────────────────────────
+
     AgentCard:
       type: object
-      description: A2A agent discovery card (served at /.well-known/agent.json)
+      description: A2A agent discovery card (served at `/.well-known/agent.json`)
       properties:
         name:
           type: string
           example: "Local A2A Orchestrator"
         description:
           type: string
+          example: "MCP + A2A orchestrator with multi-agent workers"
         url:
           type: string
           format: uri
@@ -343,6 +2598,7 @@ components:
           properties:
             streaming:
               type: boolean
+              example: false
         skills:
           type: array
           items:
@@ -360,11 +2616,14 @@ components:
           example: "Run Shell"
         description:
           type: string
+          example: "Execute a shell command and return its output"
       required: [id, name, description]
+
+    # ── A2A JSON-RPC ───────────────────────────────────────────────────────────
 
     TasksSendRequest:
       type: object
-      description: JSON-RPC 2.0 request for tasks/send
+      description: JSON-RPC 2.0 request for `tasks/send`
       properties:
         jsonrpc:
           type: string
@@ -374,19 +2633,21 @@ components:
           enum: ["tasks/send"]
         id:
           type: string
-          description: Caller-provided request ID
+          description: Caller-provided request correlation ID
+          example: "req-001"
         params:
           type: object
           properties:
             skillId:
               type: string
-              description: Skill to invoke on the target worker
+              description: Skill to invoke
+              example: "run_shell"
             args:
               type: object
-              description: Arguments for the skill (used with skillId; mutually exclusive with message)
+              description: Arguments for the skill
             message:
               type: object
-              description: A2A message envelope (optional; use skillId+args for direct skill invocation)
+              description: A2A message envelope (alternative to skillId+args)
               properties:
                 role:
                   type: string
@@ -406,13 +2667,13 @@ components:
               description: Session ID for conversation continuity
             id:
               type: string
-              description: Optional caller-assigned task ID (UUID recommended). If omitted, the server generates one.
+              description: Optional caller-assigned task ID (UUID recommended)
           required: [skillId]
       required: [jsonrpc, method, params]
 
     TasksGetRequest:
       type: object
-      description: JSON-RPC 2.0 request for tasks/get
+      description: JSON-RPC 2.0 request for `tasks/get`
       properties:
         jsonrpc:
           type: string
@@ -433,7 +2694,7 @@ components:
 
     TasksCancelRequest:
       type: object
-      description: JSON-RPC 2.0 request for tasks/cancel
+      description: JSON-RPC 2.0 request for `tasks/cancel`
       properties:
         jsonrpc:
           type: string
@@ -454,8 +2715,8 @@ components:
 
     JsonRpcResponse:
       description: |
-        JSON-RPC 2.0 response. Per spec, exactly ONE of `result` or `error` is present —
-        never both, never neither.
+        JSON-RPC 2.0 response. Per spec, exactly ONE of `result` or `error` is
+        present — never both, never neither.
       oneOf:
         - title: Success
           type: object
@@ -471,6 +2732,7 @@ components:
               properties:
                 id:
                   type: string
+                  description: Task ID
                 status:
                   type: object
                   properties:
@@ -485,13 +2747,7 @@ components:
                       parts:
                         type: array
                         items:
-                          type: object
-                          properties:
-                            kind:
-                              type: string
-                              enum: [text, data]
-                            text:
-                              type: string
+                          $ref: '#/components/schemas/Part'
           required: [jsonrpc, id, result]
         - title: Error
           type: object
@@ -507,12 +2763,360 @@ components:
               properties:
                 code:
                   type: integer
+                  example: -32601
                 message:
                   type: string
+                  example: "Skill not found"
                 data:
                   type: object
               required: [code, message]
           required: [jsonrpc, id, error]
+
+    Part:
+      description: A2A message part — text or structured data
+      oneOf:
+        - type: object
+          title: TextPart
+          properties:
+            kind:
+              type: string
+              enum: [text]
+            text:
+              type: string
+          required: [kind, text]
+        - type: object
+          title: DataPart
+          properties:
+            kind:
+              type: string
+              enum: [data]
+            data:
+              type: object
+          required: [kind, data]
+
+    # ── MCP Tool Inputs ────────────────────────────────────────────────────────
+
+    SandboxExecuteInput:
+      type: object
+      properties:
+        code:
+          type: string
+          description: TypeScript code to execute in the sandbox
+          example: "const result = await skill('fetch_url', { url: 'https://example.com' }); return result.slice(0, 200);"
+        sessionId:
+          type: string
+          description: Session ID for variable persistence across calls
+        timeout:
+          type: number
+          description: Execution timeout in seconds (default 30)
+        action:
+          type: string
+          enum: [list_vars, get_var, delete_var]
+          description: Variable management action (alternative to running code)
+        varName:
+          type: string
+          description: Variable name (for get_var/delete_var actions)
+
+    DelegateInput:
+      type: object
+      properties:
+        skillId:
+          type: string
+          description: Skill to invoke (e.g. run_shell, ask_claude, fetch_url)
+          example: "run_shell"
+        args:
+          type: object
+          description: Arguments passed to the skill
+          example:
+            command: "echo hello"
+        agentUrl:
+          type: string
+          format: uri
+          description: Direct worker URL — bypasses skill lookup
+          example: "http://localhost:8081"
+        message:
+          type: string
+          description: Natural-language context message
+        sessionId:
+          type: string
+          description: Enables session continuity (history stored in memory)
+        async:
+          type: boolean
+          description: If true, run asynchronously and return taskId immediately
+        taskId:
+          type: string
+          description: Poll result of a previous async delegate call
+
+    WorkflowExecuteInput:
+      type: object
+      properties:
+        workflow:
+          $ref: '#/components/schemas/WorkflowDefinition'
+      required: [workflow]
+
+    WorkflowDefinition:
+      type: object
+      description: DAG-based multi-step workflow definition
+      properties:
+        id:
+          type: string
+          description: Unique workflow ID
+          example: "research-and-save"
+        name:
+          type: string
+          description: Human-readable name
+        description:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkflowStep'
+        maxConcurrency:
+          type: number
+          description: Maximum number of concurrent step executions
+      required: [id, steps]
+
+    WorkflowStep:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique step ID within the workflow
+          example: "fetch"
+        skillId:
+          type: string
+          description: Skill to invoke
+          example: "fetch_url"
+        args:
+          type: object
+          description: "Arguments for the skill. Supports {{stepId.result}} template references."
+        message:
+          type: string
+          description: Optional message text
+        dependsOn:
+          type: array
+          items:
+            type: string
+          description: Step IDs that must complete before this step runs
+        onError:
+          type: string
+          enum: [fail, skip, retry]
+          description: Error handling strategy (default 'fail')
+        maxRetries:
+          type: number
+          description: Max retries (only when onError is 'retry')
+        when:
+          type: string
+          description: "Condition expression — skip step if falsy. E.g. '{{prev.result}}'"
+        label:
+          type: string
+          description: Human-readable label for progress reporting
+      required: [id, skillId]
+
+    DesignWorkflowInput:
+      type: object
+      properties:
+        appConcept:
+          type: string
+          description: Description of the app concept
+          example: "A habit tracker with streaks and social accountability"
+        title:
+          type: string
+          description: App title (defaults to appConcept)
+        deviceType:
+          type: string
+          enum: [MOBILE, TABLET, DESKTOP, WEB]
+          default: MOBILE
+        screensOnly:
+          type: boolean
+          description: If true, generate a single enhanced screen instead of a full app
+        modelId:
+          type: string
+          description: Gemini model to use (default 'GEMINI_3_FLASH')
+      required: [appConcept]
+
+    FactoryWorkflowInput:
+      type: object
+      properties:
+        idea:
+          type: string
+          description: Project idea description
+          example: "A REST API for managing team time-off requests with approval workflows"
+        pipeline:
+          type: string
+          enum: [app, website, mcp-server, agent, api, cli]
+          default: app
+          description: Project type pipeline
+        outputDir:
+          type: string
+          description: Output directory for the generated project
+      required: [idea]
+
+    CollaborateInput:
+      type: object
+      properties:
+        strategy:
+          type: string
+          enum: [fan_out, consensus, debate, map_reduce]
+          description: Collaboration strategy
+        query:
+          type: string
+          description: The question or task for agents to collaborate on
+        agents:
+          type: array
+          items:
+            type: string
+          description: Agent names or skill IDs to involve
+        mergeStrategy:
+          type: string
+          enum: [concat, best_score, majority_vote, custom]
+          description: How to merge responses
+        maxRounds:
+          type: number
+          description: For debate strategy — max refinement rounds (default 2)
+        items:
+          type: array
+          description: For map_reduce strategy — items to distribute
+        mergePrompt:
+          type: string
+          description: Custom merge prompt (for 'custom' merge strategy)
+        timeoutMs:
+          type: number
+          description: Timeout per agent call in ms (default 60000)
+        judgeAgent:
+          type: string
+          description: Agent/skill for scoring/synthesis (default 'ask_claude')
+      required: [strategy, query, agents]
+
+    OsintBriefInput:
+      type: object
+      properties:
+        region:
+          type: string
+          description: ISO country code or region name
+          example: "UA"
+        since:
+          type: string
+          format: date-time
+          description: ISO timestamp lower bound for data window
+        sources:
+          type: array
+          items:
+            type: string
+            enum: [news, market, signal, monitor, infra, climate]
+          description: OSINT sources to include (default all)
+
+    AuditQueryInput:
+      type: object
+      properties:
+        actor:
+          type: string
+          description: API key prefix or 'local'
+          example: "a2a_k_abc1"
+        skillId:
+          type: string
+          description: Filter by skill ID
+        workspace:
+          type: string
+          description: Filter by workspace ID
+        since:
+          type: string
+          format: date-time
+          description: ISO timestamp start
+        until:
+          type: string
+          format: date-time
+          description: ISO timestamp end
+        success:
+          type: boolean
+          description: Filter by success or failure
+        limit:
+          type: number
+          description: Max results (default 100, max 1000)
+
+    ErpConnectorConnectInput:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [odoo, business-central, dynamics]
+          description: ERP system type
+        authMode:
+          type: string
+          enum: [oauth, api-key]
+        config:
+          type: object
+          description: Connector credentials/settings (provider-specific)
+        metadata:
+          type: object
+          description: "Connector metadata: tenantId, tokenExpiresAt, webhookExpiresAt, odooPlan, instanceUrl"
+        enabled:
+          type: boolean
+          description: Enable connector after connecting (default true)
+          default: true
+      required: [type, authMode]
+
+    ErpConnectorSyncInput:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [odoo, business-central, dynamics]
+        direction:
+          type: string
+          enum: [ingest, writeback, two-way]
+          default: two-way
+        entityType:
+          type: string
+          enum: [lead, deal, invoice, quote, order]
+          default: lead
+        externalId:
+          type: string
+        idempotencyKey:
+          type: string
+          description: Idempotency key to prevent duplicate syncs
+        payload:
+          type: object
+        maxRetries:
+          type: number
+          description: Max retry attempts (default 3, max 5)
+          default: 3
+      required: [type]
+
+    WorkspaceManageInput:
+      type: object
+      properties:
+        action:
+          type: string
+          enum: [create, list, get, add_member, remove_member, update]
+        id:
+          type: string
+          description: Workspace ID (for get/update/add_member/remove_member)
+        name:
+          type: string
+          description: Workspace or member name
+        ownerName:
+          type: string
+          description: Owner display name (required for create)
+        description:
+          type: string
+        keyPrefix:
+          type: string
+          description: API key prefix — owner key for create, member key for add_member/remove_member
+        role:
+          type: string
+          enum: [member, readonly]
+        env:
+          type: object
+          description: Shared environment variables
+        allowedSkills:
+          type: array
+          items:
+            type: string
+          description: Skill allowlist
+      required: [action]
+
+    # ── Health and Metrics ─────────────────────────────────────────────────────
 
     HealthDetails:
       type: object
@@ -527,7 +3131,7 @@ components:
           type: object
           additionalProperties:
             type: boolean
-          description: Map of worker name → healthy boolean
+          description: "Map of worker name → healthy boolean"
         tasks:
           type: object
           properties:
@@ -541,29 +3145,92 @@ components:
 
     MetricsSnapshot:
       type: object
-      description: Per-skill execution metrics
+      description: Per-skill execution metrics — keyed by skill ID
       additionalProperties:
         type: object
         properties:
           calls:
             type: integer
+            description: Total call count
           errors:
             type: integer
+            description: Total error count
           p50Ms:
             type: number
+            description: Median latency in milliseconds
           p95Ms:
             type: number
+            description: 95th percentile latency in milliseconds
           p99Ms:
             type: number
+            description: 99th percentile latency in milliseconds
+
+    # ── Error ──────────────────────────────────────────────────────────────────
 
     ErrorResponse:
       type: object
       properties:
         error:
           type: string
+          description: Human-readable error message
+          example: "Unauthorized — set Authorization: Bearer <A2A_API_KEY>"
       required: [error]
 
+    # ── MCP Tool Result ────────────────────────────────────────────────────────
+
+    McpToolResult:
+      type: object
+      description: MCP tool call result envelope
+      properties:
+        content:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [text]
+              text:
+                type: string
+        isError:
+          type: boolean
+          description: True if the tool encountered an error
+
+    TaskIdResult:
+      type: object
+      description: Immediate response for async tools that return a task ID
+      properties:
+        taskId:
+          type: string
+          description: Task ID — poll with `delegate(taskId)` or SSE stream
+          example: "task-abc123"
+        status:
+          type: string
+          enum: [working, completed, failed]
+        hint:
+          type: string
+          example: "Poll with get_task_result"
+      required: [taskId, status]
+
   responses:
+    McpToolResult:
+      description: MCP tool result (success or error)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/McpToolResult'
+
+    McpTaskIdResult:
+      description: Async task started — returns taskId for polling
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/McpToolResult'
+          example:
+            content:
+              - type: "text"
+                text: '{"taskId":"task-abc123","status":"working","hint":"Poll with get_task_result"}'
+
     Unauthorized:
       description: Missing or invalid Authorization header
       content:

@@ -11,6 +11,8 @@ Built entirely on **Bun + TypeScript** with no build step, no Node.js dependency
 
 The system is designed for **resilience**, **observability**, and **multi-agent collaboration** — with circuit breakers, distributed tracing, skill caching, RBAC, and event-driven architecture built in.
 
+Beyond the core agent infrastructure, the codebase includes **domain intelligence modules** for enterprise supply chain, ERP, manufacturing (MRP/S&OP), ESG/compliance, and revenue analytics — all exposed as orchestrator-level MCP tools in `src/server.ts`.
+
 ---
 
 ## 2. System Design (ASCII Diagram)
@@ -704,7 +706,7 @@ event_subscribe({
 Allowlist validation for all outbound HTTP calls:
 
 ```typescript
-const ALLOWED_PORTS = [8080, 8081, 8082, ..., 8094]
+const ALLOWED_PORTS = [8080, 8081, 8082, ..., 8095]
 const ALLOWED_HOSTS = ['localhost', '127.0.0.1', '::1']
 const CUSTOM_ALLOWLIST = [...remoteWorkers.map(w => w.url)]
 
@@ -763,6 +765,112 @@ Each sandbox execution:
 
 ---
 
+## 13.5 Notifications (src/notifications.ts)
+
+Outbound notification dispatcher. Delivers alerts via Slack, Telegram, and Email. Subscribes to event bus topics and routes matching events to configured channels.
+
+**Channels:**
+- `slack` — webhook URL, optional channel/username override
+- `telegram` — bot token + chat ID
+- `email` — SMTP URL, from/to addresses
+
+**Configuration** (stored in `~/.a2a-mcp/config.json` under `notifications.channels`):
+```json
+{
+  "notifications": {
+    "channels": {
+      "slack": { "webhookUrl": "https://hooks.slack.com/..." },
+      "telegram": { "botToken": "...", "chatId": "..." }
+    }
+  }
+}
+```
+
+**MCP tools:** `configure_notifications`, `notify`, `get_notification_config`, `get_notification_history`, `get_notification_stats`, `subscribe_to_alerts`
+
+---
+
+## 13.6 Alert Rules (src/alert-rules.ts)
+
+Persistent alert rule engine. Evaluates event bus events against configurable rules and routes matching alerts to notification channels. Rules stored in SQLite (`~/.a2a-mcp/alerts.db`).
+
+**Rule structure:**
+```typescript
+{
+  topicPattern: "worker.*.failed",   // event bus topic pattern (wildcards supported)
+  conditions: [
+    { field: "data.errorCount", op: "gt", value: 5 }
+  ],
+  channels: ["slack"],               // destination channels
+  cooldownMs: 3600000,               // min ms between firings (default 1h)
+  messageTemplate: "{{name}}: {{data.message}}"
+}
+```
+
+**Condition operators:** `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `contains`, `exists`
+
+**MCP tools:** `create_alert_rule`, `delete_alert_rule`, `toggle_alert_rule`, `list_alert_rules`, `get_alert_rule`, `get_alert_history`
+
+---
+
+## 13.7 Scheduler (src/scheduler.ts)
+
+Recurring workflow/skill scheduler. Runs configured jobs at intervals with jitter, publishing results to the event bus. In-memory (no persistence across restarts — jobs must be re-added via MCP tools).
+
+**Job structure:**
+```typescript
+{
+  name: "osint-hourly-brief",
+  intervalMs: 3600000,
+  jitterMs: 300000,          // random ±jitter to prevent thundering herd
+  skillId: "osint_brief",    // OR: workflow (mutually exclusive)
+  args: { region: "EU" }
+}
+```
+
+**MCP tools:** `scheduler_add`, `scheduler_remove`, `scheduler_toggle`, `scheduler_list`, `get_scheduler_stats`
+
+---
+
+## 13.8 Federation (src/federation.ts)
+
+A2A Federation — discover and connect to external A2A agents. Supports well-known URL discovery, periodic health checks, and skill routing across federated agents.
+
+`FederationManager` manages a set of `FederatedAgent` entries (url, card, healthy, latencyMs). Discovery uses `GET /.well-known/agent.json`. Health polling interval configurable (default 30s).
+
+**Config:**
+```json
+{
+  "federation": {
+    "peers": ["https://agent.example.com"],
+    "healthIntervalMs": 30000
+  }
+}
+```
+
+---
+
+## 13.9 Worker Registry (src/worker-registry.ts)
+
+Community worker registry — a curated index of installable workers. The registry can be a local JSON file (`~/.a2a-mcp/registry.json`) or the built-in index. Local entries override built-in entries by name.
+
+**Built-in entries:** `github-agent`, `slack-agent`, `postgres-agent`, `redis-agent`, `docker-agent`, `s3-agent`, `playwright-agent`, `email-agent`
+
+**MCP tools (exposed via CLI):** `registry_search`, `registry_list`, `registry_install`
+
+---
+
+## 13.10 ACP Transport (src/acp-transport.ts)
+
+NDJSON stdio transport for the Agent Client Protocol (ACP) — an alternative to MCP for programmatic agent access. Reads newline-delimited JSON from stdin, writes to stdout. All debug output goes to stderr.
+
+**Use case:** Enables piped agent pipelines:
+```bash
+bun src/server.ts | bun acp-client.ts
+```
+
+---
+
 ## 14. Data Storage
 
 ### Database Schema
@@ -772,6 +880,8 @@ Each sandbox execution:
 | Memory | `~/.a2a-memory.db` | `memory (id, key, value, created_at)` | Recall system |
 | Sandbox | `~/.a2a-sandbox.db` | `sandbox_vars (var_name, value)`, `sandbox_results (var_name, content)` with FTS5 | Variable persistence + search |
 | Audit | `~/.a2a-mcp/audit.db` | `audit_log (id, actor, skill_id, args, result, status, timestamp)` | Immutable audit trail |
+| Notifications | `~/.a2a-mcp/notifications.db` | `notification_history` | Delivered notification log |
+| Alert Rules | `~/.a2a-mcp/alerts.db` | `alert_rules`, `alert_history` | Persistent rule definitions + fire history |
 
 ### SQLite Optimizations
 
@@ -1255,9 +1365,17 @@ a2a-mcp-server/
 │   ├── context.ts               # Project context (JSON cache + Obsidian note)
 │   ├── persona-loader.ts        # Load/watch persona markdown files
 │   ├── errors.ts                # AgentError class
-│   ├── agency-product.ts        # Agency product KPI summaries
-│   ├── osint-intel.ts           # OSINT workflow builders
-│   ├── erp-platform.ts          # ERP platform operations (quotes, connectors, etc.)
+│   ├── agency-product.ts        # Agency product KPI summaries and workflow templates
+│   ├── osint-intel.ts           # OSINT workflow builders (brief, alert-scan, threat-assess, market)
+│   ├── erp-platform.ts          # ERP platform operations (Q2O pipeline, connectors, analytics)
+│   ├── notifications.ts         # Outbound notifications: Slack, Telegram, Email
+│   ├── alert-rules.ts           # Persistent alert rules engine (SQLite, event bus integration)
+│   ├── scheduler.ts             # Recurring skill/workflow scheduler with jitter
+│   ├── federation.ts            # A2A Federation: peer discovery + health polling
+│   ├── worker-registry.ts       # Community worker registry (built-in + local cache)
+│   ├── acp-transport.ts         # NDJSON stdio transport for ACP protocol
+│   ├── compliance-report.ts     # Cross-system compliance report generator
+│   ├── env-filter.ts            # Environment variable filter for safe config display
 │   ├── workers/
 │   │   ├── shell.ts             # run_shell, read_file, write_file, SSE stream (port 8081)
 │   │   ├── web.ts               # fetch_url, call_api (port 8082)
@@ -1279,11 +1397,33 @@ a2a-mcp-server/
 │   │   ├── business-central.ts  # Microsoft Business Central connector
 │   │   └── odoo.ts              # Odoo connector
 │   ├── risk/                    # Supply chain risk analysis modules
-│   │   ├── scoring.ts
-│   │   ├── critical-path.ts
-│   │   ├── lead-time.ts
-│   │   ├── interventions.ts
-│   │   └── sources.ts
+│   │   ├── scoring.ts           # Component risk scoring (multi-dimensional)
+│   │   ├── critical-path.ts     # Critical path computation, long-lead detection
+│   │   ├── lead-time.ts         # Lead time analysis, vendor health
+│   │   ├── interventions.ts     # Intervention recommendation generation
+│   │   ├── sources.ts           # External risk data sources (OSINT feeds)
+│   │   └── ai-analyzer.ts       # AI-powered deep analysis helpers
+│   ├── mrp/                     # Manufacturing Resource Planning
+│   │   ├── types.ts             # MRP domain types
+│   │   ├── demand-plan.ts       # Demand planning (orders + forecasts)
+│   │   ├── gross-to-net.ts      # Gross-to-net calculation
+│   │   ├── lot-sizing.ts        # Lot sizing algorithms (fixed, EOQ, period)
+│   │   ├── capacity.ts          # Capacity requirements planning
+│   │   ├── pegging.ts           # Demand-supply pegging (traceability)
+│   │   ├── bom-guard.ts         # BOM cycle detection and validation
+│   │   ├── sop.ts               # S&OP: demand/supply reconciliation
+│   │   ├── value-stream.ts      # Value stream mapping analysis
+│   │   ├── line-balancing.ts    # Assembly line balancing
+│   │   └── smed-analysis.ts     # SMED (changeover time reduction) analysis
+│   ├── esg/                     # ESG (Environmental, Social, Governance)
+│   │   ├── types.ts             # ESG domain types
+│   │   ├── scoring.ts           # ESG score computation (sub-scores, rating bands)
+│   │   └── carbon.ts            # Carbon footprint calculation (Scope 1/2/3)
+│   ├── analytics/               # Revenue and commercial analytics
+│   │   ├── clv.ts               # Customer Lifetime Value calculation
+│   │   ├── pricing.ts           # Price optimization from quote history
+│   │   ├── revenue-forecast.ts  # Revenue forecasting (exponential smoothing)
+│   │   └── win-loss.ts          # Win/loss deal analysis
 │   ├── plugins/
 │   │   ├── oauth-setup/         # OAuth flow for external APIs
 │   │   └── sync-secrets/        # Secret sync plugin
@@ -1328,7 +1468,7 @@ a2a-mcp-server/
 ### Concurrency
 
 - Max concurrent delegations: 1000+ (limited by system file descriptors)
-- Max concurrent workers: 15 built-in + user-space workers (configurable)
+- Max concurrent workers: 15 built-in (ports 8081–8095) + unlimited user-space workers (8096+)
 - Max sandbox processes: 50 (configurable)
 
 ---
