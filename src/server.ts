@@ -279,6 +279,7 @@ const workerFailures = new Map<string, number>();
 const respawning = new Set<string>();
 const respawnTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let healthPollInterval: ReturnType<typeof setInterval>;
+const TEE_PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 let teePruneInterval: ReturnType<typeof setInterval>;
 let workerCards: AgentCard[] = [];
 
@@ -8828,7 +8829,7 @@ async function main() {
   // Prune stale tee files at startup and every hour
   const teeMaxAgeMs = (CONFIG.outputFilter?.teeMaxAgeMins ?? 1440) * 60 * 1000;
   pruneTeeFiles(teeMaxAgeMs);
-  teePruneInterval = setInterval(() => pruneTeeFiles(teeMaxAgeMs), 60 * 60 * 1000);
+  teePruneInterval = setInterval(() => pruneTeeFiles(teeMaxAgeMs), TEE_PRUNE_INTERVAL_MS);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
