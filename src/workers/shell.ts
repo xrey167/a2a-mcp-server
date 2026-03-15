@@ -127,6 +127,7 @@ app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
   // Kill child after timeout to prevent unbounded processes
   const timer = setTimeout(() => {
     child.kill("SIGTERM");
+    setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5_000);
     reply.raw.write(`data: ${JSON.stringify({ type: "error", text: `Stream timeout after ${STREAM_TIMEOUT_MS}ms` })}\n\n`);
   }, STREAM_TIMEOUT_MS);
 
