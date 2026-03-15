@@ -208,7 +208,7 @@ export function getMetricsSnapshot(): MetricsSnapshot {
         topSkills: ts.topSkills,
       };
     }
-  } catch { /* token tracker may not be initialized */ }
+  } catch (err) { process.stderr.write(`[metrics] token tracker init failed: ${err}\n`); }
 
   return {
     timestamp: new Date().toISOString(),

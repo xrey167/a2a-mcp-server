@@ -27,28 +27,28 @@ const NAME = "market-agent";
 // ── Zod Schemas ──────────────────────────────────────────────────
 
 const MarketSchemas = {
-  fetch_quote: z.object({
+  fetch_quote: z.looseObject({
     symbol: z.string().min(1),
     provider: z.enum(["yahoo", "alphavantage", "coinbase", "custom"]).optional().default("yahoo"),
-    customUrl: z.string().url().optional(),
-  }).passthrough(),
+    customUrl: z.url().optional(),
+  }),
 
-  price_history: z.object({
+  price_history: z.looseObject({
     symbol: z.string().min(1),
     interval: z.enum(["1d", "1wk", "1mo"]).optional().default("1d"),
     range: z.enum(["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"]).optional().default("3mo"),
     provider: z.enum(["yahoo", "alphavantage", "custom"]).optional().default("yahoo"),
-    customUrl: z.string().url().optional(),
-  }).passthrough(),
+    customUrl: z.url().optional(),
+  }),
 
-  technical_analysis: z.object({
-    prices: z.array(z.number()).min(2),
-    indicators: z.array(z.enum(["sma", "ema", "rsi", "macd", "bollinger", "atr", "vwap"])).min(1),
+  technical_analysis: z.looseObject({
+    prices: z.array(z.number()).min(2).max(10_000),
+    indicators: z.array(z.enum(["sma", "ema", "rsi", "macd", "bollinger", "atr", "vwap"])).min(1).max(20),
     period: z.number().int().positive().optional().default(14),
-    volumes: z.array(z.number()).optional(),
-  }).passthrough(),
+    volumes: z.array(z.number()).max(10_000).optional(),
+  }),
 
-  screen_market: z.object({
+  screen_market: z.looseObject({
     assets: z.array(z.object({
       symbol: z.string(),
       price: z.number(),
@@ -68,21 +68,21 @@ const MarketSchemas = {
     sortBy: z.enum(["price", "change", "changePercent", "volume", "marketCap"]).optional().default("changePercent"),
     sortDir: z.enum(["asc", "desc"]).optional().default("desc"),
     limit: z.number().int().positive().optional().default(20),
-  }).passthrough(),
+  }),
 
-  detect_anomalies: z.object({
+  detect_anomalies: z.looseObject({
     prices: z.array(z.number()).min(5),
     volumes: z.array(z.number()).optional(),
     timestamps: z.array(z.string()).optional(),
     zScoreThreshold: z.number().positive().optional().default(2),
     windowSize: z.number().int().positive().optional().default(20),
-  }).passthrough(),
+  }),
 
-  correlation: z.object({
+  correlation: z.looseObject({
     series: z.record(z.array(z.number()).min(2)),
-  }).passthrough(),
+  }),
 
-  market_composite: z.object({
+  market_composite: z.looseObject({
     prices: z.array(z.number()).min(14),
     volumes: z.array(z.number()).optional(),
     period: z.number().int().positive().optional().default(14),
@@ -94,7 +94,7 @@ const MarketSchemas = {
       volatility: z.number().optional().default(0.15),
       trend: z.number().optional().default(0.15),
     }).optional().default({}),
-  }).passthrough(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -144,7 +144,8 @@ async function fetchYahooQuote(symbol: string): Promise<Record<string, unknown>>
   const meta = result.meta ?? {};
   const quote = result.indicators?.quote?.[0] ?? {};
   const prices = quote.close ?? [];
-  const lastPrice = prices[prices.length - 1] ?? meta.regularMarketPrice ?? 0;
+  const lastPrice = prices[prices.length - 1] ?? meta.regularMarketPrice;
+  if (lastPrice === undefined || lastPrice === null) throw new Error(`No price data available for ${symbol}`);
   const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? lastPrice;
   const change = lastPrice - prevClose;
   const changePercent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
@@ -554,9 +555,10 @@ function detectPriceAnomalies(
   const maxPrice = Math.max(...prices);
   const minPrice = Math.min(...prices);
 
+  const MAX_ANOMALIES = 100;
   return {
-    priceAnomalies,
-    volumeAnomalies,
+    priceAnomalies: priceAnomalies.slice(-MAX_ANOMALIES),
+    volumeAnomalies: volumeAnomalies.slice(-MAX_ANOMALIES),
     summary: {
       dataPoints: prices.length,
       totalChange,
