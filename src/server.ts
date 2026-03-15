@@ -2676,7 +2676,6 @@ function isSearchThrottled(sessionId: string): { allowed: boolean; remaining: nu
 
   // Prune timestamps outside the window
   state.timestamps = state.timestamps.filter(t => now - t < SEARCH_WINDOW_MS);
-  if (state.timestamps.length === 0 && state.blocked === 0) { searchThrottle.delete(sessionId); }
 
   const total = state.timestamps.length;
   const max = total >= SEARCH_MAX_NORMAL ? SEARCH_MAX_BURST : SEARCH_MAX_NORMAL;
@@ -2687,6 +2686,8 @@ function isSearchThrottled(sessionId: string): { allowed: boolean; remaining: nu
   }
 
   state.timestamps.push(now);
+  // Clean up map entries that are no longer active (after push so we don't delete a live entry)
+  if (state.timestamps.length === 0 && state.blocked === 0) { searchThrottle.delete(sessionId); }
   return { allowed: true, remaining: max - total - 1 };
 }
 
@@ -5793,7 +5794,6 @@ async function startHttpServer() {
     const now = Date.now();
     const entry = webhookRateLimiter.get(ip);
     if (!entry || now - entry.windowStart > WEBHOOK_RATE_WINDOW_MS) {
-      webhookRateLimiter.delete(ip);
       webhookRateLimiter.set(ip, { count: 1, windowStart: now });
     } else {
       entry.count++;
