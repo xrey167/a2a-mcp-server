@@ -184,6 +184,8 @@ export function verifySignature(payload: string, signature: string, secret: stri
 
 // ── Payload Transformation ───────────────────────────────────────
 
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 export function transformPayload(
   payload: unknown,
   fieldMappings: Record<string, string>,
@@ -192,6 +194,7 @@ export function transformPayload(
   const args = { ...staticArgs };
 
   for (const [targetField, sourcePath] of Object.entries(fieldMappings)) {
+    if (FORBIDDEN_KEYS.has(targetField)) continue;
     args[targetField] = getNestedValue(payload, sourcePath);
   }
 
@@ -204,6 +207,7 @@ function getNestedValue(obj: unknown, path: string): unknown {
   if (parts.length > MAX_PATH_DEPTH) return undefined;
   let current = obj;
   for (const part of parts) {
+    if (FORBIDDEN_KEYS.has(part)) return undefined;  // prevent prototype pollution via path
     if (current === null || current === undefined) return undefined;
     if (typeof current === "object") {
       current = (current as Record<string, unknown>)[part];

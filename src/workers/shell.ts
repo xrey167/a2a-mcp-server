@@ -9,9 +9,9 @@ import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { stripAnsi, applyCommandFilter } from "../output-filter.js";
 
 const ShellSchemas = {
-  run_shell: z.object({ command: z.string().min(1) }).passthrough(),
-  read_file: z.object({ path: z.string().min(1) }).passthrough(),
-  write_file: z.object({ path: z.string().min(1), content: z.string() }).passthrough(),
+  run_shell: z.looseObject({ command: z.string().min(1) }),
+  read_file: z.looseObject({ path: z.string().min(1) }),
+  write_file: z.looseObject({ path: z.string().min(1), content: z.string() }),
 };
 
 const PORT = 8081;
@@ -125,9 +125,15 @@ app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
   const child = spawn(cmd, { shell: true });
 
   // Kill child after timeout to prevent unbounded processes
+  let sigkillTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {
     child.kill("SIGTERM");
-    setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5_000);
+    sigkillTimer = setTimeout(() => {
+      try {
+        process.stderr.write('[shell] process did not exit after SIGTERM, sending SIGKILL\n');
+        child.kill("SIGKILL");
+      } catch {}
+    }, 5_000);
     reply.raw.write(`data: ${JSON.stringify({ type: "error", text: `Stream timeout after ${STREAM_TIMEOUT_MS}ms` })}\n\n`);
   }, STREAM_TIMEOUT_MS);
 
@@ -142,6 +148,7 @@ app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
   return new Promise<void>((resolve) => {
     child.on("close", (exitCode) => {
       clearTimeout(timer);
+      clearTimeout(sigkillTimer);
       reply.raw.write(`data: ${JSON.stringify({ type: "done", exitCode: exitCode ?? 0 })}\n\n`);
       reply.raw.end();
       resolve();

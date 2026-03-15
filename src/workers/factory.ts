@@ -28,10 +28,10 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 
 const FactorySchemas = {
-  normalize_intent: z.object({ idea: z.string().min(1), pipeline: z.string().optional().default("app") }).passthrough(),
-  create_project: z.object({ idea: z.string().min(1), pipeline: z.string().optional().default("app"), outputDir: z.string().optional(), variant: z.string().optional() }).passthrough(),
-  quality_gate: z.object({ code: z.string().min(1), spec: z.string().optional().default("{}"), pipeline: z.string().optional().default("app"), variant: z.string().optional() }).passthrough(),
-  list_templates: z.object({ pipeline: z.string().optional().default("") }).passthrough(),
+  normalize_intent: z.looseObject({ idea: z.string().min(1), pipeline: z.string().optional().default("app") }),
+  create_project: z.looseObject({ idea: z.string().min(1), pipeline: z.string().optional().default("app"), outputDir: z.string().optional(), variant: z.string().optional() }),
+  quality_gate: z.looseObject({ code: z.string().min(1), spec: z.string().optional().default("{}"), pipeline: z.string().optional().default("app"), variant: z.string().optional() }),
+  list_templates: z.looseObject({ pipeline: z.string().optional().default("") }),
 };
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { PIPELINES, listPipelines, getPipeline } from "../pipelines/index.js";
@@ -57,6 +57,7 @@ import {
 
 const PORT = 8087;
 const NAME = "factory-agent";
+const MAX_PROJECT_NAME_LENGTH = 64;
 
 // Worker URLs for direct calls — avoids routing through orchestrator.
 // Configurable via env vars (set by orchestrator on spawn) with sensible defaults.
@@ -217,7 +218,7 @@ Rules:
     };
   } catch (err) {
     log(`template matching failed: ${err}`);
-    return { variantId: null, variantSpec: null, confidence: "none", reason: "Matching failed, using base template" };
+    return { variantId: null, variantSpec: null, confidence: "none", reason: `Matching failed for pipeline "${pipelineId}": ${err instanceof Error ? err.message : String(err)}, using base template` };
   }
 }
 
@@ -509,7 +510,11 @@ async function createProject(
     throw new Error(`Intent normalization returned invalid JSON: ${specRaw.slice(0, 200)}`);
   }
 
-  const projectName = (spec.name as string ?? "my-project").toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  const projectName = (spec.name as string ?? "my-project")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .slice(0, MAX_PROJECT_NAME_LENGTH)
+    .replace(/^-+|-+$/g, "") || "my-project";
   const targetDir = outputDir ?? `/tmp/factory/${projectName}-${Date.now()}`;
 
   // Phase 2: Scaffold from templates
@@ -675,7 +680,7 @@ For each file, use this exact format:
       const dir = fullPath.substring(0, fullPath.lastIndexOf("/"));
       if (dir) {
         const safeDir = sanitizePath(dir);
-        await runShell(`mkdir -p ${JSON.stringify(safeDir)}`);
+        await runShell(`mkdir -p -- ${JSON.stringify(safeDir)}`);
       }
       await writeFile(fullPath, content);
       files.push(fullPath);

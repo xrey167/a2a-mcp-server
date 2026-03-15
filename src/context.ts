@@ -37,13 +37,21 @@ export function getProjectContext(): ProjectContext {
   try {
     const raw = readFileSync(CACHE_FILE, "utf-8");
     return JSON.parse(raw) as ProjectContext;
-  } catch {}
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      process.stderr.write("[context] cache read failed: " + (e instanceof Error ? e.message : String(e)) + "\n");
+    }
+  }
 
   // Fall back to Obsidian note
   try {
     const md = readFileSync(OBSIDIAN_FILE, "utf-8");
     return parseMarkdown(md);
-  } catch {}
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      process.stderr.write("[context] Obsidian read failed: " + (e instanceof Error ? e.message : String(e)) + "\n");
+    }
+  }
 
   return { ...DEFAULT_CONTEXT };
 }
@@ -140,10 +148,10 @@ function parseMarkdown(md: string): ProjectContext {
   }
 
   const notesMatch = md.match(/## Notes\s*\n+([\s\S]*?)(?=\n## |\n*$)/);
-  if (notesMatch) ctx.notes = notesMatch[1]!.trim().replace(/^\(none\)$/, "");
+  if (notesMatch) ctx.notes = (notesMatch[1] ?? "").trim().replace(/^\(none\)$/, "");
 
   const updatedMatch = md.match(/Last updated: ([^\n]+)/);
-  if (updatedMatch) ctx.updatedAt = updatedMatch[1]!.trim();
+  if (updatedMatch) ctx.updatedAt = (updatedMatch[1] ?? "").trim();
 
   return ctx;
 }

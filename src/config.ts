@@ -28,7 +28,7 @@ const RemoteWorkerSchema = z.object({
   /** Display name for the remote worker */
   name: z.string(),
   /** Full URL of the remote A2A agent (e.g. "https://my-agent.example.com:9090") */
-  url: z.string().url(),
+  url: z.url(),
   /** API key for authenticating with the remote agent */
   apiKey: z.string().optional(),
 });
@@ -135,7 +135,7 @@ const ErpConfigSchema = z.object({
 
 const FederationConfigSchema = z.object({
   /** Peer A2A agent URLs to discover via /.well-known/agent.json */
-  peers: z.array(z.string().url()).optional().default([]),
+  peers: z.array(z.url()).optional().default([]),
   /** Health check interval in ms (default: 30s) */
   healthIntervalMs: z.number().int().positive().optional().default(30_000),
   /** Discovery timeout in ms (default: 5s) */
@@ -144,7 +144,7 @@ const FederationConfigSchema = z.object({
 
 const NotificationsConfigSchema = z.object({
   slack: z.object({
-    webhookUrl: z.string().url(),
+    webhookUrl: z.url(),
     channel: z.string().optional(),
     username: z.string().optional(),
   }).optional(),

@@ -81,7 +81,7 @@ const SupplyChainSchemas = {
   connect_erp: z.discriminatedUnion("system", [
     z.object({
       system: z.literal("bc"),
-      baseUrl: z.string().url(),
+      baseUrl: z.url(),
       tenantId: z.string().min(1),
       environment: z.string().min(1),
       company: z.string().min(1),
@@ -92,36 +92,36 @@ const SupplyChainSchemas = {
     }),
     z.object({
       system: z.literal("odoo"),
-      url: z.string().url(),
+      url: z.url(),
       database: z.string().min(1),
       username: z.string().min(1),
       apiKey: z.string().min(1),
     }),
   ]),
 
-  analyze_orders: z.object({
+  analyze_orders: z.looseObject({
     orderType: z.enum(["production", "sales", "both"]).optional().default("both"),
     status: z.string().optional(),
     dateFrom: z.string().optional(),
     dateTo: z.string().optional(),
     itemFilter: z.string().optional(),
-  }).passthrough(),
+  }),
 
-  critical_path: z.object({
+  critical_path: z.looseObject({
     productionOrderId: z.string().optional(),
     itemNo: z.string().optional(),
     depth: z.number().int().positive().optional().default(5),
     longLeadThresholdDays: z.number().optional().default(14),
-  }).passthrough(),
+  }),
 
-  assess_risk: z.object({
+  assess_risk: z.looseObject({
     scope: z.enum(["all", "critical_only"]).optional().default("all"),
     includeExternal: z.boolean().optional().default(true),
     riskCategories: z.array(z.string()).optional(),
     productionOrderId: z.string().optional(),
-  }).passthrough(),
+  }),
 
-  recommend_actions: z.object({
+  recommend_actions: z.looseObject({
     riskThreshold: z.number().optional().default(40),
     maxRecommendations: z.number().int().positive().optional().default(20),
     includeCosting: z.boolean().optional().default(true),
@@ -130,28 +130,28 @@ const SupplyChainSchemas = {
       "make_or_buy", "safety_stock", "dual_source", "advance_purchase", "reschedule",
     ])).optional(),
     productionOrderId: z.string().optional(),
-  }).passthrough(),
+  }),
 
-  monitor_dashboard: z.object({
+  monitor_dashboard: z.looseObject({
     period: z.string().optional(),
-  }).passthrough(),
+  }),
 
-  intelligence_report: z.object({
+  intelligence_report: z.looseObject({
     includeWebIntelligence: z.boolean().optional().default(true),
     includeDeepAnalysis: z.boolean().optional().default(true),
     productionOrderId: z.string().optional(),
-  }).passthrough(),
+  }),
 
-  predict_bottlenecks: z.object({
+  predict_bottlenecks: z.looseObject({
     productionOrderId: z.string().optional(),
-  }).passthrough(),
+  }),
 
-  deep_bom_analysis: z.object({
+  deep_bom_analysis: z.looseObject({
     productionOrderId: z.string().optional(),
-  }).passthrough(),
+  }),
 
   // ── MRP Skills ──
-  run_mrp: z.object({
+  run_mrp: z.looseObject({
     horizonWeeks: z.number().int().positive().optional().default(12),
     bucketSize: z.enum(["day", "week", "month"]).optional().default("week"),
     safetyLeadTimeDays: z.number().optional().default(2),
@@ -159,26 +159,26 @@ const SupplyChainSchemas = {
     fixedOrderQty: z.number().optional(),
     includeCapacity: z.boolean().optional().default(true),
     includePegging: z.boolean().optional().default(true),
-  }).passthrough(),
+  }),
 
-  mrp_impact: z.object({
+  mrp_impact: z.looseObject({
     itemNo: z.string(),
     delayDays: z.number().int().positive(),
-  }).passthrough(),
+  }),
 
   // ── Vendor & Order Management Skills ──
-  vendor_health: z.object({
+  vendor_health: z.looseObject({
     vendorNo: z.string().optional(),
-  }).passthrough(),
+  }),
 
-  execute_interventions: z.object({
+  execute_interventions: z.looseObject({
     interventionIds: z.array(z.string()).min(1),
     dryRun: z.boolean().optional().default(false),
-  }).passthrough(),
+  }),
 
-  firm_orders: z.object({
+  firm_orders: z.looseObject({
     orderIds: z.array(z.string()).min(1),
-  }).passthrough(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -344,8 +344,8 @@ async function clearFirmedOrdersPersistence(): Promise<void> {
   firmedOrders = [];
   try {
     await Bun.write(FIRMED_ORDERS_PATH, "[]");
-  } catch {
-    // ignore
+  } catch (e) {
+    process.stderr.write(`[${NAME}] clearFirmedOrdersPersistence failed: ` + (e instanceof Error ? e.message : String(e)) + '\n');
   }
 }
 
