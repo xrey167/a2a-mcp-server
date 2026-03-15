@@ -226,7 +226,14 @@ ${exampleLine}
 
 ${safeText}`;
 
-      const raw = await handleSkill("ask_claude", { prompt }, prompt);
+      let raw: Awaited<ReturnType<typeof handleSkill>>;
+      try {
+        raw = await handleSkill("ask_claude", { prompt }, prompt);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] extract_json: ask_claude failed: ${errMsg}\n`);
+        throw err;
+      }
       if (!raw || (typeof raw === "string" && !raw.trim())) {
         return "Error: extract_json returned an empty response — retry or check model availability";
       }
@@ -240,8 +247,8 @@ ${safeText}`;
       // Validate that the output is actually parseable JSON
       try {
         JSON.parse(stripped);
-      } catch {
-        process.stderr.write(`[${NAME}] extract_json: Claude returned non-JSON output (${stripped.slice(0, 80)}...)\n`);
+      } catch (parseErr) {
+        process.stderr.write(`[${NAME}] extract_json: Claude returned non-JSON output. parse error="${parseErr instanceof Error ? parseErr.message : String(parseErr)}" raw(0..80)="${rawStr.slice(0, 80)}"\n`);
         return `Error: extract_json: model did not return valid JSON — try simplifying the schema or adding an example`;
       }
 
@@ -285,7 +292,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
     const result = await handleSkill(sid, args ?? { prompt: text }, text);
     resultText = typeof result === "string" ? result : safeStringify(result, 2);
   } catch (err) {
-    resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[${NAME}] unhandled error in skill "${sid}": ${msg}\n`);
+    resultText = `Error: ${msg}`;
   }
   return buildA2AResponse(data.id, taskId, resultText);
 });
