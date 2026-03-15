@@ -704,8 +704,9 @@ Requirements:
       }
 
       // Strip markdown fences if present
+      // Strip markdown fences if present — handle any language tag (json, vega-lite, etc.)
       const cleaned = trimmed.startsWith("```")
-        ? trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim()
+        ? trimmed.replace(/^```[^\n]*\n?/, "").replace(/\s*```\s*$/, "").trim()
         : trimmed;
 
       let spec: unknown;
