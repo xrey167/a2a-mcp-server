@@ -10,6 +10,7 @@
  *   analyze_data   — Compute statistics (mean, median, stddev, percentiles, correlations)
  *   pivot_table    — Create pivot table summaries from flat data
  *   data_brief     — AI-generated narrative analysis of a dataset via ask_claude
+ *   sample_data    — Return a reproducible random sample of N rows from a dataset
  *   remember/recall — Shared persistent memory
  */
 
@@ -106,6 +107,15 @@ const DataSchemas = {
     /** Height of the chart in pixels (default 300) */
     height: z.number().int().min(100).max(2000).optional().default(300),
   }),
+  sample_data: z.looseObject({
+    /** Dataset to sample — array of records */
+    data: z.unknown(),
+    /** Number of rows to return (default 10, max 10 000) */
+    n: z.number().int().min(1).max(10_000).optional().default(10),
+    /** Optional integer seed ≥ 1 for reproducible sampling; omit or null for random */
+    seed: z.number().int().min(1).optional().nullable(),
+  }),
+
   data_brief: z.looseObject({
     /** Dataset to analyse — array of records (objects or primitives) */
     data: z.unknown(),
@@ -136,6 +146,7 @@ const AGENT_CARD = {
     { id: "visualize_data", name: "Visualize Data", description: "Generate a Vega-Lite JSON chart specification from a dataset or analyze_data/pivot_table output. Claude picks the best chart type or you can specify bar/line/scatter/area/pie/histogram/heatmap." },
     { id: "data_brief", name: "Data Brief", description: "AI-generated narrative analysis of a dataset: runs statistical analysis then calls ask_claude to produce a plain-language summary of patterns, outliers, and insights. Accepts an optional question to focus the analysis." },
     { id: "export_csv", name: "Export CSV", description: "Serialise an array of objects to CSV text. Optional fields param controls column selection and order. Completes the ETL loop: fetch_dataset/parse_csv → transform_data → export_csv." },
+    { id: "sample_data", name: "Sample Data", description: "Return a random sample of N rows from a dataset. Supports reproducible sampling via an integer seed. Useful for inspecting large datasets before running analyze_data or visualize_data." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -889,6 +900,57 @@ Requirements:
         rows.push(cols.map(c => escapeCell(row[c])).join(delimiter));
       }
       return rows.join("\n");
+    }
+
+    case "sample_data": {
+      const { data: rawData, n, seed } = DataSchemas.sample_data.parse(args);
+      let data: unknown = rawData;
+      if (typeof data === "string") {
+        try { data = JSON.parse(data); } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[${NAME}] sample_data: JSON.parse failed: ${msg}\n`);
+          throw new Error(`sample_data: data must be a JSON array (parse error: ${msg})`);
+        }
+      }
+      if (!Array.isArray(data)) {
+        process.stderr.write(`[${NAME}] sample_data: data is not an array (received ${typeof data})\n`);
+        throw new Error(`sample_data: data must be an array of records (received ${typeof data})`);
+      }
+      const totalRows = data.length;
+      if (totalRows === 0) {
+        return safeStringify({ totalRows: 0, sampledRows: 0, seed: seed ?? null, rows: [] }, 2);
+      }
+
+      const sampleSize = Math.min(n, totalRows);
+
+      // Reservoir sampling (Algorithm R) — O(totalRows) time, O(n) space.
+      // Uses a seeded LCG when seed != null for reproducible results, Math.random() otherwise.
+      let lcgState = seed ?? 0;
+      const lcgRandom = (): number => {
+        // Knuth multiplicative LCG (32-bit unsigned)
+        lcgState = (lcgState * 1_664_525 + 1_013_904_223) & 0xffff_ffff;
+        return (lcgState >>> 0) / 0x1_0000_0000;
+      };
+      const rand = seed != null ? lcgRandom : () => Math.random();
+
+      // Fill reservoir with first sampleSize rows. Shallow-spread each object row so
+      // that mutations to the reservoir cannot alias back into the caller's original array.
+      const shallowCopy = (v: unknown): unknown =>
+        typeof v === "object" && v !== null && !Array.isArray(v) ? { ...(v as object) } : v;
+      const reservoir: unknown[] = (data as unknown[]).slice(0, sampleSize).map(shallowCopy);
+      for (let i = sampleSize; i < totalRows; i++) {
+        const j = Math.floor(rand() * (i + 1));
+        if (j < sampleSize) {
+          reservoir[j] = shallowCopy((data as unknown[])[i]);
+        }
+      }
+
+      return safeStringify({
+        totalRows,
+        sampledRows: sampleSize,
+        seed: seed ?? null,
+        rows: reservoir,
+      }, 2);
     }
 
     default:
