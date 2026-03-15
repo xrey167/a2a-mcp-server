@@ -757,7 +757,7 @@ async function fetchGdeltConflicts(region?: string, country?: string, days: numb
   const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(query)}%20sourcelang:eng&mode=ArtList&maxrecords=${limit}&format=json&timespan=${days}d`;
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
   if (!res.ok) throw new Error(`GDELT HTTP ${res.status}: ${res.statusText}`);
-  const data = await res.json() as any;
+  const data = await res.json() as { articles?: Array<{ title?: string; domain?: string; seendate?: string; sourcecountry?: string; url?: string }> };
   const articles = data?.articles ?? [];
 
   // Group by domain/title keyword → synthesize conflicts
@@ -816,7 +816,7 @@ async function fetchAcledConflicts(region?: string, country?: string, days: numb
 
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
   if (!res.ok) throw new Error(`ACLED HTTP ${res.status}: ${res.statusText}`);
-  const data = await res.json() as any;
+  const data = await res.json() as { data?: Array<{ country?: string; event_type?: string; region?: string; actor1?: string; actor2?: string; event_date?: string; fatalities?: number; notes?: string }> };
   const events = data?.data ?? [];
 
   const conflictMap = new Map<string, Conflict>();
@@ -901,8 +901,10 @@ async function fetchOpenSkyFlights(
 
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers });
   if (!res.ok) throw new Error(`OpenSky HTTP ${res.status}: ${res.statusText}`);
-  const data = await res.json() as any;
-  const states: any[] = (data?.states ?? []).slice(0, MAX_OPENSKY_STATES);
+  // OpenSky state vector: positional array per https://openskynetwork.github.io/opensky-api/rest.html
+  type OpenSkyState = [string, string, string, number | null, number | null, number | null, number | null, number | null, boolean, number | null, number | null, number | null, number[] | null, number | null, string | null, boolean, number];
+  const data = await res.json() as { states?: OpenSkyState[]; time?: number };
+  const states: OpenSkyState[] = (data?.states ?? []).slice(0, MAX_OPENSKY_STATES);
 
   const flights: FlightState[] = [];
   for (const s of states) {
