@@ -10,6 +10,7 @@
  *   analyze_data   — Compute statistics (mean, median, stddev, percentiles, correlations)
  *   pivot_table    — Create pivot table summaries from flat data
  *   data_brief     — AI-generated narrative analysis of a dataset via ask_claude
+ *   deduplicate    — Remove duplicate rows by composite key fields
  *   remember/recall — Shared persistent memory
  */
 
@@ -116,6 +117,15 @@ const DataSchemas = {
     /** Max records to analyse — avoids huge prompt (default 500) */
     maxRecords: z.number().int().positive().optional().default(500),
   }),
+
+  deduplicate: z.looseObject({
+    /** Array of records to deduplicate */
+    data: z.unknown(),
+    /** Fields whose combined value identifies a duplicate (e.g. ["id"] or ["first_name","last_name"]) */
+    keys: z.array(z.string().min(1)).min(1).max(20),
+    /** Which duplicate to retain: "first" (default) keeps the earliest, "last" keeps the latest */
+    keep: z.enum(["first", "last"]).optional().default("first"),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -136,6 +146,7 @@ const AGENT_CARD = {
     { id: "visualize_data", name: "Visualize Data", description: "Generate a Vega-Lite JSON chart specification from a dataset or analyze_data/pivot_table output. Claude picks the best chart type or you can specify bar/line/scatter/area/pie/histogram/heatmap." },
     { id: "data_brief", name: "Data Brief", description: "AI-generated narrative analysis of a dataset: runs statistical analysis then calls ask_claude to produce a plain-language summary of patterns, outliers, and insights. Accepts an optional question to focus the analysis." },
     { id: "export_csv", name: "Export CSV", description: "Serialise an array of objects to CSV text. Optional fields param controls column selection and order. Completes the ETL loop: fetch_dataset/parse_csv → transform_data → export_csv." },
+    { id: "deduplicate", name: "Deduplicate", description: "Remove duplicate rows from a dataset based on one or more key fields. Returns unique rows plus a summary (totalRows, uniqueRows, removedCount). keep='first' retains the earliest occurrence, keep='last' retains the latest. Missing key fields count as a distinct null value." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -889,6 +900,108 @@ Requirements:
         rows.push(cols.map(c => escapeCell(row[c])).join(delimiter));
       }
       return rows.join("\n");
+    }
+
+    case "deduplicate": {
+      const { data, keys, keep } = DataSchemas.deduplicate.parse(args);
+      if (!Array.isArray(data)) throw new Error("deduplicate: data must be an array of records");
+
+      const MAX_ROWS = 200_000;
+      if (data.length > MAX_ROWS) {
+        throw new Error(
+          `deduplicate: raw array has ${data.length} rows — exceeds ${MAX_ROWS} row limit. ` +
+          `If the array contains non-object entries (nulls, primitives), filter them first. ` +
+          `For large datasets, split into batches of ≤${MAX_ROWS} rows and merge the unique sets.`
+        );
+      }
+
+      // Use the file-scope DataRow alias (defined at the top of the module)
+      const totalRows = data.length;
+      const seen = new Set<string>();
+      const unique: DataRow[] = [];
+      let missingKeyRows = 0;
+      let skippedRows = 0;
+
+      // Build composite key: encode each field as [1, value] when present, [0] when absent.
+      // This prevents JSON.stringify from colliding undefined (missing field) with explicit null
+      // since JSON.stringify([undefined]) === "[null]" === JSON.stringify([null]).
+      // Validates that key fields are scalar on the first row processed — object/array values
+      // produce order-dependent keys and are rejected with a descriptive error.
+      // Throws with context if a key field contains a non-serialisable value (BigInt, circular ref).
+      let firstRowChecked = false;
+      const rowKey = (row: DataRow): string => {
+        if (!firstRowChecked) {
+          firstRowChecked = true;
+          for (const k of keys) {
+            if (k in row) {
+              const v = row[k];
+              if (v !== null && typeof v === "object") {
+                throw new Error(
+                  `deduplicate: key field "${k}" contains a non-scalar value (${Array.isArray(v) ? "array" : "object"}) — ` +
+                  `key fields must be scalar (string, number, boolean, null) for reliable deduplication`
+                );
+              }
+            }
+          }
+        }
+        try {
+          return JSON.stringify(keys.map(k => (k in row ? [1, row[k]] : [0])));
+        } catch (e) {
+          throw new Error(`deduplicate: key field contains a non-serialisable value (e.g. BigInt, circular reference): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      };
+
+      if (keep === "last") {
+        // Reverse pass: collect in reverse order, then reverse to restore original order.
+        // Using push+reverse is O(n) total; unshift would be O(n^2) due to shifting on each call.
+        for (let i = (data as unknown[]).length - 1; i >= 0; i--) {
+          const row = (data as unknown[])[i];
+          if (row === null || typeof row !== "object" || Array.isArray(row)) { skippedRows++; continue; }
+          const r = row as DataRow;
+          const k = rowKey(r);
+          if (!seen.has(k)) {
+            seen.add(k);
+            // Count missing-key rows only for kept rows — duplicates with missing keys are not counted
+            if (keys.some(key => !(key in r))) missingKeyRows++;
+            unique.push(r);
+          }
+        }
+        unique.reverse();
+      } else {
+        // Forward pass (keep === "first")
+        for (const row of data as unknown[]) {
+          if (row === null || typeof row !== "object" || Array.isArray(row)) { skippedRows++; continue; }
+          const r = row as DataRow;
+          const k = rowKey(r);
+          if (!seen.has(k)) {
+            seen.add(k);
+            // Count missing-key rows only for kept rows — duplicates with missing keys are not counted
+            if (keys.some(key => !(key in r))) missingKeyRows++;
+            unique.push(r);
+          }
+        }
+      }
+
+      if (missingKeyRows > 0) {
+        process.stderr.write(`[${NAME}] deduplicate: ${missingKeyRows} rows missing at least one key field — treated as absent for dedup\n`);
+      }
+      if (skippedRows > 0) {
+        process.stderr.write(`[${NAME}] deduplicate: ${skippedRows} non-object rows skipped (null, array, or primitive)\n`);
+      }
+
+      // removedCount excludes skipped non-object rows — those were never candidates for dedup
+      const result: Record<string, unknown> = {
+        totalRows,
+        uniqueRows: unique.length,
+        removedCount: totalRows - skippedRows - unique.length,
+        keys,
+        keep,
+        rows: unique,
+      };
+      if (skippedRows > 0) result.skippedRows = skippedRows;
+      if (missingKeyRows > 0) result.warning = `${missingKeyRows} rows were missing at least one key field and were treated as absent`;
+
+      return safeStringify(result, 2);
     }
 
     default:
