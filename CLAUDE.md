@@ -42,7 +42,7 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 | `src/workers/web.ts` | 8082 | fetch_url, call_api, scrape_page, summarize_url |
 | `src/workers/ai.ts` | 8083 | ask_claude, search_files, query_sqlite, summarize_file |
 | `src/workers/code.ts` | 8084 | codex_exec, codex_review, generate_tests (via `codex exec` subprocess) |
-| `src/workers/knowledge.ts` | 8085 | create_note, read_note, update_note, delete_note, search_notes, list_notes, summarize_notes, query_knowledge |
+| `src/workers/knowledge.ts` | 8085 | create_note, read_note, update_note, delete_note, search_notes, list_notes, summarize_notes, query_knowledge, knowledge_brief |
 | `src/workers/design.ts` | 8086 | enhance_ui_prompt, suggest_screens, design_critique, generate_brand (Gemini-powered) |
 | `src/workers/factory.ts` | 8087 | normalize_intent, create_project, quality_gate, list_pipelines, list_templates, estimate_effort (AppFactory-style project gen) |
 | `src/workers/data.ts` | 8088 | parse_csv, parse_json, transform_data, analyze_data, pivot_table, fetch_dataset, data_brief, export_csv |
