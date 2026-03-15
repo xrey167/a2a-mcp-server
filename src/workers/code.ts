@@ -264,10 +264,12 @@ async function refactorCodeWithClaude(
 ): Promise<string> {
   const sanitizedCode = sanitizeUserInput(code, "code_to_refactor");
   const sanitizedLanguage = sanitizeForPrompt(language, "language");
-  const sanitizedGoal = goal ? sanitizeForPrompt(goal, "goal") : null;
+  // goal is free-text (up to 500 chars) — use sanitizeUserInput like explain_code's focus field
+  const sanitizedGoal = goal ? sanitizeUserInput(goal, "goal") : null;
   const sanitizedContext = context ? sanitizeUserInput(context, "context") : null;
 
   if (sanitizedCode.length > 15_000) {
+    process.stderr.write(`[${NAME}] refactor_code: post-sanitization code length ${sanitizedCode.length} exceeds 15,000 — rejecting\n`);
     throw new Error(`refactor_code: sanitized code is ${sanitizedCode.length} characters — input likely contains many special characters that expand during sanitization`);
   }
 
@@ -306,9 +308,19 @@ RATIONALE:
     process.stderr.write(`[${NAME}] refactor_code: AI worker returned empty response\n`);
     throw new Error("refactor_code: AI returned an empty response — retry or check model availability");
   }
+  if (result.trimStart().startsWith("{") && (result.includes("\"jsonrpc\"") || result.includes("\"result\""))) {
+    process.stderr.write(`[${NAME}] refactor_code: AI worker returned A2A envelope instead of refactored code\n`);
+    throw new Error("refactor_code: AI worker returned an A2A envelope instead of refactored code");
+  }
   if (!result.includes("REFACTORED CODE:")) {
     process.stderr.write(`[${NAME}] refactor_code: AI response missing expected structure. Got: ${result.slice(0, 200)}\n`);
     throw new Error("refactor_code: AI response did not follow the expected format — missing 'REFACTORED CODE:' section. Retry or check model behavior.");
+  }
+  // Guard against structurally-valid-but-empty REFACTORED CODE section (silent functional failure)
+  const codeSection = result.split("REFACTORED CODE:")[1]?.split("CHANGES:")[0] ?? "";
+  if (!codeSection.trim()) {
+    process.stderr.write(`[${NAME}] refactor_code: REFACTORED CODE section is empty. Full response: ${result.slice(0, 300)}\n`);
+    throw new Error("refactor_code: AI returned a response with an empty REFACTORED CODE section — retry or check model behavior.");
   }
   return result;
 }
