@@ -37,13 +37,13 @@ const WriteFileSchema = z.object({
 
 const FetchUrlSchema = z.object({
   url: z.string().url("invalid URL"),
-  format: z.enum(["text", "json"]).optional().default("text"),
+  format: z.enum(["text", "json"]).default("text"),
 }).strict();
 
 const CallApiSchema = z.object({
   url: z.string().url("invalid URL"),
   method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]),
-  headers: z.record(z.string()).optional().default({}),
+  headers: z.record(z.string()).default({}),
   body: z.record(z.unknown()).optional(),
 }).strict();
 
@@ -240,6 +240,7 @@ const askClaude: Skill = {
         messages: [{ role: "user", content: prompt }],
       });
       const block = message.content[0];
+      if (!block) return "";
       return block.type === "text" ? block.text : JSON.stringify(block);
     } catch {
       return await runClaudeCLI(prompt, model);
