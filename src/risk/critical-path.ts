@@ -144,7 +144,8 @@ function topologicalSort(nodes: GraphNode[], edges: GraphEdge[]): string[] {
   const sorted: string[] = [];
 
   while (queue.length > 0) {
-    const current = queue.shift()!;
+    const current = queue.shift();
+    if (!current) break;
     sorted.push(current);
 
     for (const neighbor of adjacency.get(current) ?? []) {
