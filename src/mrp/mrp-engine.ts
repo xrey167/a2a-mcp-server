@@ -343,6 +343,7 @@ function generatePlannedOrders(
       counter++;
       const dueBucket = horizon.buckets[bucket.bucketIndex];
       const releaseBucket = horizon.buckets[bucket.plannedOrderRelease] ?? horizon.buckets[0];
+      if (!dueBucket || !releaseBucket) continue;
 
       const orderType = meta?.replenishmentMethod === "production" || meta?.replenishmentMethod === "assembly"
         ? "production" as const
