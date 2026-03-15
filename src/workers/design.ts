@@ -11,6 +11,14 @@ const DesignSchemas = {
   enhance_ui_prompt: z.looseObject({ description: z.string().min(1), deviceType: z.string().optional().default("mobile") }),
   suggest_screens: z.looseObject({ appConcept: z.string().min(1), deviceType: z.string().optional().default("mobile") }),
   design_critique: z.looseObject({ description: z.string().min(1) }),
+  color_palette: z.looseObject({
+    /** Brand or product description to base the palette on */
+    description: z.string().min(1).refine(s => s.trim().length > 0, "description must not be blank"),
+    /** Optional mood/tone hint, e.g. "energetic", "calm", "professional", "playful" */
+    mood: z.string().max(100).optional(),
+    /** Number of accent colors to include (1-5, default 2) */
+    accents: z.number().int().min(1).max(5).optional().default(2),
+  }),
 };
 
 const PORT = 8086;
@@ -26,6 +34,7 @@ const AGENT_CARD = {
     { id: "enhance_ui_prompt", name: "Enhance UI Prompt", description: "Expand a vague UI description into a detailed, structured Stitch-ready design prompt" },
     { id: "suggest_screens", name: "Suggest Screens", description: "Suggest essential screens for an app concept, each with a detailed design prompt" },
     { id: "design_critique", name: "Design Critique", description: "Critique a UI design description and return actionable improvements" },
+    { id: "color_palette", name: "Color Palette", description: "Generate a coordinated brand color palette from a description. Returns JSON with primary, secondary, background, surface, text, and accent colors — each with a hex code, name, and usage role. Optional mood hint (e.g. 'calm', 'energetic') and configurable accent count (1-5)." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory" },
   ],
@@ -134,6 +143,65 @@ ${sanitizeUserInput(description, "design_description")}`;
   return callGemini(systemInstruction, userPrompt);
 }
 
+// ── Generate a coordinated brand color palette ───────────────────
+async function colorPalette(description: string, mood: string | undefined, accents: number): Promise<string> {
+  const moodLine = mood ? `\nMood/tone: ${sanitizeUserInput(mood, "mood_hint", 100)}` : "";
+
+  const systemInstruction = `You are a professional brand designer specialising in color systems.
+Generate a complete, harmonious color palette for a brand and return ONLY valid JSON — no markdown fences, no explanation.
+
+Required JSON shape:
+{
+  "primary":    { "hex": "#xxxxxx", "name": "...", "role": "..." },
+  "secondary":  { "hex": "#xxxxxx", "name": "...", "role": "..." },
+  "background": { "hex": "#xxxxxx", "name": "...", "role": "..." },
+  "surface":    { "hex": "#xxxxxx", "name": "...", "role": "..." },
+  "text":       { "hex": "#xxxxxx", "name": "...", "role": "..." },
+  "textMuted":  { "hex": "#xxxxxx", "name": "...", "role": "..." },
+  "accents":    [{ "hex": "#xxxxxx", "name": "...", "role": "..." }, ...]
+}
+
+Rules:
+- All hex values must be valid 6-digit lowercase hex codes (#rrggbb)
+- name: a descriptive color name (e.g. "Deep Ocean", "Warm Sand")
+- role: one-sentence usage guidance (e.g. "Primary CTA buttons and key interactive elements")
+- accents array must have exactly ${accents} entries
+- Ensure WCAG AA contrast between text and background (#4.5:1 minimum)
+- Colors must feel cohesive — use a coherent hue family or complementary scheme`;
+
+  const userPrompt = `Brand/product description:${moodLine}
+
+${sanitizeUserInput(description, "brand_description")}`;
+
+  const raw = await callGemini(systemInstruction, userPrompt);
+
+  if (raw.trim().length === 0) {
+    process.stderr.write(`[${NAME}] color_palette: Gemini returned empty response (descLen=${description.length})\n`);
+    throw new Error("color_palette: Gemini returned empty response — retry or check model availability");
+  }
+
+  // Strip optional markdown fences
+  const stripped = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+
+  // Validate JSON and required fields
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripped);
+  } catch {
+    process.stderr.write(`[${NAME}] color_palette: Gemini returned non-JSON output (${stripped.slice(0, 80)}...)\n`);
+    throw new Error("color_palette: model did not return valid JSON — retry or try a simpler description");
+  }
+
+  const p = parsed as Record<string, unknown>;
+  const hasRequired = ["primary", "secondary", "background", "surface", "text", "textMuted", "accents"].every(k => k in p);
+  if (!hasRequired || !Array.isArray(p.accents) || (p.accents as unknown[]).length !== accents) {
+    process.stderr.write(`[${NAME}] color_palette: incomplete palette shape — keys=${Object.keys(p).join(",")}, accents=${Array.isArray(p.accents) ? p.accents.length : "missing"}\n`);
+    throw new Error("color_palette: model returned incomplete palette — retry or check model availability");
+  }
+
+  return stripped;
+}
+
 // ── Skill dispatcher ─────────────────────────────────────────────
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
@@ -153,6 +221,24 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     case "design_critique": {
       const { description } = DesignSchemas.design_critique.parse({ description: args.description ?? text, ...args });
       return designCritique(description);
+    }
+
+    case "color_palette": {
+      let cpParsed: ReturnType<typeof DesignSchemas.color_palette.parse>;
+      try {
+        cpParsed = DesignSchemas.color_palette.parse({ description: args.description ?? text, ...args });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] color_palette: Zod parse error: ${err instanceof Error ? err.message : String(err)}\n`);
+        throw err;
+      }
+      const { description, mood, accents } = cpParsed;
+
+      if (description.length > 2_000) {
+        process.stderr.write(`[${NAME}] color_palette: description too large (${description.length} chars)\n`);
+        return `Error: description is ${description.length} characters — exceeds 2,000 character limit`;
+      }
+
+      return colorPalette(description, mood, accents);
     }
 
     default:
