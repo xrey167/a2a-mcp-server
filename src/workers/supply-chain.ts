@@ -102,8 +102,8 @@ const SupplyChainSchemas = {
   analyze_orders: z.looseObject({
     orderType: z.enum(["production", "sales", "both"]).optional().default("both"),
     status: z.string().optional(),
-    dateFrom: z.string().optional(),
-    dateTo: z.string().optional(),
+    dateFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be YYYY-MM-DD").optional(),
+    dateTo: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be YYYY-MM-DD").optional(),
     itemFilter: z.string().optional(),
   }),
 
@@ -381,6 +381,16 @@ function log(msg: string) {
   process.stderr.write(`[${NAME}] ${msg}\n`);
 }
 
+/**
+ * Returns true when an ERP entity simply doesn't exist in this BC installation
+ * (404, endpoint not deployed). Re-throw everything else — especially input
+ * validation errors from validateDate() so callers get a meaningful response.
+ */
+function isEntityUnavailable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("404") || /entity (not found|not supported|unavailable)/i.test(msg);
+}
+
 function requireConnector(): ERPConnector {
   if (!connector) {
     throw new Error("No ERP connection configured. Use the connect_erp skill first.");
@@ -520,9 +530,18 @@ async function handleAnalyzeOrders(args: Record<string, unknown>): Promise<strin
   // Fetch posted receipts, work centers, and transfer orders
   log("loading posted receipts, work centers, and transfer orders");
   const [postedReceipts, erpWorkCenters, transferOrders] = await Promise.all([
-    erp.getPostedReceipts({ dateFrom, dateTo }).catch(() => [] as PostedReceipt[]),
-    erp.getWorkCenters().catch(() => [] as WorkCenterData[]),
-    erp.getTransferOrders({ dateFrom, dateTo }).catch(() => [] as TransferOrder[]),
+    erp.getPostedReceipts({ dateFrom, dateTo }).catch((err) => {
+      if (isEntityUnavailable(err)) return [] as PostedReceipt[];
+      throw err;
+    }),
+    erp.getWorkCenters().catch((err) => {
+      if (isEntityUnavailable(err)) return [] as WorkCenterData[];
+      throw err;
+    }),
+    erp.getTransferOrders({ dateFrom, dateTo }).catch((err) => {
+      if (isEntityUnavailable(err)) return [] as TransferOrder[];
+      throw err;
+    }),
   ]);
 
   // Cache for use in other skills
