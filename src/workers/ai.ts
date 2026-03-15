@@ -360,7 +360,14 @@ ${safeText}
       return stripped;
     }
     case "summarize_text": {
-      const { text: rawText, length, focus } = AiSchemas.summarize_text.parse({ text: args.text ?? text, ...args });
+      let parsed: ReturnType<typeof AiSchemas.summarize_text.parse>;
+      try {
+        parsed = AiSchemas.summarize_text.parse({ text: args.text ?? text, ...args });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] summarize_text: Zod parse error: ${err instanceof Error ? err.message : String(err)}\n`);
+        throw err;
+      }
+      const { text: rawText, length, focus } = parsed;
 
       if (rawText.length > 50_000) {
         process.stderr.write(`[${NAME}] summarize_text: input too large (${rawText.length} chars, limit 50000)\n`);
@@ -369,8 +376,8 @@ ${safeText}
 
       // sanitizeUserInput wraps in <tag>…</tag> block — use directly without re-wrapping in prompt
       const safeText = sanitizeUserInput(rawText, "text_to_summarize", 50_000);
-      // sanitizeForPrompt for short inline values: escapes XML chars, no block wrapping
-      const safeFocus = focus ? sanitizeForPrompt(focus, "focus") : null;
+      // sanitizeUserInput for focus: free-text field needs XML escaping (sanitizeForPrompt does NOT escape < > &)
+      const safeFocus = focus ? sanitizeUserInput(focus, "focus_hint", 300) : null;
 
       const lengthGuide =
         length === "short"
