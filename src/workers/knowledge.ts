@@ -257,10 +257,12 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         try {
           const content = readFileSync(join(VAULT, file), "utf-8");
           return `## ${file.replace(/\.md$/, "")}\n${content}`;
-        } catch {
-          return `## ${file.replace(/\.md$/, "")}\n(unreadable)`;
+        } catch (err) {
+          process.stderr.write(`[${NAME}] summarize_notes: failed to read "${file}": ${err instanceof Error ? err.message : String(err)}\n`);
+          return null;
         }
-      });
+      }).filter((c): c is string => c !== null);
+      if (noteContents.length === 0) return "No notes could be read.";
 
       // Step 3: call ai-agent's ask_claude directly (peer A2A — no orchestrator hop)
       const focusSection = focus ? `\n\nFocus area:\n${sanitizeForPrompt(focus, "focus_area")}` : "";
@@ -271,8 +273,19 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     case "query_knowledge": {
       const { question, maxNotes } = KnowledgeSchemas.query_knowledge.parse({ question: args.question ?? text, ...args });
 
-      // Step 1: search for relevant notes via FTS5
-      const searchResult = await handleSkill("search_notes", { query: question }, question);
+      // Step 1: search for relevant notes via FTS5 — wrap to catch SQLite/vault errors
+      let searchResult: string;
+      try {
+        searchResult = await handleSkill("search_notes", { query: question }, question);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] query_knowledge: search_notes threw: ${reason}\n`);
+        return JSON.stringify({
+          question, sourcesUsed: [], answer: null,
+          dataQuality: "error",
+          error: `Knowledge search failed: ${reason}`,
+        }, null, 2);
+      }
       if (searchResult === "No matching notes found") {
         return JSON.stringify({
           question, sourcesUsed: [], answer: null,
@@ -285,13 +298,22 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const CONTEXT_CHAR_LIMIT = 20_000;
       const noteFiles = searchResult.split("\n").slice(0, maxNotes);
       const sources: string[] = [];
+      const readErrors: string[] = [];
       let contextText = "";
       let truncated = false;
 
       for (const file of noteFiles) {
         if (truncated) break;
+        // Validate each FTS-derived path stays within the vault (prevents traversal via crafted note titles)
+        const fullPath = join(VAULT, file);
+        const realPath = safeRealpathSync(fullPath);
+        if (!realPath.startsWith(VAULT_REAL + "/") && realPath !== VAULT_REAL) {
+          process.stderr.write(`[${NAME}] query_knowledge: path traversal rejected: "${file}"\n`);
+          readErrors.push(file);
+          continue;
+        }
         try {
-          const content = readFileSync(join(VAULT, file), "utf-8");
+          const content = readFileSync(fullPath, "utf-8");
           const section = `## ${file.replace(/\.md$/, "")}\n${content}\n`;
           if (contextText.length + section.length > CONTEXT_CHAR_LIMIT) {
             contextText += section.slice(0, CONTEXT_CHAR_LIMIT - contextText.length) + "\n... (truncated)";
@@ -303,6 +325,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           }
         } catch (err) {
           process.stderr.write(`[${NAME}] query_knowledge: failed to read ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
+          readErrors.push(file);
         }
       }
 
@@ -311,12 +334,19 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           question, sourcesUsed: [], answer: null,
           dataQuality: "no_sources",
           error: "Found matching notes but could not read any of them.",
+          ...(readErrors.length > 0 ? { readErrors } : {}),
         }, null, 2);
       }
 
       // Step 3: synthesize answer via ai-agent (peer A2A call)
       const safeQuestion = sanitizeUserInput(question, "question");
-      const safeContext = sanitizeUserInput(contextText, "knowledge_context");
+      // sanitizeUserInput's maxLength is pre-expansion; XML entity encoding (&lt; etc.) can
+      // expand each char up to 4x. Check post-sanitization size and re-sanitize a smaller
+      // slice if the result exceeds the intended limit (covers notes with heavy HTML/Markdown).
+      let safeContext = sanitizeUserInput(contextText, "knowledge_context", CONTEXT_CHAR_LIMIT);
+      if (safeContext.length > CONTEXT_CHAR_LIMIT) {
+        safeContext = sanitizeUserInput(contextText.slice(0, Math.floor(CONTEXT_CHAR_LIMIT / 2)), "knowledge_context");
+      }
 
       const prompt = `You are a knowledge assistant. Answer the question below using ONLY the provided notes as context.
 
@@ -331,22 +361,39 @@ ${safeContext}
 
 Answer the question directly and concisely. Cite which note(s) your answer draws from.`;
 
-      const answer = await callPeer("ask_claude", { prompt }, prompt, 60_000);
-
-      if (!answer || !answer.trim()) {
-        process.stderr.write(`[${NAME}] query_knowledge: callPeer returned empty response for question="${question.slice(0, 80)}"\n`);
+      // Wrap callPeer to return structured JSON error instead of letting throw escape to HTTP handler
+      let answer: string;
+      try {
+        answer = await callPeer("ask_claude", { prompt }, prompt, 60_000);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] query_knowledge: callPeer/ask_claude failed: ${reason}\n`);
         return JSON.stringify({
           question, sourcesUsed: sources, answer: null,
           dataQuality: "error",
-          error: "AI synthesis returned an empty answer — retry or check model availability.",
+          error: `AI synthesis failed: ${reason}`,
         }, null, 2);
       }
 
+      // Treat empty responses, ai-worker error strings, and raw A2A JSON envelopes as failures
+      const trimmedAnswer = answer.trimStart();
+      if (!answer || !answer.trim() || answer.startsWith("Error:") || trimmedAnswer.startsWith("{") || trimmedAnswer.startsWith("[")) {
+        process.stderr.write(`[${NAME}] query_knowledge: ask_claude returned error/empty for question="${safeQuestion.slice(0, 80)}"\n`);
+        return JSON.stringify({
+          question, sourcesUsed: sources, answer: null,
+          dataQuality: "error",
+          error: answer?.trim() || "AI synthesis returned an empty answer — retry or check model availability.",
+        }, null, 2);
+      }
+
+      // readErrors.length > 0 means some notes were unreadable → context was partial even if not char-truncated
+      const effectiveDataQuality = truncated || readErrors.length > 0 ? "partial" : "ok";
       return JSON.stringify({
         question,
         sourcesUsed: sources,
         answer,
-        dataQuality: truncated ? "partial" : "ok",
+        dataQuality: effectiveDataQuality,
+        ...(readErrors.length > 0 ? { readErrors } : {}),
       }, null, 2);
     }
 
