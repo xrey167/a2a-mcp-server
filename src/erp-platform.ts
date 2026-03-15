@@ -5,6 +5,9 @@ import { randomUUID } from "crypto";
 import { z } from "zod";
 import type { WorkflowDefinition } from "./workflow-engine.js";
 
+const RENEWAL_FETCH_TIMEOUT_MS = 15_000;
+const CONNECTOR_FETCH_TIMEOUT_MS = 30_000;
+
 export type ConnectorType = "odoo" | "business-central" | "dynamics";
 export type ProductType = "quote-to-order" | "lead-to-cash" | "collections";
 export type QuoteToOrderState = "draft" | "submitted" | "approved" | "rejected" | "converted_to_order" | "fulfilled";
@@ -2292,7 +2295,7 @@ export async function renewBusinessCentralSubscription(input?: {
     const req = new Request(endpoint, { method, headers, body: JSON.stringify(body) });
     let nativeSubscriptionId = subscriptionId;
     try {
-      const res = await fetch(req, { signal: AbortSignal.timeout(15_000) });
+      const res = await fetch(req, { signal: AbortSignal.timeout(RENEWAL_FETCH_TIMEOUT_MS) });
       if (!res.ok) {
         throw new Error(`Business Central renewal failed: HTTP ${res.status}`);
       }
@@ -2523,7 +2526,7 @@ async function runNativeConnectorSync(
       ...resolveAuthHeader(row.auth_mode, config),
     },
     body: nativeReq.body,
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(CONNECTOR_FETCH_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -3090,7 +3093,9 @@ export function getQuoteToOrderPipeline(workspaceIdInput: unknown, filtersInput:
     converted_to_order: { count: 0, amount: 0 },
     fulfilled: { count: 0, amount: 0 },
   };
-  for (const row of stateRows) states[row.state] = { count: row.cnt, amount: num(row.amount) };
+  for (const row of stateRows) {
+    if (Object.hasOwn(states, row.state)) states[row.state] = { count: row.cnt, amount: num(row.amount) };
+  }
 
   const submitted = states.submitted.count + states.approved.count + states.converted_to_order.count + states.fulfilled.count + states.rejected.count;
   const converted = states.converted_to_order.count + states.fulfilled.count;
@@ -3335,7 +3340,7 @@ async function pullGmailMessages(input: {
   const listUrl = `https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(input.userId)}/messages?${params.toString()}`;
   const listRes = await fetch(listUrl, {
     headers: { Authorization: `Bearer ${input.accessToken}` },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(CONNECTOR_FETCH_TIMEOUT_MS),
   });
   if (!listRes.ok) {
     throw new Error(`Gmail list API failed: HTTP ${listRes.status}`);
@@ -3353,7 +3358,7 @@ async function pullGmailMessages(input: {
     const detailUrl = `https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(input.userId)}/messages/${encodeURIComponent(id)}?format=full`;
     const detailRes = await fetch(detailUrl, {
       headers: { Authorization: `Bearer ${input.accessToken}` },
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(CONNECTOR_FETCH_TIMEOUT_MS),
     });
     if (!detailRes.ok) continue;
     const detail = asObject(await detailRes.json());
@@ -3418,7 +3423,7 @@ async function pullOutlookMessages(input: {
   const url = `${base}/mailFolders/${encodeURIComponent(folderSegment)}/messages?${params.toString()}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${input.accessToken}` },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(CONNECTOR_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`Outlook list API failed: HTTP ${res.status}`);
@@ -5347,7 +5352,7 @@ function getPersonalityFeedbackSummary(workspaceId: string, contactKey: string, 
     let replies = 0;
     let conversions = 0;
     for (const row of rows) {
-      summary[row.outcome] += 1;
+      if (Object.hasOwn(summary, row.outcome)) summary[row.outcome] += 1;
       scoreSum += num(row.feedback_score);
       if (row.reply_received === 1) replies += 1;
       if (row.converted_to_order === 1) conversions += 1;
@@ -5526,7 +5531,9 @@ export function getQuoteCommunicationAnalytics(
      GROUP BY status`
   ).all(workspaceId);
   const actionsByStatus: Record<QuoteFollowupStatus, number> = { open: 0, sent: 0, done: 0, dismissed: 0 };
-  for (const row of actionRows) actionsByStatus[row.status] = row.cnt;
+  for (const row of actionRows) {
+    if (Object.hasOwn(actionsByStatus, row.status)) actionsByStatus[row.status] = row.cnt;
+  }
 
   const timelineRows = db.query<{ quote_external_id: string; direction: QuoteCommunicationDirection; occurred_at: string }, unknown[]>(
     `SELECT quote_external_id, direction, occurred_at
@@ -9679,13 +9686,15 @@ function tryGetCachedProfile(
   const age = Date.now() - new Date(cached.computed_at).getTime();
   if (age >= 3600_000) return null;
 
+  if (typeof cached !== 'object' || cached === null) throw new Error('cache: unexpected non-object');
+  const cacheObj = cached as Record<string, any>;
   const {
     contacts_json,
     metadata_json,
     workspace_id,
     customer_external_id,
     ...publicFields
-  } = cached as unknown as Record<string, any>;
+  } = cacheObj;
 
   return {
     ...publicFields,
