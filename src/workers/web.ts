@@ -417,18 +417,27 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { url, followRedirects } = WebSchemas.get_headers.parse({ url: args.url ?? text, ...args });
       const block = await blockPrivateUrl(url);
       if (block) return block;
-      const res = await fetch(url, {
-        method: "HEAD",
-        redirect: followRedirects ? "follow" : "manual",
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
-      });
-      // After potential redirects, validate the final URL for SSRF
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: "HEAD",
+          redirect: followRedirects ? "follow" : "manual",
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+        });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] get_headers: fetch failed for ${url}: ${err}\n`);
+        return `get_headers: could not reach ${url} — ${err instanceof Error ? err.message : String(err)}`;
+      }
+      // Validate the final URL after redirects against the SSRF blocklist.
+      // res.url is "" in Bun when redirect:"manual" (no follow); fall back to original url.
+      // Always run this check (not only when finalUrl !== url) to close the DNS-rebinding window.
       const finalUrl = res.url || url;
       if (finalUrl !== url) {
-        const finalBlock = await blockPrivateUrl(finalUrl);
-        if (finalBlock) return finalBlock;
+        process.stderr.write(`[${NAME}] get_headers: followed redirect ${url} -> ${finalUrl}\n`);
       }
+      const finalBlock = await blockPrivateUrl(finalUrl);
+      if (finalBlock) return finalBlock;
       const headers: Record<string, string> = {};
       res.headers.forEach((value, name) => {
         headers[name] = value;
