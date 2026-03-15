@@ -13,7 +13,7 @@ const DesignSchemas = {
   design_critique: z.looseObject({ description: z.string().min(1) }),
   color_palette: z.looseObject({
     /** Brand or product description to base the palette on */
-    description: z.string().min(1).refine(s => s.trim().length > 0, "description must not be blank"),
+    description: z.string().min(1).max(2_000).refine(s => s.trim().length > 0, "description must not be blank"),
     /** Optional mood/tone hint, e.g. "energetic", "calm", "professional", "playful" */
     mood: z.string().max(100).optional(),
     /** Number of accent colors to include (1-5, default 2) */
@@ -74,7 +74,8 @@ async function callGemini(systemInstruction: string, userPrompt: string): Promis
     return response.text.trim();
   } catch (err) {
     if (!(err instanceof Error) || err.message !== "no-api-key") throw err;
-    // CLI fallback: prefix system instruction into the prompt
+    // CLI fallback: no API key configured — use gemini CLI (OAuth)
+    process.stderr.write(`[${NAME}] callGemini: no API key, falling back to gemini CLI\n`);
     return runGeminiCLI(`${systemInstruction}\n\n${userPrompt}`);
   }
 }
@@ -171,7 +172,7 @@ Rules:
 
   const userPrompt = `Brand/product description:${moodLine}
 
-${sanitizeUserInput(description, "brand_description")}`;
+${sanitizeUserInput(description, "brand_description", 2_000)}`;
 
   const raw = await callGemini(systemInstruction, userPrompt);
 
@@ -183,6 +184,12 @@ ${sanitizeUserInput(description, "brand_description")}`;
   // Strip optional markdown fences
   const stripped = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
 
+  // Guard against empty fences (e.g. "```json\n```" strips to "")
+  if (stripped.length === 0) {
+    process.stderr.write(`[${NAME}] color_palette: Gemini response empty after fence-stripping (rawLen=${raw.length})\n`);
+    throw new Error("color_palette: model returned empty content after fence-stripping — retry or check model availability");
+  }
+
   // Validate JSON and required fields
   let parsed: unknown;
   try {
@@ -190,6 +197,12 @@ ${sanitizeUserInput(description, "brand_description")}`;
   } catch {
     process.stderr.write(`[${NAME}] color_palette: Gemini returned non-JSON output (${stripped.slice(0, 80)}...)\n`);
     throw new Error("color_palette: model did not return valid JSON — retry or try a simpler description");
+  }
+
+  // Guard against null / array / primitive — "key" in null throws TypeError
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    process.stderr.write(`[${NAME}] color_palette: Gemini returned non-object JSON (type=${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed})\n`);
+    throw new Error("color_palette: model returned unexpected JSON structure — retry or try a simpler description");
   }
 
   const p = parsed as Record<string, unknown>;
@@ -235,7 +248,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
       if (description.length > 2_000) {
         process.stderr.write(`[${NAME}] color_palette: description too large (${description.length} chars)\n`);
-        return `Error: description is ${description.length} characters — exceeds 2,000 character limit`;
+        throw new Error(`color_palette: description is ${description.length} characters — exceeds 2,000 character limit`);
       }
 
       return colorPalette(description, mood, accents);
