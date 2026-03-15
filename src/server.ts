@@ -4427,7 +4427,9 @@ const wizardWebSessions = new Map<string, WizardWebSession>();
 function parseCookies(cookieHeader: string | undefined): Record<string, string> {
   if (!cookieHeader) return {};
   const parts = cookieHeader.split(";").map((part) => part.trim()).filter(Boolean);
-  const out: Record<string, string> = {};
+  // Use Object.create(null) to prevent prototype pollution via keys like __proto__,
+  // constructor, or prototype (fixes F12).
+  const out = Object.create(null) as Record<string, string>;
   for (const part of parts) {
     const idx = part.indexOf("=");
     if (idx <= 0) continue;
