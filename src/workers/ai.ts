@@ -84,7 +84,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
               signal: AbortSignal.timeout(120_000),
             });
             if (ollamaRes.ok) {
-              const ollamaData = await ollamaRes.json() as any;
+              const ollamaData = await ollamaRes.json() as { message?: { content?: string }; choices?: Array<{ message?: { content?: string } }> };
               const content = ollamaData?.message?.content ?? ollamaData?.choices?.[0]?.message?.content ?? "";
               if (content) return content;
             }
