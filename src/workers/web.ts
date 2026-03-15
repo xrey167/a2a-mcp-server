@@ -5,6 +5,8 @@ import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
+import { callPeer } from "../peer.js";
+import { sanitizeUserInput } from "../prompt-sanitizer.js";
 
 const WebSchemas = {
   fetch_url: z.looseObject({ url: z.url(), format: z.enum(["text", "json"]).optional().default("text") }),
@@ -17,7 +19,16 @@ const WebSchemas = {
     /** Heuristically extract only the main content area (article/main), stripping nav/header/footer (default true) */
     mainOnly: z.boolean().optional().default(true),
   }),
+  summarize_url: z.looseObject({
+    /** URL to fetch, scrape, and summarize */
+    url: z.string().url(),
+    /** Optional question to steer the AI summary (e.g. "What are the key risks?") */
+    question: z.string().optional(),
+  }),
 };
+
+/** Max words sent to the AI to avoid context overflow (~6000 words ≈ ~8000 tokens). */
+const SUMMARIZE_MAX_WORDS = 6000;
 
 /** Block RFC-1918, loopback, APIPA, and cloud-metadata hostnames at the hostname level. */
 function isPrivateHostname(hostname: string): boolean {
@@ -211,6 +222,7 @@ const AGENT_CARD = {
     { id: "fetch_url", name: "Fetch URL", description: "Fetch raw content from a URL (text or JSON)" },
     { id: "call_api", name: "Call API", description: "Make an HTTP request to an external API" },
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
+    { id: "summarize_url", name: "Summarize URL", description: "Fetch a web page, scrape its text, and return an AI-written summary. Pass an optional question to focus the summary on a specific aspect." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -271,8 +283,48 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const scraped = scrapeHtml(html, mainOnly, maxLinks);
       return safeStringify({ url, ...scraped }, 2);
     }
+    case "summarize_url": {
+      const { url, question } = WebSchemas.summarize_url.parse({ url: args.url ?? text, ...args });
+      const block = await blockPrivateUrl(url);
+      if (block) return block;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        headers: { "Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+      });
+      if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+      const ct = res.headers.get("content-type") ?? "";
+      if (!ct.includes("text/html") && !ct.includes("application/xhtml")) {
+        return `summarize_url expects HTML content (got ${ct}); use fetch_url for other content types`;
+      }
+      const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
+      if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
+      const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+      if (html === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
+      const scraped = scrapeHtml(html, true, 0);
+
+      // Truncate to token-safe word limit before sending to AI
+      const words = scraped.text.split(/\s+/);
+      const truncated = words.length > SUMMARIZE_MAX_WORDS
+        ? words.slice(0, SUMMARIZE_MAX_WORDS).join(" ") + "\n\n[…content truncated…]"
+        : scraped.text;
+
+      const questionLine = question
+        ? `Focus question: ${sanitizeUserInput(question, "question")}\n\n`
+        : "";
+      const prompt = `You are a research assistant. Summarize the following web page concisely and accurately.\n\nURL: ${sanitizeUserInput(url, "url")}\nTitle: ${sanitizeUserInput(scraped.title, "title")}\n\n${questionLine}Page content:\n${sanitizeUserInput(truncated, "page_content")}`;
+
+      let summary: string;
+      try {
+        summary = await callPeer("ask_claude", { prompt }, prompt, 60_000);
+      } catch (err) {
+        process.stderr.write(`[${NAME}] summarize_url: callPeer ask_claude failed: ${err}\n`);
+        throw new Error("summarize_url: AI summary failed", { cause: err });
+      }
+
+      return safeStringify({ url, title: scraped.title, wordCount: scraped.wordCount, summary }, 2);
+    }
     default:
-      return `Unknown skill: ${skillId}`;
+      throw new Error(`Unknown skill: ${skillId}`);
   }
 }
 
