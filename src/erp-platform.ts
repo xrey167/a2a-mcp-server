@@ -3090,7 +3090,9 @@ export function getQuoteToOrderPipeline(workspaceIdInput: unknown, filtersInput:
     converted_to_order: { count: 0, amount: 0 },
     fulfilled: { count: 0, amount: 0 },
   };
-  for (const row of stateRows) states[row.state] = { count: row.cnt, amount: num(row.amount) };
+  for (const row of stateRows) {
+    if (Object.hasOwn(states, row.state)) states[row.state] = { count: row.cnt, amount: num(row.amount) };
+  }
 
   const submitted = states.submitted.count + states.approved.count + states.converted_to_order.count + states.fulfilled.count + states.rejected.count;
   const converted = states.converted_to_order.count + states.fulfilled.count;
@@ -5347,7 +5349,7 @@ function getPersonalityFeedbackSummary(workspaceId: string, contactKey: string, 
     let replies = 0;
     let conversions = 0;
     for (const row of rows) {
-      summary[row.outcome] += 1;
+      if (Object.hasOwn(summary, row.outcome)) summary[row.outcome] += 1;
       scoreSum += num(row.feedback_score);
       if (row.reply_received === 1) replies += 1;
       if (row.converted_to_order === 1) conversions += 1;
@@ -5526,7 +5528,9 @@ export function getQuoteCommunicationAnalytics(
      GROUP BY status`
   ).all(workspaceId);
   const actionsByStatus: Record<QuoteFollowupStatus, number> = { open: 0, sent: 0, done: 0, dismissed: 0 };
-  for (const row of actionRows) actionsByStatus[row.status] = row.cnt;
+  for (const row of actionRows) {
+    if (Object.hasOwn(actionsByStatus, row.status)) actionsByStatus[row.status] = row.cnt;
+  }
 
   const timelineRows = db.query<{ quote_external_id: string; direction: QuoteCommunicationDirection; occurred_at: string }, unknown[]>(
     `SELECT quote_external_id, direction, occurred_at
@@ -9679,13 +9683,15 @@ function tryGetCachedProfile(
   const age = Date.now() - new Date(cached.computed_at).getTime();
   if (age >= 3600_000) return null;
 
+  if (typeof cached !== 'object' || cached === null) throw new Error('cache: unexpected non-object');
+  const cacheObj = cached as Record<string, any>;
   const {
     contacts_json,
     metadata_json,
     workspace_id,
     customer_external_id,
     ...publicFields
-  } = cached as unknown as Record<string, any>;
+  } = cacheObj;
 
   return {
     ...publicFields,
