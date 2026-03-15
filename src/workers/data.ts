@@ -586,15 +586,33 @@ async function generateDataBrief(
   const truncated = data.length > maxRecords;
   const sample = truncated ? data.slice(0, maxRecords) : data;
 
-  const stats = analyzeData(sample, fields);
+  // Guard: analyzeData expects object records — primitives produce garbage stats
+  if (sample.length > 0 && (typeof sample[0] !== "object" || sample[0] === null)) {
+    throw new Error(
+      `data_brief: expected an array of objects but received an array of ${typeof sample[0]}. ` +
+      `Wrap primitive values in objects (e.g. [{ value: 1 }, ...]).`,
+    );
+  }
+
+  let stats: Record<string, FieldStats>;
+  try {
+    stats = analyzeData(sample, fields);
+  } catch (err) {
+    const cause = err instanceof Error ? err : new Error(String(err));
+    process.stderr.write(`[${NAME}] data_brief: analyzeData failed: ${cause.stack ?? cause.message}\n`);
+    throw new Error(`data_brief: statistical analysis failed (${cause.message})`, { cause });
+  }
+
   const fieldNames = Object.keys(stats);
   if (fieldNames.length === 0) throw new Error("data_brief: no analysable fields found in dataset");
 
-  // Serialise stats — truncate if too large to keep prompt manageable
+  // Serialise stats with char-based truncation, then sanitize to neutralise any
+  // prompt-injection payloads embedded in user-supplied categorical values (topValues[].value)
   let statsText = safeStringify(stats, 2);
   if (statsText.length > BRIEF_STATS_CHAR_LIMIT) {
     statsText = statsText.slice(0, BRIEF_STATS_CHAR_LIMIT) + "\n... (truncated for brevity)";
   }
+  const safeStats = sanitizeUserInput(statsText, "statistical_summary");
 
   const safeQuestion = question ? sanitizeUserInput(question, "question") : null;
 
@@ -603,7 +621,7 @@ async function generateDataBrief(
 Dataset: ${sample.length} records${truncated ? ` (truncated from ${data.length})` : ""}, ${fieldNames.length} fields.
 ${safeQuestion ? `\nAnalyst question: ${safeQuestion}\n` : ""}
 Statistical summary:
-${statsText}
+${safeStats}
 
 Write a clear, factual narrative (3–6 sentences) covering:
 1. What the data represents and its scale
@@ -623,11 +641,18 @@ Be specific with numbers. Do not speculate beyond what the statistics show.`;
     throw new Error(`data_brief: AI synthesis failed (${cause.message})`, { cause });
   }
 
+  // Guard against empty narrative — callPeer returns string but ask_claude can return ""
+  if (!brief || brief.trim().length === 0) {
+    process.stderr.write(`[${NAME}] data_brief: ask_claude returned an empty response\n`);
+    throw new Error("data_brief: AI synthesis returned an empty narrative");
+  }
+
   return safeStringify({
     recordCount: data.length,
     analysedRecords: sample.length,
     fieldCount: fieldNames.length,
-    dataQuality: truncated ? "partial" : "ok",
+    // "truncated" distinguishes deliberate size cap from data-quality issues
+    dataQuality: truncated ? "truncated" : "ok",
     question: question ?? null,
     brief,
   }, 2);
@@ -710,7 +735,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const { data: rawData, question, fields, maxRecords } = DataSchemas.data_brief.parse(args);
       let data = rawData;
       if (typeof data === "string") {
-        try { data = JSON.parse(data); } catch { throw new Error("data_brief: data must be a JSON array of records"); }
+        try { data = JSON.parse(data); } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[${NAME}] data_brief: JSON.parse failed: ${msg}\n`);
+          throw new Error(`data_brief: data must be a JSON array of records (parse error: ${msg})`);
+        }
       }
       if (!Array.isArray(data)) throw new Error("data_brief: data must be an array of records");
       return generateDataBrief(data, question, fields, maxRecords);
