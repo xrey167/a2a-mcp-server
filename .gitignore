@@ -49,3 +49,4 @@ create-github-issues.sh
 scripts/create-review-issues.sh
 docs/code-review-issues.md
 docs/pending-github-issues.md
+firebase-debug.log
