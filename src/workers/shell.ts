@@ -44,8 +44,9 @@ const AGENT_CARD = {
   ],
 };
 
-/** Word limit for shell output sent to AI prompt — avoids token budget overrun. */
-const SHELL_BRIEF_WORD_LIMIT = 6_000;
+/** Character limit for shell output sent to AI prompt — avoids token budget overrun.
+ *  Char-based (not word-based) preserves column alignment in tabular output (ps, df, ls). */
+const SHELL_BRIEF_CHAR_LIMIT = 30_000;
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
@@ -96,15 +97,16 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         return `shell_brief: command produced no output (exit ${result.status ?? 0})`;
       }
 
-      // Truncate to word limit so AI prompt stays within token budget
-      const words = combined.split(/\s+/);
-      const truncated = words.length > SHELL_BRIEF_WORD_LIMIT;
-      const outputText = truncated
-        ? words.slice(0, SHELL_BRIEF_WORD_LIMIT).join(" ") + "\n... (output truncated)"
+      // Truncate with char-based limit to preserve column alignment in tabular output
+      const truncated = combined.length > SHELL_BRIEF_CHAR_LIMIT;
+      const trimmedOutput = truncated
+        ? combined.slice(0, SHELL_BRIEF_CHAR_LIMIT) + "\n... (output truncated)"
         : combined;
 
       const safeContext = context ? sanitizeUserInput(context, "context") : null;
       const safeCommand = sanitizeUserInput(command, "command");
+      // Sanitize output before embedding in prompt — shell output is untrusted user-controlled data
+      const safeOutput = sanitizeUserInput(trimmedOutput, "shell_output");
 
       const prompt = `You are a systems engineer explaining shell command output to a developer.
 
@@ -112,7 +114,7 @@ Command: ${safeCommand}
 Exit code: ${result.status ?? 0}
 ${safeContext ? `Context: ${safeContext}\n` : ""}
 Output:
-${outputText}
+${safeOutput}
 
 Explain what this output means in 2–5 plain-language sentences. Focus on:
 - What the command reported (status, counts, sizes, errors)
@@ -131,7 +133,7 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
       }
 
       return safeStringify({
-        command,
+        command: safeCommand,
         exitCode: result.status ?? 0,
         outputLines: combined.split("\n").length,
         dataQuality: truncated ? "partial" : "ok",
