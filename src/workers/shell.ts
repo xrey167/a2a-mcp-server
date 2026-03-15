@@ -82,19 +82,28 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
     case "shell_brief": {
       const { command, context, timeoutMs } = ShellSchemas.shell_brief.parse({ command: args.command ?? text, ...args });
+      // Sanitize user inputs early — safeCommand used in both prompt and response
+      const safeCommand = sanitizeUserInput(command, "command");
+      const safeContext = context ? sanitizeUserInput(context, "context") : null;
+
       const result = spawnSync(command, { shell: true, timeout: timeoutMs, encoding: "utf-8" });
       if (result.error) {
-        process.stderr.write(`[${NAME}] shell_brief: spawnSync failed for command: ${result.error.message}\n`);
-        return `shell_brief: command execution failed — ${result.error.message}`;
+        const isTimeout = (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
+        process.stderr.write(`[${NAME}] shell_brief: spawnSync error (${result.error.message}) for command: ${command}\n`);
+        return isTimeout
+          ? `shell_brief: command timed out after ${timeoutMs}ms — increase timeoutMs (max 60000) or use run_shell for long-running commands`
+          : `shell_brief: command execution failed — ${result.error.message}`;
       }
 
       const rawOut = stripAnsi((result.stdout ?? "").trim());
       const rawErr = stripAnsi((result.stderr ?? "").trim());
       const combined = rawOut + (rawErr ? `\n[stderr]\n${rawErr}` : "");
+      const exitCode = result.status ?? 0;
+      const commandFailed = exitCode !== 0;
 
       if (combined.trim().length === 0) {
-        process.stderr.write(`[${NAME}] shell_brief: command produced no output (exit ${result.status})\n`);
-        return `shell_brief: command produced no output (exit ${result.status ?? 0})`;
+        process.stderr.write(`[${NAME}] shell_brief: command produced no output (exit ${exitCode})\n`);
+        return `shell_brief: command produced no output (exit ${exitCode})`;
       }
 
       // Truncate with char-based limit to preserve column alignment in tabular output
@@ -103,15 +112,13 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         ? combined.slice(0, SHELL_BRIEF_CHAR_LIMIT) + "\n... (output truncated)"
         : combined;
 
-      const safeContext = context ? sanitizeUserInput(context, "context") : null;
-      const safeCommand = sanitizeUserInput(command, "command");
       // Sanitize output before embedding in prompt — shell output is untrusted user-controlled data
       const safeOutput = sanitizeUserInput(trimmedOutput, "shell_output");
 
       const prompt = `You are a systems engineer explaining shell command output to a developer.
 
 Command: ${safeCommand}
-Exit code: ${result.status ?? 0}
+Exit code: ${exitCode}
 ${safeContext ? `Context: ${safeContext}\n` : ""}
 Output:
 ${safeOutput}
@@ -123,22 +130,30 @@ Explain what this output means in 2–5 plain-language sentences. Focus on:
 
 Be specific about numbers and file names. Do not speculate beyond what the output shows.`;
 
+      const outputLines = combined.split("\n").length;
+      const dataQuality = truncated ? "partial" : commandFailed ? "error" : "ok";
+
+      if (commandFailed) {
+        process.stderr.write(`[${NAME}] shell_brief: command exited ${exitCode}: ${command}\n`);
+      }
+
       let brief: string;
       try {
         brief = await callPeer("ask_claude", { prompt }, prompt, 60_000);
       } catch (err) {
         const cause = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[${NAME}] shell_brief: callPeer ask_claude failed: ${err instanceof Error ? err.stack : cause}\n`);
-        return `shell_brief: AI explanation unavailable — ${cause}. Try again or use run_shell to view raw output.`;
+        // Return structured JSON on failure to match success contract
+        return safeStringify({ command: safeCommand, exitCode, outputLines, dataQuality, brief: null, error: `AI explanation unavailable — ${cause}. Try again or use run_shell to view raw output.` }, 2);
       }
 
-      return safeStringify({
-        command: safeCommand,
-        exitCode: result.status ?? 0,
-        outputLines: combined.split("\n").length,
-        dataQuality: truncated ? "partial" : "ok",
-        brief,
-      }, 2);
+      // Guard against empty narrative — callPeer can return "" without throwing
+      if (!brief || !brief.trim()) {
+        process.stderr.write(`[${NAME}] shell_brief: ask_claude returned empty brief for command: ${command}\n`);
+        return safeStringify({ command: safeCommand, exitCode, outputLines, dataQuality, brief: null, error: "AI explanation unavailable — the model returned an empty response. Try again or use run_shell to view raw output." }, 2);
+      }
+
+      return safeStringify({ command: safeCommand, exitCode, outputLines, dataQuality, brief }, 2);
     }
     default:
       return `Unknown skill: ${skillId}`;
