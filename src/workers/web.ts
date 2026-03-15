@@ -9,6 +9,14 @@ import { safeStringify } from "../safe-json.js";
 const WebSchemas = {
   fetch_url: z.looseObject({ url: z.url(), format: z.enum(["text", "json"]).optional().default("text") }),
   call_api: z.looseObject({ url: z.url(), method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).optional().default("GET"), headers: z.record(z.string(), z.string()).optional().default({}), body: z.unknown().optional() }),
+  scrape_page: z.looseObject({
+    /** URL to fetch and scrape */
+    url: z.string().url(),
+    /** Max links to extract from the page (default 20) */
+    maxLinks: z.number().int().positive().optional().default(20),
+    /** Heuristically extract only the main content area (article/main), stripping nav/header/footer (default true) */
+    mainOnly: z.boolean().optional().default(true),
+  }),
 };
 
 /** Block RFC-1918, loopback, APIPA, and cloud-metadata hostnames at the hostname level. */
@@ -107,15 +115,102 @@ async function readBodyWithLimit(res: Response, maxBytes: number): Promise<strin
   }
 }
 
+// ── HTML Scraper ─────────────────────────────────────────────────
+
+/**
+ * Strip HTML to clean readable text. No external deps — regex-based.
+ * Steps:
+ *   1. Extract title and meta description
+ *   2. Isolate main content region (article/main/role=main/body) when mainOnly=true
+ *   3. Remove whole noise blocks: script, style, nav, header, footer, aside, noscript
+ *   4. Convert block-level closing tags to newlines for readability
+ *   5. Decode basic HTML entities
+ *   6. Strip remaining tags
+ *   7. Collapse whitespace to max 2 consecutive blank lines
+ *   8. Extract hrefs from anchor tags
+ */
+function scrapeHtml(html: string, mainOnly: boolean, maxLinks: number): {
+  title: string;
+  description: string;
+  text: string;
+  wordCount: number;
+  links: Array<{ text: string; href: string }>;
+} {
+  // Extract title
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = decodeEntities(titleMatch?.[1] ?? "").trim();
+
+  // Extract meta description
+  const metaMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i)
+    ?? html.match(/<meta[^>]+content=["']([^"']*)["'][^>]+name=["']description["']/i);
+  const description = decodeEntities(metaMatch?.[1] ?? "").trim();
+
+  // Extract links from the full HTML before any stripping
+  const links: Array<{ text: string; href: string }> = [];
+  const linkRe = /<a[^>]+href=["']([^"'#][^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let lm: RegExpExecArray | null;
+  while ((lm = linkRe.exec(html)) !== null && links.length < maxLinks) {
+    const href = lm[1].trim();
+    const linkText = decodeEntities(lm[2].replace(/<[^>]+>/g, "").trim());
+    if (href && linkText) links.push({ text: linkText.slice(0, 100), href });
+  }
+
+  // Isolate main content region when mainOnly=true
+  let content = html;
+  if (mainOnly) {
+    const mainMatch = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i)
+      ?? html.match(/<article[^>]*>([\s\S]*?)<\/article>/i)
+      ?? html.match(/<[^>]+role=["']main["'][^>]*>([\s\S]*?)<\/[^>]+>/i)
+      ?? html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    if (mainMatch) content = mainMatch[1];
+  }
+
+  // Remove whole noise blocks
+  content = content.replace(/<(script|style|nav|header|footer|aside|noscript)(\s[^>]*)?>[\s\S]*?<\/\1>/gi, " ");
+
+  // Block-level elements become newlines for paragraph structure
+  content = content.replace(/<\/(p|div|li|h[1-6]|section|blockquote|tr|td|th)>/gi, "\n");
+  content = content.replace(/<br\s*\/?>/gi, "\n");
+
+  // Decode entities, strip remaining tags
+  content = decodeEntities(content);
+  content = content.replace(/<[^>]+>/g, "");
+
+  // Normalize whitespace — collapse blank lines to max 2
+  content = content
+    .split("\n")
+    .map(l => l.replace(/\t/g, " ").replace(/ {2,}/g, " ").trim())
+    .filter((l, i, arr) => l !== "" || (arr[i - 1] !== "" && arr[i - 2] !== ""))
+    .join("\n")
+    .trim();
+
+  const wordCount = content.split(/\s+/).filter(Boolean).length;
+  return { title, description, text: content, wordCount, links };
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
 const AGENT_CARD = {
   name: NAME,
-  description: "Web/HTTP agent — fetch URLs, call APIs, persistent memory",
+  description: "Web/HTTP agent — fetch URLs, scrape pages, call APIs, persistent memory",
   url: `http://localhost:${PORT}`,
   version: "1.0.0",
   capabilities: { streaming: false },
   skills: [
-    { id: "fetch_url", name: "Fetch URL", description: "Fetch content from a URL (text or JSON)" },
+    { id: "fetch_url", name: "Fetch URL", description: "Fetch raw content from a URL (text or JSON)" },
     { id: "call_api", name: "Call API", description: "Make an HTTP request to an external API" },
+    { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -155,6 +250,26 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       const responseBody = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
       if (responseBody === null) return `HTTP ${res.status}\nResponse too large: exceeded ${MAX_RESPONSE_BYTES} byte limit`;
       return `HTTP ${res.status}\n${responseBody}`;
+    }
+    case "scrape_page": {
+      const { url, maxLinks, mainOnly } = WebSchemas.scrape_page.parse({ url: args.url ?? text, ...args });
+      const block = await blockPrivateUrl(url);
+      if (block) return block;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        headers: { "Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+      });
+      if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+      const ct = res.headers.get("content-type") ?? "";
+      if (!ct.includes("text/html") && !ct.includes("application/xhtml")) {
+        return `scrape_page expects HTML content (got ${ct}); use fetch_url for other content types`;
+      }
+      const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
+      if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
+      const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+      if (html === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
+      const scraped = scrapeHtml(html, mainOnly, maxLinks);
+      return safeStringify({ url, ...scraped }, 2);
     }
     default:
       return `Unknown skill: ${skillId}`;
