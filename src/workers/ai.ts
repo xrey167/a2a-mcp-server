@@ -111,6 +111,8 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         if (!block) throw new Error("Anthropic returned empty content array");
         return safeStringify(block);
       } catch (anthropicErr) {
+        // Log the original Anthropic error so root cause is traceable even when fallbacks succeed
+        process.stderr.write(`[${NAME}] ask_claude: Anthropic SDK failed: ${anthropicErr instanceof Error ? anthropicErr.message : String(anthropicErr)}\n`);
         // Try Ollama/LM Studio as second fallback (OpenAI-compatible API)
         const ollamaUrl = process.env.OLLAMA_URL ?? process.env.LM_STUDIO_URL;
         const ollamaModel = process.env.OLLAMA_MODEL ?? "llama3";
@@ -130,10 +132,13 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
               }),
               signal: AbortSignal.timeout(120_000),
             });
-            if (ollamaRes.ok) {
+            if (!ollamaRes.ok) {
+              process.stderr.write(`[${NAME}] ask_claude: Ollama returned ${ollamaRes.status} — falling through to CLI\n`);
+            } else {
               const ollamaData = await ollamaRes.json() as { message?: { content?: string }; choices?: Array<{ message?: { content?: string } }> };
               const content = ollamaData?.message?.content ?? ollamaData?.choices?.[0]?.message?.content ?? "";
               if (content) return content;
+              process.stderr.write(`[${NAME}] ask_claude: Ollama returned empty content — falling through to CLI\n`);
             }
           } catch (ollamaErr) {
             process.stderr.write(`[${NAME}] Ollama fallback failed: ${ollamaErr}\n`);
