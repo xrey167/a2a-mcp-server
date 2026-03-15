@@ -489,7 +489,7 @@ async function delegate(args: Record<string, unknown>): Promise<string> {
         skillId: params.skillId ?? "unknown",
         workerName,
         command: (params.args as Record<string, unknown>)?.command as string | undefined,
-        exitCode: typeof res === "string" && res.startsWith("Exit ") ? parseInt(res.split(":")[0].replace("Exit ", "")) : undefined,
+        exitCode: typeof res === "string" && res.startsWith("Exit ") ? parseInt((res.split(":")[0] ?? "").replace("Exit ", ""), 10) : undefined,
       };
       const filterResult = applyFilters(res, filterCtx);
       if (filterResult.filtersApplied.length > 0) {
@@ -2081,13 +2081,14 @@ async function dispatchSkillInner(skillId: string, args: Record<string, unknown>
             dispatchSkill("delegate", { skillId: "run_mrp", message: "Run MRP for S&OP reconciliation" }, text),
             dispatchSkill("delegate", { skillId: "q2o_pipeline_status", message: "Get pipeline for S&OP" }, text),
           ]);
-          const mrpData = mrpRaw.status === "fulfilled" ? (safeParseJSON(mrpRaw.value) ?? {}) : {};
-          const pipelineData = pipelineRaw.status === "fulfilled" ? (safeParseJSON(pipelineRaw.value) ?? {}) : {};
+          const mrpData = (mrpRaw.status === "fulfilled" ? (safeParseJSON(mrpRaw.value) ?? {}) : {}) as Record<string, unknown>;
+          const pipelineData = (pipelineRaw.status === "fulfilled" ? (safeParseJSON(pipelineRaw.value) ?? {}) : {}) as Record<string, unknown>;
 
           const demand = {
-            confirmedOrders: Array.isArray(pipelineData.orders) ? pipelineData.orders.map((o: Record<string, unknown>) => ({
-              itemNo: o.itemNo ?? o.product ?? "UNKNOWN", quantity: Number(o.quantity ?? 1), dueDate: String(o.dueDate ?? new Date().toISOString()),
-            })) : [],
+            confirmedOrders: Array.isArray(pipelineData.orders) ? (pipelineData.orders as unknown[]).map((o: unknown) => {
+              const ord = o as Record<string, unknown>;
+              return { itemNo: ord.itemNo ?? ord.product ?? "UNKNOWN", quantity: Number(ord.quantity ?? 1), dueDate: String(ord.dueDate ?? new Date().toISOString()) };
+            }) : [],
             forecastedDemand: [],
           };
           const supply = {

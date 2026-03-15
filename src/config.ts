@@ -168,7 +168,7 @@ const SchedulerConfigSchema = z.object({
     intervalMs: z.number().int().positive(),
     skillId: z.string().optional(),
     workflow: z.string().optional(),
-    args: z.record(z.unknown()).optional().default({}),
+    args: z.record(z.string(), z.unknown()).optional().default({}),
     enabled: z.boolean().optional().default(true),
   })).optional().default([]),
 });
@@ -195,7 +195,7 @@ const ConfigSchema = z.object({
   /** Scheduler for recurring OSINT monitoring jobs */
   scheduler: SchedulerConfigSchema.optional(),
   /** Extra environment variables to pass to workers */
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
 }).strict();
 
 // Zod 4 doesn't apply inner field defaults when the outer default is {};
