@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, watch, realpathSync } from "fs";
+import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, watch, realpathSync } from "fs";
 import { join, dirname, basename, resolve } from "path";
 import { homedir } from "os";
 import { Database } from "bun:sqlite";
@@ -17,6 +17,7 @@ const KnowledgeSchemas = {
   update_note: z.looseObject({ title: z.string().min(1), content: z.string() }),
   search_notes: z.looseObject({ query: z.string().min(1) }),
   list_notes: z.looseObject({ folder: z.string().optional().default("") }),
+  delete_note: z.looseObject({ title: z.string().min(1) }),
   summarize_notes: z.looseObject({ query: z.string().min(1), focus: z.string().optional() }),
 };
 
@@ -131,6 +132,7 @@ const AGENT_CARD = {
     { id: "update_note", name: "Update Note", description: "Update an existing Obsidian note" },
     { id: "search_notes", name: "Search Notes", description: "Search notes by content (case-insensitive)" },
     { id: "list_notes", name: "List Notes", description: "List all notes in the vault or a subfolder" },
+    { id: "delete_note", name: "Delete Note", description: "Permanently delete an Obsidian note by title" },
     { id: "summarize_notes", name: "Summarize Notes", description: "Search notes by query then summarize findings via the ai worker (peer A2A call)" },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
@@ -227,6 +229,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         notes.push(file);
       }
       return notes.length > 0 ? notes.join("\n") : "No notes found";
+    }
+    case "delete_note": {
+      const { title } = KnowledgeSchemas.delete_note.parse({ title: args.title ?? text, ...args });
+      const path = notePath(title);
+      if (!existsSync(path)) return `Note not found: ${title}`;
+      unlinkSync(path);
+      deleteNote.run(`${title}.md`);
+      return `Deleted note: ${title}`;
     }
     case "summarize_notes": {
       // Step 1: full-text search for matching notes (local)
