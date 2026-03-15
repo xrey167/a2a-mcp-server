@@ -90,10 +90,6 @@ function parseSemVer(version: string): { major: number; minor: number; patch: nu
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
   return { major: parseInt(match[1]!, 10), minor: parseInt(match[2]!, 10), patch: parseInt(match[3]!, 10) };
-||||||| parent of dabbb51 (fix: setInterval cleanup, SSE error logging, webhooks depth limit, parseInt radix)
-  return { major: parseInt(match[1]), minor: parseInt(match[2]), patch: parseInt(match[3]) };
-=======
-  return { major: parseInt(match[1], 10), minor: parseInt(match[2], 10), patch: parseInt(match[3], 10) };
 }
 
 function compareSemVer(a: string, b: string): number {
