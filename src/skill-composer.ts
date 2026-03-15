@@ -75,7 +75,7 @@ export function compose(name: string, steps: PipelineStep[], description?: strin
   for (let i = 0; i < steps.length; i++) {
     const key = steps[i].as ?? steps[i].skillId;
     if (aliases.has(key)) {
-      process.stderr.write(`[composer] pipeline "${name}": steps ${aliases.get(key)} and ${i} share alias "${key}" — add 'as' fields to distinguish them\n`);
+      throw new Error(`Duplicate step alias: "${key}" — each alias must be unique in a pipeline`);
     } else {
       aliases.set(key, i);
     }
