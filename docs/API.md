@@ -1,15 +1,16 @@
 # a2a-mcp-server API Reference
 
 **Version:** 3.0.0
-**Last Updated:** 2026-03-14
+**Last Updated:** 2026-03-15
 **Runtime:** Bun + TypeScript (no Node.js, no build step)
 **Protocols:** MCP (Model Context Protocol, stdio JSON-RPC), A2A (Agent-to-Agent HTTP on port 8080, JSON-RPC 2.0)
+**OpenAPI Spec:** `docs/openapi.yaml` (OpenAPI 3.1.0)
 
 ---
 
 ## Table of Contents
 
-1. [MCP Tools (50+)](#mcp-tools)
+1. [MCP Tools (90+)](#mcp-tools)
 2. [MCP Resources](#mcp-resources)
 3. [MCP Prompts](#mcp-prompts)
 4. [A2A HTTP Endpoints (Orchestrator, port 8080)](#a2a-http-endpoints)
@@ -1120,6 +1121,130 @@ Delete a registered webhook.
 
 ---
 
+#### `unregister_webhook`
+Remove a registered webhook.
+
+**Inputs:**
+```json
+{ "id": "string" }
+```
+
+---
+
+#### `webhook_log`
+Get delivery log for a specific webhook.
+
+**Inputs:**
+```json
+{ "webhookId": "string", "limit": "number (optional, default 20)" }
+```
+
+---
+
+### Event Bus (Extended)
+
+#### `event_unsubscribe`
+Remove an event bus subscription.
+
+**Inputs:**
+```json
+{ "subscriptionId": "string" }
+```
+
+---
+
+#### `event_bus_stats`
+Get event bus statistics: subscription count, history size, dead letters, topic counts.
+
+**Inputs:** None
+
+---
+
+#### `dead_letter_replay`
+Retry failed event deliveries from the dead letter queue.
+
+**Inputs:**
+```json
+{
+  "limit": "number (optional, default 50)",
+  "olderThanMs": "number (optional)"
+}
+```
+
+---
+
+### Circuit Breakers
+
+#### `get_circuit_breakers`
+Get circuit breaker states for all workers.
+
+**Inputs:** None
+
+**Response:**
+```json
+{
+  "shell": { "state": "closed|open|half_open", "failureCount": 0, "successCount": 0 },
+  "web": { ... }
+}
+```
+
+---
+
+#### `reset_circuit_breakers`
+Reset all circuit breakers to closed state.
+
+**Inputs:** None
+
+---
+
+### Capability Negotiation (Extended)
+
+#### `list_capabilities`
+List all registered agent capabilities in the negotiation registry.
+
+**Inputs:** None
+
+---
+
+#### `capability_stats`
+Get capability negotiation statistics: total capabilities, agents, health summary.
+
+**Inputs:** None
+
+---
+
+### Skill Cache (Extended)
+
+#### `cache_configure`
+Configure per-skill cache TTL settings.
+
+**Inputs:**
+```json
+{
+  "skillId": "string",
+  "ttlMs": "number (0 to disable)"
+}
+```
+
+---
+
+### Tracing (Extended)
+
+#### `search_traces`
+Search distributed traces by skill ID, status, or time range.
+
+**Inputs:**
+```json
+{
+  "skillId": "string (optional)",
+  "status": "ok|error (optional)",
+  "since": "ISO timestamp (optional)",
+  "limit": "number (optional, default 20)"
+}
+```
+
+---
+
 ### Agency
 
 #### `agency_workflow_templates`
@@ -1169,24 +1294,480 @@ Get current ROI snapshot for active workflows.
 
 ---
 
+### S&OP (Sales & Operations Planning)
+
+#### `sop_demand_supply_match`
+Reconcile demand (orders + forecasts) vs supply (MRP + inventory + POs) for given periods. Identifies gaps and revenue-at-risk.
+
+**Inputs:**
+```json
+{ "periods": ["2026-03", "2026-04"] }
+```
+
+---
+
+#### `sop_scenario_compare`
+Simulate what-if adjustments (demand increase, capacity loss, supply delay) on a base reconciliation.
+
+**Inputs:**
+```json
+{
+  "period": "2026-03",
+  "adjustment": { "type": "demand_increase|capacity_loss|supply_delay", "percentage": 20, "items": ["ITEM-001"] }
+}
+```
+
+---
+
+#### `sop_consensus_plan`
+Generate S&OP consensus plan with prioritized recommendations and actions.
+
+**Inputs:**
+```json
+{ "periods": ["2026-03"] }
+```
+
+---
+
+### ESG & Compliance
+
+#### `esg_score_entity`
+Calculate ESG score for a supplier/region using OSINT data (climate, conflict, governance). Returns E/S/G sub-scores, overall rating (AAA–C), and regulatory flags (CSRD, LkSG).
+
+**Inputs:**
+```json
+{
+  "entityId": "string",
+  "entityType": "supplier|region|product",
+  "entityName": "string",
+  "country": "string (optional)"
+}
+```
+
+---
+
+#### `esg_portfolio_overview`
+ESG portfolio overview across all scored entities. Rating distribution, worst/best performers.
+
+**Inputs:**
+```json
+{ "entityIds": ["string"] }
+```
+
+---
+
+#### `esg_gap_analysis`
+Identify ESG gaps below a target score with prioritized recommendations.
+
+**Inputs:**
+```json
+{ "targetScore": 70 }
+```
+
+---
+
+#### `carbon_footprint`
+Calculate CO2e footprint for a product's supply chain (Scope 1/2/3).
+
+**Inputs:**
+```json
+{ "itemNo": "string", "includeScenarios": true }
+```
+
+---
+
+#### `compliance_report`
+Generate compliance report: access control audit, audit trail analysis, data protection status, operational metrics, and ESG compliance summary.
+
+**Inputs:**
+```json
+{ "workspaceId": "string (optional)", "since": "ISO timestamp (optional)", "until": "ISO timestamp (optional)" }
+```
+
+---
+
+### Revenue Intelligence
+
+#### `erp_customer360_profile`
+Get Customer 360 profile from ERP: full customer record, transaction summary, segment, and key metrics.
+
+**Inputs:**
+```json
+{ "workspaceId": "string", "customerExternalId": "string" }
+```
+
+---
+
+#### `erp_customer360_health`
+Get Customer 360 health score: payment health, churn risk, NPS proxy, and engagement level.
+
+**Inputs:**
+```json
+{ "workspaceId": "string", "customerExternalId": "string" }
+```
+
+---
+
+#### `erp_customer360_timeline`
+Get Customer 360 timeline: ordered list of orders, quotes, payments, and events.
+
+**Inputs:**
+```json
+{ "workspaceId": "string", "customerExternalId": "string" }
+```
+
+---
+
+#### `erp_customer360_segments`
+Get Customer 360 segments: assign customer to value/behavior/lifecycle segments.
+
+**Inputs:**
+```json
+{ "workspaceId": "string", "customerExternalId": "string" }
+```
+
+---
+
+#### `erp_customer360_churn_risk`
+Get Customer 360 churn risk: score and contributing factors.
+
+**Inputs:**
+```json
+{ "workspaceId": "string", "customerExternalId": "string" }
+```
+
+---
+
+#### `erp_customer360_clv`
+Calculate Customer Lifetime Value from order history. Returns CLV, order frequency, expected lifetime, and segmentation (platinum/gold/silver/bronze).
+
+**Inputs:**
+```json
+{ "workspaceId": "string", "customerExternalId": "string" }
+```
+
+---
+
+#### `q2o_win_loss_analysis`
+Analyze won vs lost deals across dimensions (deal size, industry, product group, duration, discount, sentiment).
+
+**Inputs:**
+```json
+{ "workspaceId": "string", "since": "ISO timestamp (optional)" }
+```
+
+---
+
+#### `price_optimize`
+Price optimization from historical quote data. Returns price bands, elasticity estimates, and pricing recommendations.
+
+**Inputs:**
+```json
+{ "workspaceId": "string" }
+```
+
+---
+
+#### `erp_revenue_forecast`
+Revenue forecasting with confidence intervals using exponential smoothing + trend decomposition.
+
+**Inputs:**
+```json
+{ "workspaceId": "string", "horizonMonths": 6 }
+```
+
+---
+
+### Competitor Intelligence
+
+#### `competitor_monitor`
+Monitor a competitor via OSINT news and market signals. Returns classified signals with threat level assessment.
+
+**Inputs:**
+```json
+{ "name": "string", "domains": ["string"] }
+```
+
+---
+
+#### `osint_competitor_brief`
+Generate a structured competitor intelligence brief: SWOT analysis, market position, recent moves, and strategic recommendations.
+
+**Inputs:**
+```json
+{ "name": "string", "domains": ["string"] }
+```
+
+---
+
+#### `osint_regulatory_brief`
+Scan regulatory feeds for changes affecting supply chain, ESG, automotive, data, and trade.
+
+**Inputs:**
+```json
+{ "categories": ["supply_chain", "esg", "automotive", "data", "trade"] }
+```
+
+---
+
+### Supply Chain (Advanced)
+
+#### `nearshoring_evaluate`
+Multi-dimensional nearshoring analysis comparing current supplier location against target countries (labor cost, transport, ESG, carbon, geopolitical risk, quality, IP protection).
+
+**Inputs:**
+```json
+{
+  "vendorId": "string",
+  "targetCountries": [{ "country": "string", "region": "string" }]
+}
+```
+
+---
+
+### Transformation Playbooks
+
+#### `list_transformation_playbooks`
+List available transformation playbook templates (PPAP, ERP Go-Live, Kaizen, S&OP, Supplier Qualification, Digital Twin). Filter by industry or category.
+
+**Inputs:**
+```json
+{ "industry": "string (optional)", "category": "string (optional)" }
+```
+
+---
+
+#### `execute_playbook`
+Execute a transformation playbook as a multi-step workflow. Returns taskId for progress tracking.
+
+**Inputs:**
+```json
+{ "playbookId": "string", "params": {} }
+```
+
+---
+
+#### `playbook_progress`
+Check progress of a running playbook/workflow execution.
+
+**Inputs:**
+```json
+{ "workflowId": "string" }
+```
+
+---
+
+#### `workflow_performance`
+Workflow performance analytics: execution stats, step duration percentiles, failure rates.
+
+**Inputs:**
+```json
+{ "workflowId": "string (optional)" }
+```
+
+---
+
+### S&OP (Sales & Operations Planning)
+
+#### `sop_demand_supply_match`
+Reconcile demand (orders + forecasts) vs supply (MRP + inventory + POs) for given periods. Identifies gaps and revenue-at-risk.
+
+**Inputs:**
+```json
+{ "periods": ["2026-01", "2026-02"] }
+```
+
+---
+
+#### `sop_scenario_compare`
+Simulate what-if S&OP adjustments (demand increase, capacity loss, supply delay) on a base reconciliation.
+
+**Inputs:**
+```json
+{
+  "period": "2026-03",
+  "adjustment": {
+    "type": "demand_increase",
+    "percentage": 15,
+    "items": ["SKU-001", "SKU-002"]
+  }
+}
+```
+
+---
+
+#### `sop_consensus_plan`
+Generate an S&OP consensus plan with prioritized recommendations and actions across all periods.
+
+**Inputs:**
+```json
+{ "periods": ["2026-01", "2026-02", "2026-03"] }
+```
+
+---
+
+### ESG & Compliance
+
+#### `esg_score_entity`
+Calculate ESG score for a supplier/region using OSINT data (climate, conflict, governance). Returns E/S/G sub-scores, overall rating (AAA–C), and regulatory flags (CSRD, LkSG).
+
+**Inputs:**
+```json
+{
+  "entityId": "SUP-001",
+  "entityType": "supplier",
+  "entityName": "Acme Corp",
+  "country": "DE"
+}
+```
+
+**Response:**
+```json
+{
+  "entityId": "SUP-001",
+  "rating": "BBB",
+  "scores": { "environmental": 72, "social": 65, "governance": 80 },
+  "overallScore": 72.3,
+  "csrdRelevant": true,
+  "lksgRelevant": true,
+  "flags": ["climate_exposure_high"]
+}
+```
+
+---
+
+#### `esg_portfolio_overview`
+ESG portfolio overview — rating distribution, worst/best performers, CSRD/LkSG counts.
+
+**Inputs:**
+```json
+{ "entityIds": ["SUP-001", "SUP-002"] }
+```
+
+---
+
+#### `esg_gap_analysis`
+Identify ESG dimensions below target. Returns prioritized recommendations.
+
+**Inputs:**
+```json
+{ "targetScore": 70 }
+```
+
+---
+
+#### `carbon_footprint`
+Calculate CO2e footprint for a product's supply chain (Scope 1/2/3). Breakdown by transport/manufacturing/raw material and by supplier. Optionally includes nearshoring scenarios.
+
+**Inputs:**
+```json
+{ "itemNo": "PROD-4711", "includeScenarios": true }
+```
+
+---
+
+#### `compliance_report`
+Generate a compliance report covering access control audit, audit trail analysis, data protection status, operational metrics, and ESG compliance summary. Enterprise feature.
+
+**Inputs:**
+```json
+{
+  "workspaceId": "ws-abc123",
+  "since": "2026-01-01T00:00:00Z",
+  "until": "2026-03-31T23:59:59Z"
+}
+```
+
+---
+
+### Supply Chain Advanced
+
+#### `nearshoring_evaluate`
+Multi-dimensional nearshoring analysis comparing a vendor's current location against target countries across labor cost, transport, ESG, carbon, geopolitical risk, quality, and IP protection.
+
+**Inputs:**
+```json
+{
+  "vendorId": "V-4711",
+  "targetCountries": [
+    { "country": "PL", "region": "EU" },
+    { "country": "MX", "region": "NAFTA" }
+  ]
+}
+```
+
+---
+
+### Revenue Intelligence
+
+#### `erp_revenue_forecast`
+Revenue forecasting with confidence intervals using exponential smoothing and trend decomposition for monthly time series.
+
+**Inputs:**
+```json
+{ "workspaceId": "ws-abc123", "horizonMonths": 6 }
+```
+
+---
+
+#### `price_optimize`
+Price optimization from historical quote data — returns price bands, elasticity estimates, and pricing recommendations per product group.
+
+**Inputs:**
+```json
+{ "workspaceId": "ws-abc123" }
+```
+
+---
+
+#### `q2o_win_loss_analysis`
+Analyze won vs lost deals across dimensions (deal size, industry, product group, duration, discount, sentiment). Identifies winning patterns and recommendations.
+
+**Inputs:**
+```json
+{ "workspaceId": "ws-abc123", "since": "2026-01-01T00:00:00Z" }
+```
+
+---
+
+#### `erp_customer360_clv`
+Calculate Customer Lifetime Value using order history. Returns CLV, order frequency, expected lifetime, and customer segmentation (platinum/gold/silver/bronze).
+
+**Inputs:**
+```json
+{ "workspaceId": "ws-abc123", "customerExternalId": "CUST-001" }
+```
+
+---
+
 ## MCP Resources
 
 Resources are read-only URIs accessible via the MCP resource protocol.
 
 | URI | Content | Refresh |
 |-----|---------|---------|
-| `a2a://agents` | JSON list of discovered agents | 30s |
-| `a2a://metrics` | Prometheus-style metrics snapshot | 10s |
-| `a2a://traces` | Recent traces (last 1000) | 5s |
-| `a2a://cache` | Cache hit/miss stats | 10s |
-| `a2a://capabilities` | Available skills with versions | 30s |
-| `a2a://event-bus` | Event subscriptions and recent events | 5s |
-| `a2a://pipelines` | Stored pipeline definitions | 30s |
-| `a2a://workspaces` | Workspace listing | 30s |
-| `a2a://audit` | Recent audit log entries | 60s |
-| `a2a://license` | License status and features | 60s |
-| `a2a://agency-workflows` | Agency workflow templates | 60s |
-| `a2a://agency-roi` | Current ROI metrics | 60s |
+| `a2a://context` | Current project context (summary, goals, stack, notes) | on write |
+| `a2a://health` | Worker health states (healthy/failCount/lastCheck per worker) | 30s |
+| `a2a://tasks` | All active and recent async tasks | live |
+| `a2a://metrics` | Skill execution metrics (call counts, p50/p95/p99, errors) | 10s |
+| `a2a://circuit-breakers` | Circuit breaker states for all workers (closed/open/half_open) | 30s |
+| `a2a://traces` | Recent distributed traces (last 20 with waterfall data) | 5s |
+| `a2a://cache` | Skill result cache stats (hit/miss rates, size) | 10s |
+| `a2a://capabilities` | Agent capability registry and version negotiation stats | 30s |
+| `a2a://event-bus` | Event bus stats, subscriptions, and dead letters (last 20) | 5s |
+| `a2a://pipelines` | Registered skill composition pipelines | 30s |
+| `a2a://webhooks` | Registered webhook endpoints (secrets redacted) | live |
+| `a2a://workspaces` | Team workspaces and members | 30s |
+| `a2a://audit` | Recent audit log entries (last 20) | 60s |
+| `a2a://license` | License tier and skill gates | 60s |
+| `a2a://agency-workflows` | Agency workflow templates and product summary | 60s |
+| `a2a://agency-roi` | Agency ROI / KPI snapshot | 60s |
+| `a2a://osint/dashboard` | OSINT KPI snapshot: data freshness, worker status | live |
+| `a2a://osint/workflows` | OSINT workflow templates for intelligence gathering | 60s |
+| `a2a://connectors` | ERP connector health and auth status (Odoo, Business Central) | 30s |
+| `a2a://connectors-kpis` | ERP connector reliability and renewal KPI snapshot | 60s |
+| `a2a://connector-renewals` | Recent connector renewal incidents (success/failure feed) | 30s |
+| `a2a://workers/{name}/card` | Agent card for each discovered worker | 30s |
 
 ---
 
@@ -2247,10 +2828,61 @@ GET /health → circuitBreaker.state, lastFailure
 
 ## Versioning & Compatibility
 
-- **MCP Protocol:** Follows Claude Code's MCP spec (recent version)
+- **MCP Protocol:** Follows Claude Code's MCP spec (current SDK version)
 - **A2A Protocol:** HTTP JSON-RPC 2.0 compatible
-- **Semantic Versioning:** Workers and skills use SemVer (e.g., 1.2.3)
-- **Backward Compatibility:** Major version changes may break existing task formats
+- **Orchestrator version:** `3.0.0` — reported in `/.well-known/agent.json` and MCP server identity
+- **Semantic Versioning:** Workers and skills use SemVer (e.g., 1.2.3). Use `negotiate_capability` with `minVersion` to enforce version constraints at routing time.
+- **Backward Compatibility:** Major version changes may break existing task formats. `delegate_async` is a legacy alias for `delegate` with `async: true`.
+
+### API Stability Tiers
+
+| Tier | Description | Change Policy |
+|------|-------------|---------------|
+| **Stable** | `delegate`, `list_agents`, `sandbox_execute`, all worker skills | Semver-gated breaking changes |
+| **Beta** | OSINT orchestration tools, ERP connectors, collaboration | May change in minor versions |
+| **Experimental** | S&OP, ESG scoring, revenue intelligence, nearshoring | May change without notice |
+
+---
+
+## OpenAPI Specification & Interactive Docs
+
+A machine-readable OpenAPI 3.1.0 specification is maintained at `docs/openapi.yaml`.
+
+### Viewing Interactive Docs
+
+Using Redoc (no server needed):
+```bash
+npx @redocly/cli preview-docs docs/openapi.yaml
+```
+
+Using Swagger UI:
+```bash
+npx swagger-ui-watcher docs/openapi.yaml
+```
+
+Or open `docs/architecture.html` in a browser for the architecture diagram.
+
+### Linting the Spec
+
+```bash
+npx @stoplight/spectral-cli lint docs/openapi.yaml
+```
+
+### Generating an SDK
+
+```bash
+# TypeScript client
+npx @openapitools/openapi-generator-cli generate \
+  -i docs/openapi.yaml \
+  -g typescript-fetch \
+  -o ./sdk/typescript
+
+# Python client
+npx @openapitools/openapi-generator-cli generate \
+  -i docs/openapi.yaml \
+  -g python \
+  -o ./sdk/python
+```
 
 ---
 
