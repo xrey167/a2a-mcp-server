@@ -278,6 +278,8 @@ const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 const workerFailures = new Map<string, number>();
 const respawning = new Set<string>();
 const respawnTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let healthPollInterval: ReturnType<typeof setInterval>;
+let teePruneInterval: ReturnType<typeof setInterval>;
 let workerCards: AgentCard[] = [];
 
 interface WorkerHealth { healthy: boolean; failCount: number; lastCheck: number; uptime?: number; }
@@ -8819,12 +8821,12 @@ async function main() {
   // Start periodic health checks (every 30s)
   const pollHealthSafe = () => pollWorkerHealth().catch((e) => process.stderr.write(`[orchestrator] health poll failed: ${e}\n`));
   pollHealthSafe();
-  setInterval(pollHealthSafe, CONFIG.server.healthPollInterval);
+  healthPollInterval = setInterval(pollHealthSafe, CONFIG.server.healthPollInterval);
 
   // Prune stale tee files at startup and every hour
   const teeMaxAgeMs = (CONFIG.outputFilter?.teeMaxAgeMins ?? 1440) * 60 * 1000;
   pruneTeeFiles(teeMaxAgeMs);
-  setInterval(() => pruneTeeFiles(teeMaxAgeMs), 60 * 60 * 1000);
+  teePruneInterval = setInterval(() => pruneTeeFiles(teeMaxAgeMs), 60 * 60 * 1000);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -8834,6 +8836,8 @@ async function main() {
 // and from the fatal-error handler below. SIGINT/SIGTERM are handled by
 // installShutdownHandlers() (cloud.ts) which runs the onShutdown callbacks above.
 function shutdownWorkers() {
+  clearInterval(healthPollInterval);
+  clearInterval(teePruneInterval);
   for (const timer of respawnTimers.values()) clearTimeout(timer);
   for (const proc of workerProcs.values()) proc.kill();
 }

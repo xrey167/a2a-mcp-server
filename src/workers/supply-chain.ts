@@ -70,7 +70,7 @@ import { analyzeSMEDOpportunities } from "../mrp/smed-analysis.js";
 import { analyzeLineBalance } from "../mrp/line-balancing.js";
 import { generateAuditChecklist } from "../risk/supplier-audit.js";
 import { optimizeDualSourcing } from "../risk/interventions.js";
-import type { MRPRunResult, LotSizingPolicy, BucketSize, PlannedOrder } from "../mrp/types.js";
+import type { MRPRunResult, LotSizingPolicy, BucketSize, PlannedOrder, CapacityLoad } from "../mrp/types.js";
 
 const PORT = 8095;
 const NAME = "supply-chain-agent";
@@ -1488,11 +1488,11 @@ async function handleSkill(
       return handleExecuteInterventions(args);
 
     case "value_stream_map": {
-      if (!lastMRPResult) return "No MRP data available. Run run_mrp first.";
+      if (!cachedMRPResult) return "No MRP data available. Run run_mrp first.";
       const itemNo = (args.itemNo as string) ?? cachedProductionOrders[0]?.itemNo ?? "unknown";
       const itemName = cachedProductionOrders.find((o) => o.itemNo === itemNo)?.itemName ?? itemNo;
       const routings = cachedProductionOrders.find((o) => o.itemNo === itemNo)?.routings ?? [];
-      const workCenters = lastMRPResult.capacityLoads.map((cl) => ({
+      const workCenters = cachedMRPResult.capacityLoads.map((cl: CapacityLoad) => ({
         id: cl.workCenterId,
         name: cl.workCenterName,
         capacityMinutesPerDay: 480,
@@ -1500,14 +1500,14 @@ async function handleSkill(
         unitCount: 1,
       }));
       const customerDemandPerDay = args.customerDemandPerDay as number | undefined;
-      const vsm = generateValueStreamMap(itemNo, itemName, lastMRPResult, routings, workCenters, customerDemandPerDay);
+      const vsm = generateValueStreamMap(itemNo, itemName, cachedMRPResult, routings, workCenters, customerDemandPerDay);
       return safeStringify(vsm, 2);
     }
 
     case "smed_analysis": {
-      if (!lastMRPResult) return "No MRP data available. Run run_mrp first.";
+      if (!cachedMRPResult) return "No MRP data available. Run run_mrp first.";
       const allRoutings = cachedProductionOrders.flatMap((o) => o.routings);
-      const workCenters = lastMRPResult.capacityLoads.map((cl) => ({
+      const workCenters = cachedMRPResult.capacityLoads.map((cl: CapacityLoad) => ({
         id: cl.workCenterId,
         name: cl.workCenterName,
         capacityMinutesPerDay: 480,
@@ -1515,7 +1515,7 @@ async function handleSkill(
         unitCount: 1,
       }));
       const top = (args.top as number) ?? 10;
-      const candidates = analyzeSMEDOpportunities(allRoutings, workCenters, lastMRPResult.capacityLoads, { top });
+      const candidates = analyzeSMEDOpportunities(allRoutings, workCenters, cachedMRPResult.capacityLoads, { top });
       return safeStringify({ candidates, count: candidates.length }, 2);
     }
 
@@ -1523,7 +1523,7 @@ async function handleSkill(
       const itemNo = (args.itemNo as string) ?? cachedProductionOrders[0]?.itemNo ?? "unknown";
       const routings = cachedProductionOrders.find((o) => o.itemNo === itemNo)?.routings ?? [];
       if (routings.length === 0) return "No routing data available for this item.";
-      const workCenters = (lastMRPResult?.capacityLoads ?? []).map((cl) => ({
+      const workCenters = (cachedMRPResult?.capacityLoads ?? []).map((cl: CapacityLoad) => ({
         id: cl.workCenterId,
         name: cl.workCenterName,
         capacityMinutesPerDay: 480,
@@ -1538,6 +1538,7 @@ async function handleSkill(
     case "supplier_audit_prepare": {
       const vendorNo = args.vendorNo as string;
       if (!vendorNo) return "vendorNo is required";
+      if (!cachedVendors) return "No vendor data available.";
       const vendor = cachedVendors.find((v) => v.no === vendorNo);
       const vendorName = vendor?.name ?? vendorNo;
       // Get risk score and vendor health from cached data
