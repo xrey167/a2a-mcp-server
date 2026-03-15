@@ -270,7 +270,7 @@ async function fetchWildfires(
   });
 
   if (!res.ok) {
-    // Fallback: return empty with error note
+    process.stderr.write(`[${NAME}] fetchWildfires: NASA FIRMS HTTP ${res.status}: ${res.statusText}\n`);
     return [];
   }
 
