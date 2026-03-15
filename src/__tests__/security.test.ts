@@ -31,6 +31,20 @@ describe("URL validation (SSRF prevention)", () => {
     expect(isAllowedUrl("http://[::ffff:127.0.0.1]:8082")).toBe(true);
   });
 
+  test("allows bind-all addresses on worker ports", () => {
+    expect(isAllowedUrl("http://0.0.0.0:8081")).toBe(true);
+    expect(isAllowedUrl("http://0.0.0.0:8082")).toBe(true);
+    expect(isAllowedUrl("http://[::]:8081")).toBe(true);
+    expect(isAllowedUrl("http://[::]:8082")).toBe(true);
+  });
+
+  test("blocks bind-all addresses on non-worker ports", () => {
+    expect(isAllowedUrl("http://0.0.0.0:9999")).toBe(false);
+    expect(isAllowedUrl("http://0.0.0.0:22")).toBe(false);
+    expect(isAllowedUrl("http://[::]:9999")).toBe(false);
+    expect(isAllowedUrl("http://[::]:3000")).toBe(false);
+  });
+
   test("blocks external URLs", () => {
     expect(isAllowedUrl("http://evil.com:8081")).toBe(false);
     expect(isAllowedUrl("https://api.example.com")).toBe(false);

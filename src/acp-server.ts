@@ -95,7 +95,10 @@ function spawnWorker(w: typeof WORKERS[number]) {
   proc.exited.then((exitCode) => {
     log(`${w.name} exited (code ${exitCode}) — respawning in 2s`);
     setTimeout(() => spawnWorker(w), 2_000);
-  }).catch(e => process.stderr.write(`[acp-server] proc.exited error: ${e}\n`));
+  }).catch(e => {
+    const msg = e instanceof Error ? e.stack ?? e.message : String(e);
+    process.stderr.write(`[acp-server] proc.exited error: ${msg}\n`);
+  });
 }
 
 function spawnWorkers() {
