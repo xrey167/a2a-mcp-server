@@ -4355,7 +4355,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 });
               }
             }
-          } catch { /* SSE chunk parse error — skip */ }
+          } catch (e) { process.stderr.write(`[sse] parse error: ${e}\n`); }
         }
       }
     } finally {
