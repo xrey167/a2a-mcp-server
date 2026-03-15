@@ -17,6 +17,25 @@ import { randomUUID, createHmac, timingSafeEqual } from "crypto";
 import { Database } from "bun:sqlite";
 import { join } from "path";
 import { homedir } from "os";
+import { createLogger } from "./logger.js";
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+const log = createLogger("webhooks");
+
+function safeJsonParse(s: string, fallback: unknown = {}): unknown {
+  try {
+    const parsed: unknown = JSON.parse(s);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      log.warn("corrupted JSON in DB row (expected object)", { type: Array.isArray(parsed) ? "array" : typeof parsed, raw: s.slice(0, 100) });
+      return fallback;
+    }
+    return parsed;
+  } catch (err) {
+    log.warn("corrupted JSON in DB row", { raw: s.slice(0, 100), error: String(err) });
+    return fallback;
+  }
+}
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -119,8 +138,8 @@ export function getWebhook(id: string): WebhookConfig | null {
     name: row.name,
     secret: row.secret ?? undefined,
     skillId: row.skill_id,
-    staticArgs: JSON.parse(row.static_args),
-    fieldMappings: JSON.parse(row.field_mappings),
+    staticArgs: safeJsonParse(row.static_args) as Record<string, unknown>,
+    fieldMappings: safeJsonParse(row.field_mappings) as Record<string, string>,
     async: row.async === 1,
     createdAt: row.created_at,
     enabled: row.enabled === 1,
@@ -139,8 +158,8 @@ export function listWebhooks(): WebhookConfig[] {
     name: row.name,
     secret: row.secret ?? undefined,
     skillId: row.skill_id,
-    staticArgs: JSON.parse(row.static_args),
-    fieldMappings: JSON.parse(row.field_mappings),
+    staticArgs: safeJsonParse(row.static_args) as Record<string, unknown>,
+    fieldMappings: safeJsonParse(row.field_mappings) as Record<string, string>,
     async: row.async === 1,
     createdAt: row.created_at,
     enabled: row.enabled === 1,

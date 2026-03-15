@@ -68,13 +68,21 @@ function getDb(): Database {
   return db;
 }
 
+function parseMembers(raw: unknown): WorkspaceMember[] {
+  try {
+    const parsed = JSON.parse(raw as string);
+    if (Array.isArray(parsed)) return parsed as WorkspaceMember[];
+  } catch { /* treat corrupt as empty */ }
+  return [];
+}
+
 function rowToWorkspace(row: Record<string, unknown>): Workspace {
   return {
     id: row.id as string,
     name: row.name as string,
     description: (row.description as string | null) ?? undefined,
     createdAt: row.created_at as number,
-    members: JSON.parse(row.members as string) as WorkspaceMember[],
+    members: parseMembers(row.members),
     env: row.env ? (JSON.parse(row.env as string) as Record<string, string>) : undefined,
     allowedSkills: row.allowed_skills ? (JSON.parse(row.allowed_skills as string) as string[]) : undefined,
     knowledgeTags: row.knowledge_tags ? (JSON.parse(row.knowledge_tags as string) as string[]) : undefined,
