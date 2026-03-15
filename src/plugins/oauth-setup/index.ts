@@ -155,6 +155,7 @@ async function exchangeCode(
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
     body: body.toString(),
+    signal: AbortSignal.timeout(15_000),
   });
 
   const data = await res.json() as any;
@@ -179,6 +180,7 @@ async function refreshToken(
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
     body: body.toString(),
+    signal: AbortSignal.timeout(15_000),
   });
 
   const data = await res.json() as any;
