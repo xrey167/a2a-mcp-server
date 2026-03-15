@@ -11,7 +11,9 @@ const AiSchemas = {
   ask_claude: z.looseObject({ prompt: z.string().min(1), model: z.string().optional(), max_tokens: z.number().int().positive().optional() }),
   search_files: z.looseObject({ pattern: z.string().min(1), directory: z.string().optional().default(".") }),
   query_sqlite: z.looseObject({ database: z.string().min(1), sql: z.string().min(1) }),
+  summarize_file: z.looseObject({ path: z.string().min(1), focus: z.string().optional() }),
 };
+import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runClaudeCLI } from "../claude-cli.js";
@@ -35,6 +37,7 @@ const AGENT_CARD = {
     { id: "ask_claude", name: "Ask Claude", description: "Send a prompt to Claude and return the response" },
     { id: "search_files", name: "Search Files", description: "Find files matching a glob pattern" },
     { id: "query_sqlite", name: "Query SQLite", description: "Run a read-only SQL query against a SQLite database" },
+    { id: "summarize_file", name: "Summarize File", description: "Read a file and return an AI-generated summary. Optional focus parameter narrows the summary to a specific aspect." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -126,6 +129,22 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       } finally {
         db.close();
       }
+    }
+    case "summarize_file": {
+      const { path: rawPath, focus } = AiSchemas.summarize_file.parse({ path: args.path ?? text, ...args });
+      const safePath = sanitizePath(rawPath);
+      if (!existsSync(safePath)) return `File not found: ${safePath}`;
+      const MAX_BYTES = 100_000; // ~25K tokens — safe context budget
+      let content = readFileSync(safePath, "utf-8");
+      let truncated = false;
+      if (Buffer.byteLength(content, "utf-8") > MAX_BYTES) {
+        content = Buffer.from(content, "utf-8").subarray(0, MAX_BYTES).toString("utf-8");
+        truncated = true;
+      }
+      const focusLine = focus ? `\n\nFocus specifically on: ${focus}` : "";
+      const truncNote = truncated ? "\n\n(Note: file was truncated to the first 100 KB for summarization.)" : "";
+      const prompt = `Summarize the following file: ${safePath}${focusLine}${truncNote}\n\n${content}`;
+      return handleSkill("ask_claude", { prompt }, prompt);
     }
     default: {
       // Check dynamically loaded plugin skills
