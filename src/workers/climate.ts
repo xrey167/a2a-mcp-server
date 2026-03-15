@@ -282,7 +282,9 @@ async function fetchWildfires(
   const latIdx = headers.indexOf("latitude");
   const lonIdx = headers.indexOf("longitude");
   const brightIdx = headers.indexOf("bright_ti4") >= 0 ? headers.indexOf("bright_ti4") : headers.indexOf("brightness");
-  if (brightIdx < 0) return []; // skip entirely if no brightness column in CSV
+  if (brightIdx < 0) {
+    process.stderr.write(`[${NAME}] fetchWildfires: no brightness column found in CSV (headers: ${headers.join(",")}), proceeding without brightness data\n`);
+  }
   const confIdx = headers.indexOf("confidence");
   const dateIdx = headers.indexOf("acq_date");
   const timeIdx = headers.indexOf("acq_time");
@@ -301,7 +303,7 @@ async function fetchWildfires(
     hotspots.push({
       lat: Number(cols[latIdx]) || 0,
       lon: Number(cols[lonIdx]) || 0,
-      brightness: Number(cols[brightIdx]) || 0,
+      brightness: brightIdx >= 0 ? Number(cols[brightIdx]) || 0 : 0,
       confidence,
       acqDate: cols[dateIdx]?.trim() ?? "",
       acqTime: cols[timeIdx]?.trim() ?? "",

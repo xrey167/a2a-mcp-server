@@ -13,8 +13,7 @@ import { homedir } from "node:os";
  *
  * Validates that the path:
  * - Does not contain path traversal sequences (..)
- * - Does not contain shell metacharacters or control characters
- * - Uses only safe characters (alphanumeric, hyphens, underscores, dots, slashes, tildes)
+ * - Stays within the optional base directory boundary (resolved + startsWith check)
  *
  * @param path - The path to sanitize
  * @param baseDir - Optional base directory to constrain the path within
@@ -24,12 +23,6 @@ import { homedir } from "node:os";
 export function sanitizePath(path: string, baseDir?: string): string {
   if (!path || typeof path !== "string") {
     throw new Error("Path must be a non-empty string");
-  }
-
-  // Only allow alphanumeric, hyphens, underscores, dots, slashes, and tildes
-  // This prevents shell metacharacters and control characters
-  if (!/^[a-zA-Z0-9_.\/~-]+$/.test(path)) {
-    throw new Error(`Unsafe path rejected: "${path}" — path contains disallowed characters`);
   }
 
   // Reject explicit path traversal attempts
