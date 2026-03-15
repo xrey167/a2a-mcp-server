@@ -53,9 +53,16 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           system: persona.systemPrompt || undefined,
           messages: [{ role: "user", content: prompt }],
         });
+        if (message.content.length === 0) throw new Error("Anthropic returned empty content array");
+        const textContent = message.content
+          .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
+          .map(b => b.text)
+          .join("\n");
+        if (textContent) return textContent;
+        // No text blocks — serialize first block as fallback
         const block = message.content[0];
-        if (!block) return "";
-        return block.type === "text" ? block.text : safeStringify(block);
+        if (!block) throw new Error("Anthropic returned empty content array");
+        return safeStringify(block);
       } catch (anthropicErr) {
         // Try Ollama/LM Studio as second fallback (OpenAI-compatible API)
         const ollamaUrl = process.env.OLLAMA_URL ?? process.env.LM_STUDIO_URL;
