@@ -41,7 +41,7 @@ export function discoverUserWorkers(): UserWorker[] {
       const config = JSON.parse(readFileSync(configPath, "utf-8"));
       const p = config.port;
       if (Number.isInteger(p) && p >= 1025 && p <= 65535 && (p < 8081 || p > 8094)) port = p;
-    } catch (e: any) { if (e?.code !== "ENOENT") process.stderr.write(`[worker-loader] failed to parse ${configPath}: ${e}\n`); }
+    } catch (e: unknown) { if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") process.stderr.write(`[worker-loader] failed to parse ${configPath}: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`); }
     return { name, path: join(dir, "index.ts"), port };
   });
 }
