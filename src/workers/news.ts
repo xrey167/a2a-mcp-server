@@ -19,6 +19,8 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { validateUrlNotInternal } from "../worker-utils.js";
+import { callPeer } from "../peer.js";
+import { sanitizeUserInput } from "../prompt-sanitizer.js";
 
 const PORT = 8089;
 const NAME = "news-agent";
@@ -73,6 +75,17 @@ const NewsSchemas = {
   regulatory_scan: z.looseObject({
     categories: z.array(z.enum(["supply_chain", "sustainability", "data", "automotive", "trade"])).optional(),
     maxResults: z.number().int().positive().optional().default(50),
+  }),
+
+  news_brief: z.looseObject({
+    /** RSS feed URLs to fetch and analyze */
+    urls: z.array(z.url()).max(20).optional(),
+    /** Optional topic keyword to filter articles (e.g. "China", "cyber") */
+    topic: z.string().max(100).optional(),
+    /** Optional focus question to steer the AI brief */
+    focus: z.string().max(300).optional(),
+    /** Max articles sent to AI for synthesis (default 20) */
+    maxArticles: z.number().int().min(1).max(50).optional().default(20),
   }),
 };
 
@@ -164,6 +177,7 @@ const AGENT_CARD = {
     { id: "cluster_news", name: "Cluster News", description: "Group similar articles into clusters using Jaccard text similarity" },
     { id: "detect_signals", name: "Detect Signals", description: "Detect anomalous patterns: topic velocity spikes, emerging stories, source concentration" },
     { id: "regulatory_scan", name: "Regulatory Scan", description: "Scan regulatory RSS feeds for changes in supply chain, ESG, automotive, data, and trade regulations. Returns classified alerts with impact levels." },
+    { id: "news_brief", name: "News Brief", description: "Fetch RSS feeds, classify articles, detect signals, and return an AI-written intelligence brief. Pass urls to fetch live feeds, optional topic to filter, and optional focus to steer the summary." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -551,6 +565,112 @@ function detectSignals(
   };
 }
 
+// ── AI News Brief ────────────────────────────────────────────────
+
+async function generateNewsBrief(
+  urls: string[] | undefined,
+  topic: string | undefined,
+  focus: string | undefined,
+  maxArticles: number,
+): Promise<string> {
+  // Fetch feeds in parallel; tolerate individual feed failures
+  let rawArticles: Article[] = [];
+  const feedErrors: string[] = [];
+  if (urls && urls.length > 0) {
+    const results = await Promise.allSettled(
+      urls.map(url => fetchRss(url, 50, 15000))
+    );
+    results.forEach((r, i) => {
+      if (r.status === "fulfilled") {
+        rawArticles.push(...r.value);
+      } else {
+        const msg = `${urls[i]}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`;
+        process.stderr.write(`[${NAME}] news_brief: feed failed — ${msg}\n`);
+        feedErrors.push(msg);
+      }
+    });
+  }
+
+  if (rawArticles.length === 0) {
+    throw new Error("news_brief: no articles available — all feeds failed or no urls provided");
+  }
+
+  // Deduplicate and optionally filter by topic keyword
+  let articles = deduplicateArticles(rawArticles);
+  if (topic) {
+    const topicLower = topic.toLowerCase();
+    const filtered = articles.filter(a =>
+      `${a.title} ${a.description}`.toLowerCase().includes(topicLower)
+    );
+    if (filtered.length > 0) articles = filtered;
+    else process.stderr.write(`[${NAME}] news_brief: topic filter "${topic}" matched 0 articles; using all\n`);
+  }
+
+  // Classify and sort by importance score descending
+  const classified = articles.map(a => ({
+    ...a,
+    ...classifyArticle(a.title, a.description),
+  }));
+  classified.sort((a, b) => b.score - a.score);
+
+  // Detect signals from the full set
+  const { signals } = detectSignals(articles, 24, 3);
+
+  // Build prompt context from top N articles
+  const topArticles = classified.slice(0, maxArticles);
+  const articleLines = topArticles
+    .map((a, i) => `${i + 1}. [${a.importance.toUpperCase()}] ${sanitizeUserInput(a.title, "article_title")} (${sanitizeUserInput(a.category, "category")}, ${sanitizeUserInput(a.source, "source")})`)
+    .join("\n");
+
+  const signalLines = signals.slice(0, 5)
+    .map(s => `• "${sanitizeUserInput(s.topic, "signal_topic")}" — ${s.count}× spike (${s.multiplier}× baseline)`)
+    .join("\n");
+
+  const focusLine = focus ? `\nFocus: ${sanitizeUserInput(focus, "focus")}` : "";
+  const topicLine = topic ? `\nTopic filter: ${sanitizeUserInput(topic, "topic")}` : "";
+
+  const context = `Articles analyzed: ${articles.length}${topicLine}${focusLine}
+Feeds: ${urls?.length ?? 0} (${feedErrors.length} failed)
+
+Top headlines by importance:
+${articleLines}
+
+${signals.length > 0 ? `Velocity signals (emerging topics):\n${signalLines}` : "No velocity signals detected"}`;
+
+  const prompt = `You are an intelligence analyst writing a concise news brief. Synthesize the following news data into a 3-5 paragraph briefing.
+
+${context}
+
+Cover: the most significant developments, any converging patterns across stories, key actors, and one short outlook sentence. Be specific and factual. Do not fabricate details not present in the headlines.`;
+
+  let brief: string;
+  try {
+    brief = await callPeer("ask_claude", { prompt }, prompt, 60_000);
+  } catch (err) {
+    process.stderr.write(`[${NAME}] news_brief: callPeer ask_claude failed: ${(err as Error).stack ?? err}\n`);
+    throw new Error("news_brief: AI synthesis failed", { cause: err });
+  }
+
+  // Category and importance breakdown for metadata
+  const byCategory: Record<string, number> = {};
+  const byImportance: Record<string, number> = {};
+  for (const a of classified) {
+    byCategory[a.category] = (byCategory[a.category] ?? 0) + 1;
+    byImportance[a.importance] = (byImportance[a.importance] ?? 0) + 1;
+  }
+
+  return safeStringify({
+    topic: topic ?? null,
+    articleCount: articles.length,
+    dataQuality: feedErrors.length === urls?.length ? "all_feeds_failed" : feedErrors.length > 0 ? "partial" : "ok",
+    feedErrors: feedErrors.length > 0 ? feedErrors : undefined,
+    byCategory,
+    byImportance,
+    signalCount: signals.length,
+    brief,
+  }, 2);
+}
+
 // ── Skill Dispatcher ─────────────────────────────────────────────
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
@@ -682,8 +802,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }, 2);
     }
 
+    case "news_brief": {
+      const { urls, topic, focus, maxArticles } = NewsSchemas.news_brief.parse({ ...args });
+      process.stderr.write(`[${NAME}] news_brief: generating brief — ${urls?.length ?? 0} feeds${topic ? `, topic="${topic}"` : ""}\n`);
+      return generateNewsBrief(urls, topic, focus, maxArticles);
+    }
+
     default:
-      return `Unknown skill: ${skillId}`;
+      throw new Error(`Unknown skill: ${skillId}`);
   }
 }
 
