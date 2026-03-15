@@ -653,8 +653,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           allArticles.push(...articles);
         } catch (err) {
           failedFeeds++;
-          const errMsg = err instanceof Error ? err.message.replace(/\n/g, " ") : String(err);
-          process.stderr.write(`[${NAME}] regulatory_scan: feed failed ${feedUrl}: ${errMsg}\n`);
+          process.stderr.write(`[${NAME}] regulatory_scan: feed failed ${feedUrl}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
         }
       }
       // Log summary if there were failures

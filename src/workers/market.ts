@@ -555,9 +555,10 @@ function detectPriceAnomalies(
   const maxPrice = Math.max(...prices);
   const minPrice = Math.min(...prices);
 
+  const MAX_ANOMALIES = 100;
   return {
-    priceAnomalies,
-    volumeAnomalies,
+    priceAnomalies: priceAnomalies.slice(-MAX_ANOMALIES),
+    volumeAnomalies: volumeAnomalies.slice(-MAX_ANOMALIES),
     summary: {
       dataPoints: prices.length,
       totalChange,
