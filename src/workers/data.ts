@@ -94,6 +94,19 @@ const DataSchemas = {
     /** Height of the chart in pixels (default 300) */
     height: z.number().int().min(100).max(2000).optional().default(300),
   }),
+
+  merge_datasets: z.looseObject({
+    /** Left dataset — array of record objects */
+    left: z.unknown(),
+    /** Right dataset — array of record objects */
+    right: z.unknown(),
+    /** Field name to join on (must exist in both datasets) */
+    key: z.string().min(1).max(100),
+    /** Join type: inner (default), left, right, outer */
+    joinType: z.enum(["inner", "left", "right", "outer"]).optional().default("inner"),
+    /** Prefix applied to right-side fields on collision with left-side fields (default "right_") */
+    prefix: z.string().max(50).optional().default("right_"),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -112,6 +125,7 @@ const AGENT_CARD = {
     { id: "pivot_table", name: "Pivot Table", description: "Create pivot table summaries from flat data with configurable row/column/value fields and aggregation" },
     { id: "fetch_dataset", name: "Fetch Dataset", description: "Fetch a CSV or JSON dataset from a URL and parse it into structured records. Auto-detects format from Content-Type. Supports jsonPath drill-down for nested JSON APIs." },
     { id: "visualize_data", name: "Visualize Data", description: "Generate a Vega-Lite JSON chart specification from a dataset or analyze_data/pivot_table output. Claude picks the best chart type or you can specify bar/line/scatter/area/pie/histogram/heatmap." },
+    { id: "merge_datasets", name: "Merge Datasets", description: "Join two JSON arrays of records on a common key field. Supports inner, left, right, and outer joins. Conflicting field names from the right side get a configurable prefix (default 'right_'). Returns merged records array." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -636,6 +650,117 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       if (!Array.isArray(data)) return "Expected an array of records";
       const result = createPivotTable(data, rowField, colField, valueField, aggregation);
       return safeStringify(result, 2);
+    }
+
+    case "merge_datasets": {
+      const { left: rawLeft, right: rawRight, key, joinType, prefix } = DataSchemas.merge_datasets.parse(args);
+
+      if (!Array.isArray(rawLeft)) throw new Error("merge_datasets: 'left' must be an array of records");
+      if (!Array.isArray(rawRight)) throw new Error("merge_datasets: 'right' must be an array of records");
+
+      const MAX_ROWS = 10_000;
+      if (rawLeft.length > MAX_ROWS) {
+        process.stderr.write(`[${NAME}] merge_datasets: left dataset too large (${rawLeft.length} rows)\n`);
+        throw new Error(`merge_datasets: left dataset has ${rawLeft.length} rows — exceeds 10,000 row limit`);
+      }
+      if (rawRight.length > MAX_ROWS) {
+        process.stderr.write(`[${NAME}] merge_datasets: right dataset too large (${rawRight.length} rows)\n`);
+        throw new Error(`merge_datasets: right dataset has ${rawRight.length} rows — exceeds 10,000 row limit`);
+      }
+
+      type DataRow = Record<string, unknown>;
+
+      // Detect left-side field names to know which right fields collide
+      const leftFields = new Set<string>(rawLeft.length > 0 && rawLeft[0] !== null && typeof rawLeft[0] === "object" && !Array.isArray(rawLeft[0])
+        ? Object.keys(rawLeft[0] as DataRow)
+        : []);
+
+      // Build index: key value → list of right rows (handles duplicate keys)
+      const rightIndex = new Map<unknown, DataRow[]>();
+      for (const row of rawRight) {
+        if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+        const r = row as DataRow;
+        const k = r[key];
+        if (!rightIndex.has(k)) rightIndex.set(k, []);
+        (rightIndex.get(k) as DataRow[]).push(r);
+      }
+
+      // Merge a left row with a (possibly null) right row
+      function mergeRow(left: DataRow, right: DataRow | null): DataRow {
+        if (!right) return { ...left };
+        const merged: DataRow = { ...left };
+        for (const [field, val] of Object.entries(right)) {
+          const outField = field !== key && leftFields.has(field) ? `${prefix}${field}` : field;
+          merged[outField] = val;
+        }
+        return merged;
+      }
+
+      const result: DataRow[] = [];
+
+      if (joinType === "inner" || joinType === "left") {
+        for (const row of rawLeft) {
+          if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+          const left = row as DataRow;
+          const matches = rightIndex.get(left[key]);
+          if (matches && matches.length > 0) {
+            for (const right of matches) result.push(mergeRow(left, right));
+          } else if (joinType === "left") {
+            result.push(mergeRow(left, null));
+          }
+        }
+      }
+
+      if (joinType === "right" || joinType === "outer") {
+        // Track which right keys were matched from the left pass (for outer join)
+        const matchedRightKeys = new Set<unknown>();
+        if (joinType === "outer") {
+          // First pass: left side (same as left join)
+          for (const row of rawLeft) {
+            if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+            const left = row as DataRow;
+            const matches = rightIndex.get(left[key]);
+            if (matches && matches.length > 0) {
+              for (const right of matches) {
+                result.push(mergeRow(left, right));
+                matchedRightKeys.add(left[key]);
+              }
+            } else {
+              result.push(mergeRow(left, null));
+            }
+          }
+        }
+        // Right/unmatched-right pass
+        for (const row of rawRight) {
+          if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+          const right = row as DataRow;
+          const k = right[key];
+          if (joinType === "right" || !matchedRightKeys.has(k)) {
+            if (joinType === "right") {
+              const matches2 = rawLeft.filter(l =>
+                l !== null && typeof l === "object" && !Array.isArray(l) &&
+                (l as DataRow)[key] === k
+              ) as DataRow[];
+              if (matches2.length > 0) {
+                for (const left of matches2) result.push(mergeRow(left, right));
+              } else {
+                // Unmatched right row — emit with empty left fields
+                const emptyLeft: DataRow = {};
+                for (const f of leftFields) emptyLeft[f] = null;
+                result.push(mergeRow(emptyLeft, right));
+              }
+            } else {
+              // outer: unmatched right — emit with empty left
+              const emptyLeft: DataRow = {};
+              for (const f of leftFields) emptyLeft[f] = null;
+              result.push(mergeRow(emptyLeft, right));
+            }
+          }
+        }
+      }
+
+      process.stderr.write(`[${NAME}] merge_datasets: ${joinType} join on "${key}": ${rawLeft.length}L × ${rawRight.length}R → ${result.length} rows\n`);
+      return safeStringify({ joinType, key, leftRows: rawLeft.length, rightRows: rawRight.length, resultRows: result.length, data: result }, 2);
     }
 
     case "fetch_dataset": {
