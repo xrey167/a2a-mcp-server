@@ -119,7 +119,7 @@ app.post("/a2a", async (req) => {
   };
 });
 
-app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
+app.listen({ port: PORT, host: "localhost" }).then(() => {
   process.stderr.write(\`[${name}-agent] listening on :\${PORT}\\n\`);
 }).catch((err) => {
   process.stderr.write(\`[${name}-agent] failed to listen: \${err}\\n\`);
