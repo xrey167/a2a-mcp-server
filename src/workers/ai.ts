@@ -12,9 +12,11 @@ const AiSchemas = {
   search_files: z.object({ pattern: z.string().min(1), directory: z.string().optional().default(".") }).passthrough(),
   query_sqlite: z.object({ database: z.string().min(1), sql: z.string().min(1) }).passthrough(),
 };
+import { resolve } from "node:path";
 import { runClaudeCLI } from "../claude-cli.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
+import { sanitizePath } from "../path-utils.js";
 
 const PORT = 8083;
 const NAME = "ai-agent";
@@ -88,9 +90,14 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
     case "search_files": {
       const { pattern, directory } = AiSchemas.search_files.parse({ pattern: args.pattern ?? text, ...args });
+      const safeBase = process.cwd();
+      const resolvedDir = resolve(safeBase, directory);
+      if (resolvedDir !== safeBase && !resolvedDir.startsWith(safeBase + "/")) {
+        return "Error: directory traversal outside working directory is not allowed";
+      }
       const glob = new Glob(pattern);
       const matches: string[] = [];
-      for await (const file of glob.scan(directory)) {
+      for await (const file of glob.scan(resolvedDir)) {
         matches.push(file);
       }
       return matches.length > 0 ? matches.join("\n") : "No files found";
@@ -100,7 +107,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       if (!sql.trim().toUpperCase().startsWith("SELECT")) {
         return "Only SELECT queries are allowed";
       }
-      const db = new Database(database, { readonly: true });
+      const db = new Database(sanitizePath(database), { readonly: true });
       try {
         const rows = db.query(sql).all();
         return { kind: "data" as const, data: rows };
