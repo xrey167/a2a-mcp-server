@@ -42,7 +42,7 @@ const MarketSchemas = {
   }).passthrough(),
 
   technical_analysis: z.object({
-    prices: z.array(z.number()).min(2),
+    prices: z.array(z.number()).min(2).max(10_000),
     indicators: z.array(z.enum(["sma", "ema", "rsi", "macd", "bollinger", "atr", "vwap"])).min(1),
     period: z.number().int().positive().optional().default(14),
     volumes: z.array(z.number()).optional(),

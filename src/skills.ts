@@ -37,13 +37,13 @@ const WriteFileSchema = z.object({
 
 const FetchUrlSchema = z.object({
   url: z.string().url("invalid URL"),
-  format: z.enum(["text", "json"]).optional().default("text"),
+  format: z.enum(["text", "json"]).default("text"),
 }).strict();
 
 const CallApiSchema = z.object({
   url: z.string().url("invalid URL"),
   method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]),
-  headers: z.record(z.string()).optional().default({}),
+  headers: z.record(z.string()).default({}),
   body: z.record(z.unknown()).optional(),
 }).strict();
 
@@ -145,6 +145,22 @@ const writeFile: Skill = {
 
 // ── Web / HTTP ────────────────────────────────────────────────────
 
+/** Block private/internal hostnames to prevent SSRF in local skill fallbacks. */
+function blockPrivateUrl(url: string): string | null {
+  try {
+    const { hostname } = new URL(url);
+    const h = hostname.toLowerCase();
+    if (
+      h === "localhost" || /^127\./.test(h) || /^10\./.test(h) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /^192\.168\./.test(h) ||
+      /^169\.254\./.test(h) || h === "::1" || /^fd[0-9a-f]{2}:/i.test(h) || /^fe80:/i.test(h)
+    ) return `Blocked: private/internal URLs are not allowed (${hostname})`;
+    return null;
+  } catch {
+    return "Blocked: invalid URL";
+  }
+}
+
 const fetchUrl: Skill = {
   id: "fetch_url",
   name: "Fetch URL",
@@ -159,6 +175,8 @@ const fetchUrl: Skill = {
   },
   run: async (raw) => {
     const { url, format } = validate(FetchUrlSchema, raw);
+    const block = blockPrivateUrl(url);
+    if (block) return block;
     const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
     return format === "json"
@@ -183,6 +201,8 @@ const callApi: Skill = {
   },
   run: async (raw) => {
     const { url, method, headers, body } = validate(CallApiSchema, raw);
+    const block = blockPrivateUrl(url);
+    if (block) return block;
     const res = await fetch(url, {
       method,
       headers: { "Content-Type": "application/json", ...headers },
@@ -220,6 +240,7 @@ const askClaude: Skill = {
         messages: [{ role: "user", content: prompt }],
       });
       const block = message.content[0];
+      if (!block) return "";
       return block.type === "text" ? block.text : JSON.stringify(block);
     } catch {
       return await runClaudeCLI(prompt, model);
