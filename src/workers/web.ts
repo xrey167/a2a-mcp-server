@@ -11,6 +11,12 @@ import { sanitizeUserInput } from "../prompt-sanitizer.js";
 const WebSchemas = {
   fetch_url: z.looseObject({ url: z.url(), format: z.enum(["text", "json"]).optional().default("text") }),
   call_api: z.looseObject({ url: z.url(), method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).optional().default("GET"), headers: z.record(z.string(), z.string()).optional().default({}), body: z.unknown().optional() }),
+  get_headers: z.looseObject({
+    /** URL to send the HEAD request to */
+    url: z.string().url(),
+    /** Follow redirects and return final headers (default true) */
+    followRedirects: z.boolean().optional().default(true),
+  }),
   scrape_page: z.looseObject({
     /** URL to fetch and scrape */
     url: z.string().url(),
@@ -230,6 +236,7 @@ const AGENT_CARD = {
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
     { id: "summarize_url", name: "Summarize URL", description: "Fetch a web page, scrape its text, and return an AI-written summary. Pass an optional question to focus the summary on a specific aspect." },
+    { id: "get_headers", name: "Get Headers", description: "Send a HEAD request to a URL and return the HTTP response headers (status, content-type, content-length, last-modified, cache-control, etc.) as JSON." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -406,6 +413,35 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
       return safeStringify({ url, title: scraped.title, wordCount: scraped.wordCount, summary }, 2);
     }
+    case "get_headers": {
+      const { url, followRedirects } = WebSchemas.get_headers.parse({ url: args.url ?? text, ...args });
+      const block = await blockPrivateUrl(url);
+      if (block) return block;
+      const res = await fetch(url, {
+        method: "HEAD",
+        redirect: followRedirects ? "follow" : "manual",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+      });
+      // After potential redirects, validate the final URL for SSRF
+      const finalUrl = res.url || url;
+      if (finalUrl !== url) {
+        const finalBlock = await blockPrivateUrl(finalUrl);
+        if (finalBlock) return finalBlock;
+      }
+      const headers: Record<string, string> = {};
+      res.headers.forEach((value, name) => {
+        headers[name] = value;
+      });
+      return safeStringify({
+        url: finalUrl,
+        status: res.status,
+        statusText: res.statusText,
+        redirected: res.redirected,
+        headers,
+      }, 2);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
