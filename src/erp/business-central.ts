@@ -25,6 +25,14 @@ function log(msg: string) {
   process.stderr.write(`[bc-connector] ${msg}\n`);
 }
 
+/** Validate that a date string is strictly YYYY-MM-DD before OData interpolation. */
+function validateDate(val: string, field: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+    throw new Error(`Invalid OData date value for field "${field}": "${val}"`);
+  }
+  return val;
+}
+
 /** Escape a string for use inside an OData single-quoted literal (doubles apostrophes). */
 function esc(value: string): string {
   return value.replace(/'/g, "''");
@@ -144,8 +152,8 @@ export class BusinessCentralConnector implements ERPConnector {
     // See: https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/webservices/use-filter-expressions-in-odata-uris
     const filterParts: string[] = [];
     if (filters?.status) filterParts.push(`status eq '${esc(filters.status)}'`);
-    if (filters?.dateFrom) filterParts.push(`dueDate ge ${filters.dateFrom}`);
-    if (filters?.dateTo) filterParts.push(`dueDate le ${filters.dateTo}`);
+    if (filters?.dateFrom) filterParts.push(`dueDate ge ${validateDate(filters.dateFrom, "dateFrom")}`);
+    if (filters?.dateTo) filterParts.push(`dueDate le ${validateDate(filters.dateTo, "dateTo")}`);
     if (filters?.itemFilter) filterParts.push(`contains(sourceNo, '${esc(filters.itemFilter)}')`);
 
     const params: Record<string, string> = { $top: "500" };
@@ -187,8 +195,8 @@ export class BusinessCentralConnector implements ERPConnector {
   }): Promise<SalesOrder[]> {
     const filterParts: string[] = [];
     if (filters?.status) filterParts.push(`status eq '${esc(filters.status)}'`);
-    if (filters?.dateFrom) filterParts.push(`orderDate ge ${filters.dateFrom}`);
-    if (filters?.dateTo) filterParts.push(`orderDate le ${filters.dateTo}`);
+    if (filters?.dateFrom) filterParts.push(`orderDate ge ${validateDate(filters.dateFrom, "dateFrom")}`);
+    if (filters?.dateTo) filterParts.push(`orderDate le ${validateDate(filters.dateTo, "dateTo")}`);
 
     const params: Record<string, string> = {
       $top: "500",
@@ -316,8 +324,8 @@ export class BusinessCentralConnector implements ERPConnector {
   }): Promise<PurchaseOrder[]> {
     const filterParts: string[] = [];
     if (filters?.vendorNo) filterParts.push(`buyFromVendorNumber eq '${esc(filters.vendorNo)}'`);
-    if (filters?.dateFrom) filterParts.push(`orderDate ge ${filters.dateFrom}`);
-    if (filters?.dateTo) filterParts.push(`orderDate le ${filters.dateTo}`);
+    if (filters?.dateFrom) filterParts.push(`orderDate ge ${validateDate(filters.dateFrom, "dateFrom")}`);
+    if (filters?.dateTo) filterParts.push(`orderDate le ${validateDate(filters.dateTo, "dateTo")}`);
 
     const params: Record<string, string> = {
       $top: "500",
@@ -382,8 +390,8 @@ export class BusinessCentralConnector implements ERPConnector {
     const filterParts: string[] = [];
     if (filters?.itemNo) filterParts.push(`itemNo eq '${esc(filters.itemNo)}'`);
     if (filters?.vendorNo) filterParts.push(`buyFromVendorNo eq '${esc(filters.vendorNo)}'`);
-    if (filters?.dateFrom) filterParts.push(`postingDate ge ${filters.dateFrom}`);
-    if (filters?.dateTo) filterParts.push(`postingDate le ${filters.dateTo}`);
+    if (filters?.dateFrom) filterParts.push(`postingDate ge ${validateDate(filters.dateFrom, "dateFrom")}`);
+    if (filters?.dateTo) filterParts.push(`postingDate le ${validateDate(filters.dateTo, "dateTo")}`);
 
     const params: Record<string, string> = {
       $top: String(filters?.limit ?? 500),
@@ -528,8 +536,8 @@ export class BusinessCentralConnector implements ERPConnector {
     dateTo?: string;
   }): Promise<TransferOrder[]> {
     const filterParts: string[] = [];
-    if (filters?.dateFrom) filterParts.push(`shipmentDate ge ${filters.dateFrom}`);
-    if (filters?.dateTo) filterParts.push(`shipmentDate le ${filters.dateTo}`);
+    if (filters?.dateFrom) filterParts.push(`shipmentDate ge ${validateDate(filters.dateFrom, "dateFrom")}`);
+    if (filters?.dateTo) filterParts.push(`shipmentDate le ${validateDate(filters.dateTo, "dateTo")}`);
 
     const params: Record<string, string> = { $top: "200" };
     if (filterParts.length > 0) params.$filter = filterParts.join(" and ");
