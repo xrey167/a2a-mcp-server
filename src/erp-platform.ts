@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { homedir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -7,6 +7,7 @@ import type { WorkflowDefinition } from "./workflow-engine.js";
 
 const RENEWAL_FETCH_TIMEOUT_MS = 15_000;
 const CONNECTOR_FETCH_TIMEOUT_MS = 30_000;
+const OAUTH_FETCH_TIMEOUT_MS = 10_000;
 
 export type ConnectorType = "odoo" | "business-central" | "dynamics";
 export type ProductType = "quote-to-order" | "lead-to-cash" | "collections";
@@ -1655,6 +1656,7 @@ db.run(`CREATE TABLE IF NOT EXISTS customer360_health_history (
 db.run("CREATE INDEX IF NOT EXISTS idx_c360_health_history_scope ON customer360_health_history(workspace_id, customer_external_id, created_at DESC)");
 
 function ensureColumn(table: string, column: string, alterSql: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) throw new Error(`Invalid table name: ${table}`);
   const cols = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
   if (!cols.some((c) => c.name === column)) {
     db.run(alterSql);
@@ -1768,7 +1770,7 @@ function updateWizardState(
   const nextState = mutator(currentState);
   const now = nowIso();
   const sets: string[] = ["state_json = ?", "updated_at = ?"];
-  const params: unknown[] = [JSON.stringify(nextState), now];
+  const params: SQLQueryBindings[] = [JSON.stringify(nextState), now];
   if (opts?.status) {
     sets.push("status = ?");
     params.push(opts.status);
@@ -2068,7 +2070,7 @@ export function createWizardSessionState(input: unknown): Record<string, unknown
 export function listWizardSessionStates(filtersInput: unknown = {}): { items: Record<string, unknown>[] } {
   const filters = WizardSessionListSchema.parse(filtersInput);
   const where: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   if (filters.workspaceId) {
     where.push("workspace_id = ?");
     params.push(filters.workspaceId);
@@ -2083,7 +2085,7 @@ export function listWizardSessionStates(filtersInput: unknown = {}): { items: Re
                ORDER BY updated_at DESC
                LIMIT ?`;
   params.push(filters.limit);
-  const rows = db.query<WizardSessionRow, unknown[]>(sql).all(...params);
+  const rows = db.query<WizardSessionRow, SQLQueryBindings[]>(sql).all(...params);
   return { items: rows.map(wizardSessionSummary) };
 }
 
@@ -3075,11 +3077,11 @@ export function decideQuoteToOrderApproval(workspaceIdInput: unknown, approvalEx
 export function getQuoteToOrderPipeline(workspaceIdInput: unknown, filtersInput: unknown = {}): Record<string, unknown> {
   const workspaceId = z.string().min(1).parse(workspaceIdInput);
   const filters = z.object({ since: z.string().optional() }).strict().parse(filtersInput);
-  const params: unknown[] = [workspaceId];
+  const params: SQLQueryBindings[] = [workspaceId];
   const whereSince = filters.since ? "AND created_at >= ?" : "";
   if (filters.since) params.push(filters.since);
 
-  const stateRows = db.query<{ state: QuoteToOrderState; cnt: number; amount: number | null }, unknown[]>(
+  const stateRows = db.query<{ state: QuoteToOrderState; cnt: number; amount: number | null }, SQLQueryBindings[]>(
     `SELECT state, COUNT(*) as cnt, SUM(amount) as amount
      FROM quote_to_order_records
      WHERE workspace_id = ? ${whereSince}
@@ -3102,7 +3104,7 @@ export function getQuoteToOrderPipeline(workspaceIdInput: unknown, filtersInput:
   const conversionRatePct = submitted > 0 ? Number(((converted / submitted) * 100).toFixed(1)) : 0;
   const revenueAtRisk = states.submitted.amount + states.approved.amount;
 
-  const approvalRows = db.query<{ mins: number }, unknown[]>(
+  const approvalRows = db.query<{ mins: number }, SQLQueryBindings[]>(
     `SELECT ((julianday(approval_decided_at) - julianday(created_at)) * 24 * 60) as mins
      FROM quote_to_order_records
      WHERE workspace_id = ? AND approval_decided_at IS NOT NULL ${whereSince}`
@@ -3591,7 +3593,7 @@ export function listQuoteMailboxConnections(workspaceIdInput: unknown, filtersIn
   const workspaceId = z.string().min(1).parse(workspaceIdInput);
   const filters = QuoteMailboxConnectionListSchema.parse(filtersInput);
   const where: string[] = ["workspace_id = ?"];
-  const params: unknown[] = [workspaceId];
+  const params: SQLQueryBindings[] = [workspaceId];
   if (filters.provider) {
     where.push("provider = ?");
     params.push(filters.provider);
@@ -3600,7 +3602,7 @@ export function listQuoteMailboxConnections(workspaceIdInput: unknown, filtersIn
     where.push("user_id = ?");
     params.push(filters.userId);
   }
-  const rows = db.query<QuoteMailboxConnectionRow, unknown[]>(
+  const rows = db.query<QuoteMailboxConnectionRow, SQLQueryBindings[]>(
     `SELECT id, workspace_id, provider, user_id, tenant_id, client_id, client_secret, refresh_token, access_token, access_token_expires_at, token_endpoint,
             scopes_json, metadata_json, enabled, last_refresh_at, last_error, created_at, updated_at
      FROM quote_mailbox_connections
@@ -3689,6 +3691,7 @@ async function resolveMailboxAccessToken(input: {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form.toString(),
+    signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) {
     const bodyText = await res.text().catch(() => "");
@@ -4429,7 +4432,7 @@ export function runQuoteFollowupEngine(workspaceIdInput: unknown, bodyInput: unk
   const nowMs = now.getTime();
 
   const placeholders = body.includeStates.map(() => "?").join(", ");
-  const records = db.query<QuoteToOrderRecordRow, unknown[]>(
+  const records = db.query<QuoteToOrderRecordRow, SQLQueryBindings[]>(
     `SELECT id, workspace_id, source_system, quote_external_id, order_external_id, approval_external_id, customer_external_id, state, amount, currency,
             external_id, sync_state, last_synced_at, last_sync_error, conflict_marker, payload_json, approval_deadline_at, approval_decided_at,
             conversion_deadline_at, converted_at, fulfilled_at, version, created_at, updated_at
@@ -4571,7 +4574,7 @@ export function listQuoteFollowupActions(workspaceIdInput: unknown, filtersInput
   const workspaceId = z.string().min(1).parse(workspaceIdInput);
   const filters = QuoteFollowupListSchema.parse(filtersInput);
   const where: string[] = ["workspace_id = ?"];
-  const params: unknown[] = [workspaceId];
+  const params: SQLQueryBindings[] = [workspaceId];
   if (filters.status) {
     where.push("status = ?");
     params.push(filters.status);
@@ -4581,7 +4584,7 @@ export function listQuoteFollowupActions(workspaceIdInput: unknown, filtersInput
     params.push(filters.actionType);
   }
   params.push(filters.limit);
-  const rows = db.query<QuoteFollowupActionRow, unknown[]>(
+  const rows = db.query<QuoteFollowupActionRow, SQLQueryBindings[]>(
     `SELECT id, workspace_id, quote_external_id, source_event_id, action_type, priority, status, reason, suggested_subject, suggested_message,
             assigned_to, due_at, note, last_error, writeback_run_id, writeback_connector, writeback_status, writeback_synced_at, writeback_error, created_at, updated_at
      FROM quote_followup_actions
@@ -4782,13 +4785,13 @@ export async function writebackQuoteFollowupBatch(
   const workspaceId = z.string().min(1).parse(workspaceIdInput);
   const body = QuoteFollowupWritebackBatchSchema.parse(bodyInput);
   const where: string[] = ["workspace_id = ?", "status = ?"];
-  const params: unknown[] = [workspaceId, body.status];
+  const params: SQLQueryBindings[] = [workspaceId, body.status];
   if (body.actionType) {
     where.push("action_type = ?");
     params.push(body.actionType);
   }
   params.push(body.limit);
-  const actionIds = db.query<{ id: string }, unknown[]>(
+  const actionIds = db.query<{ id: string }, SQLQueryBindings[]>(
     `SELECT id
      FROM quote_followup_actions
      WHERE ${where.join(" AND ")}
@@ -4889,7 +4892,7 @@ export function getQuotePersonalityInsights(
     "personality_confidence IS NOT NULL",
     "personality_confidence >= ?",
   ];
-  const params: unknown[] = [workspaceId, filters.minConfidence];
+  const params: SQLQueryBindings[] = [workspaceId, filters.minConfidence];
   if (filters.since) {
     where.push("occurred_at >= ?");
     params.push(filters.since);
@@ -4913,7 +4916,7 @@ export function getQuotePersonalityInsights(
     body_text: string;
     sentiment: "positive" | "neutral" | "negative";
     urgency: "low" | "normal" | "high";
-  }, unknown[]>(
+  }, SQLQueryBindings[]>(
     `SELECT quote_external_id, personality_type, personality_confidence, occurred_at, metadata_json, subject, body_text, sentiment, urgency
      FROM quote_communication_events
      WHERE ${where.join(" AND ")}
@@ -5029,7 +5032,7 @@ function listPersonalityEventsForContact(
 ): QuoteCommunicationEventRow[] {
   const limit = Math.max(1, Math.min(1000, options.limit ?? 400));
   const likePattern = `%${contactKey.toLowerCase()}%`;
-  const rows = db.query<QuoteCommunicationEventRow, unknown[]>(
+  const rows = db.query<QuoteCommunicationEventRow, SQLQueryBindings[]>(
     `SELECT id, workspace_id, quote_external_id, connector_type, channel, direction, subject, body_text, from_address, to_address,
             external_thread_id, intent_tags_json, sentiment, urgency, followup_needed, followup_reason, estimated_deal_probability_pct, personality_type, personality_confidence, idempotency_key, metadata_json,
             occurred_at, created_at
@@ -5324,12 +5327,12 @@ function toQuotePersonalityFeedback(row: PersonalityFeedbackRow): Record<string,
 
 function getPersonalityFeedbackSummary(workspaceId: string, contactKey: string, since?: string): Record<string, unknown> {
   const where: string[] = ["workspace_id = ?", "contact_key = ?"];
-  const params: unknown[] = [workspaceId, contactKey];
+  const params: SQLQueryBindings[] = [workspaceId, contactKey];
   if (since) {
     where.push("recorded_at >= ?");
     params.push(since);
   }
-  const rows = db.query<PersonalityFeedbackRow, unknown[]>(
+  const rows = db.query<PersonalityFeedbackRow, SQLQueryBindings[]>(
     `SELECT id, workspace_id, contact_key, quote_external_id, proposal_id, action_type, outcome, feedback_score, reply_received, converted_to_order,
             note, recorded_by, metadata_json, recorded_at, created_at
      FROM quote_personality_feedback
@@ -5494,7 +5497,7 @@ export function getQuoteCommunicationAnalytics(
   const workspaceId = z.string().min(1).parse(workspaceIdInput);
   const filters = QuoteCommunicationAnalyticsSchema.parse(filtersInput);
   const where: string[] = ["workspace_id = ?"];
-  const params: unknown[] = [workspaceId];
+  const params: SQLQueryBindings[] = [workspaceId];
   if (filters.since) {
     where.push("occurred_at >= ?");
     params.push(filters.since);
@@ -5510,7 +5513,7 @@ export function getQuoteCommunicationAnalytics(
     neutral: number;
     negative: number;
     avgDealProbability: number | null;
-  }, unknown[]>(
+  }, SQLQueryBindings[]>(
     `SELECT
        COUNT(*) as total,
        SUM(CASE WHEN direction = 'inbound' THEN 1 ELSE 0 END) as inbound,
@@ -5535,7 +5538,7 @@ export function getQuoteCommunicationAnalytics(
     if (Object.hasOwn(actionsByStatus, row.status)) actionsByStatus[row.status] = row.cnt;
   }
 
-  const timelineRows = db.query<{ quote_external_id: string; direction: QuoteCommunicationDirection; occurred_at: string }, unknown[]>(
+  const timelineRows = db.query<{ quote_external_id: string; direction: QuoteCommunicationDirection; occurred_at: string }, SQLQueryBindings[]>(
     `SELECT quote_external_id, direction, occurred_at
      FROM quote_communication_events
      ${clause}
@@ -6028,7 +6031,7 @@ export function syncRevenueGraphWorkspace(workspaceIdInput: unknown, bodyInput: 
   let entityUpserts = 0;
   let edgeUpserts = 0;
 
-  const q2oRows = db.query<QuoteToOrderRecordRow, unknown[]>(
+  const q2oRows = db.query<QuoteToOrderRecordRow, SQLQueryBindings[]>(
     `SELECT id, workspace_id, source_system, quote_external_id, order_external_id, approval_external_id, customer_external_id, state, amount, currency,
             external_id, sync_state, last_synced_at, last_sync_error, conflict_marker, payload_json, approval_deadline_at, approval_decided_at,
             conversion_deadline_at, converted_at, fulfilled_at, version, created_at, updated_at
@@ -6119,7 +6122,7 @@ export function syncRevenueGraphWorkspace(workspaceIdInput: unknown, bodyInput: 
   }
 
   if (body.includeMasterData) {
-    const masterRows = db.query<MasterDataRecordRow, unknown[]>(
+    const masterRows = db.query<MasterDataRecordRow, SQLQueryBindings[]>(
       `SELECT id, workspace_id, connector_type, entity, external_id, source_system, sync_state, last_synced_at, last_sync_error, schema_hash, payload_json, created_at, updated_at
        FROM erp_master_data_records
        WHERE workspace_id = ? ${sinceFilter ? "AND updated_at >= ?" : ""}
@@ -6189,7 +6192,7 @@ export function syncRevenueGraphWorkspace(workspaceIdInput: unknown, bodyInput: 
   }
 
   if (body.includeCommunications) {
-    const commRows = db.query<QuoteCommunicationEventRow, unknown[]>(
+    const commRows = db.query<QuoteCommunicationEventRow, SQLQueryBindings[]>(
       `SELECT id, workspace_id, quote_external_id, connector_type, channel, direction, subject, body_text, from_address, to_address,
               external_thread_id, intent_tags_json, sentiment, urgency, followup_needed, followup_reason, estimated_deal_probability_pct, personality_type, personality_confidence, idempotency_key, metadata_json,
               occurred_at, created_at
@@ -6538,7 +6541,7 @@ export function getQuoteCommunicationThreadSignals(
   let rows: QuoteCommunicationEventRow[] = [];
   if (threadId.startsWith("quote:")) {
     const quoteExternalId = threadId.slice("quote:".length);
-    rows = db.query<QuoteCommunicationEventRow, unknown[]>(
+    rows = db.query<QuoteCommunicationEventRow, SQLQueryBindings[]>(
       `SELECT id, workspace_id, quote_external_id, connector_type, channel, direction, subject, body_text, from_address, to_address,
               external_thread_id, intent_tags_json, sentiment, urgency, followup_needed, followup_reason, estimated_deal_probability_pct, personality_type, personality_confidence, idempotency_key, metadata_json,
               occurred_at, created_at
@@ -6547,7 +6550,7 @@ export function getQuoteCommunicationThreadSignals(
        ORDER BY occurred_at ASC`
     ).all(...(filters.since ? [workspaceId, quoteExternalId, filters.since] : [workspaceId, quoteExternalId]));
   } else {
-    rows = db.query<QuoteCommunicationEventRow, unknown[]>(
+    rows = db.query<QuoteCommunicationEventRow, SQLQueryBindings[]>(
       `SELECT id, workspace_id, quote_external_id, connector_type, channel, direction, subject, body_text, from_address, to_address,
               external_thread_id, intent_tags_json, sentiment, urgency, followup_needed, followup_reason, estimated_deal_probability_pct, personality_type, personality_confidence, idempotency_key, metadata_json,
               occurred_at, created_at
@@ -6964,7 +6967,7 @@ export function listQuoteAutopilotProposals(
   const workspaceId = z.string().min(1).parse(workspaceIdInput);
   const filters = AutopilotProposalListSchema.parse(filtersInput);
   const where: string[] = ["workspace_id = ?", "status = ?"];
-  const params: unknown[] = [workspaceId, filters.status];
+  const params: SQLQueryBindings[] = [workspaceId, filters.status];
   if (filters.actionType) {
     where.push("action_type = ?");
     params.push(filters.actionType);
@@ -6974,7 +6977,7 @@ export function listQuoteAutopilotProposals(
     params.push(filters.quoteExternalId);
   }
   params.push(filters.limit);
-  const rows = db.query<AutopilotProposalRow, unknown[]>(
+  const rows = db.query<AutopilotProposalRow, SQLQueryBindings[]>(
     `SELECT id, workspace_id, quote_external_id, action_type, channel, suggested_subject, suggested_message, reason_codes_json,
             expected_impact_json, status, requires_approval, approved_by, approved_at, rejected_by, rejected_at,
             executed_at, execution_mode, execution_result_json, last_error, metadata_json, created_at, updated_at
@@ -7480,7 +7483,7 @@ export function runQuoteDealRescue(
 export function getForecastQualityAnalytics(filtersInput: unknown = {}): Record<string, unknown> {
   const filters = ForecastQualityFilterSchema.parse(filtersInput);
   const where: string[] = ["q.state IN ('converted_to_order','fulfilled','rejected')"];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   if (filters.workspaceId) {
     where.push("q.workspace_id = ?");
     params.push(filters.workspaceId);
@@ -7494,7 +7497,7 @@ export function getForecastQualityAnalytics(filtersInput: unknown = {}): Record<
     quote_external_id: string;
     state: QuoteToOrderState;
     predicted_pct: number | null;
-  }, unknown[]>(
+  }, SQLQueryBindings[]>(
     `SELECT q.workspace_id, q.quote_external_id, q.state,
             (
               SELECT e.estimated_deal_probability_pct
@@ -7575,12 +7578,12 @@ export function getRevenueIntelligenceAnalytics(filtersInput: unknown = {}): Rec
   });
 
   const staleWhere: string[] = ["r.state IN ('submitted','approved')"];
-  const staleParams: unknown[] = [];
+  const staleParams: SQLQueryBindings[] = [];
   if (filters.workspaceId) {
     staleWhere.push("r.workspace_id = ?");
     staleParams.push(filters.workspaceId);
   }
-  const staleRow = db.query<{ cnt: number | null }, unknown[]>(
+  const staleRow = db.query<{ cnt: number | null }, SQLQueryBindings[]>(
     `SELECT COUNT(*) as cnt
      FROM quote_to_order_records r
      LEFT JOIN (
@@ -7593,7 +7596,7 @@ export function getRevenueIntelligenceAnalytics(filtersInput: unknown = {}): Rec
   ).get(...[...staleParams, new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString()]);
 
   const followupWhere: string[] = ["due_at <= ?"];
-  const followupParams: unknown[] = [nowIso()];
+  const followupParams: SQLQueryBindings[] = [nowIso()];
   if (filters.workspaceId) {
     followupWhere.push("workspace_id = ?");
     followupParams.push(filters.workspaceId);
@@ -7602,7 +7605,7 @@ export function getRevenueIntelligenceAnalytics(filtersInput: unknown = {}): Rec
     followupWhere.push("created_at >= ?");
     followupParams.push(filters.since);
   }
-  const followupSla = db.query<{ totalDue: number | null; onTime: number | null }, unknown[]>(
+  const followupSla = db.query<{ totalDue: number | null; onTime: number | null }, SQLQueryBindings[]>(
     `SELECT
        COUNT(*) as totalDue,
        SUM(CASE WHEN status IN ('done','sent') AND updated_at <= due_at THEN 1 ELSE 0 END) as onTime
@@ -7614,7 +7617,7 @@ export function getRevenueIntelligenceAnalytics(filtersInput: unknown = {}): Rec
     : 0;
 
   const rescueWhere: string[] = ["1 = 1"];
-  const rescueParams: unknown[] = [];
+  const rescueParams: SQLQueryBindings[] = [];
   if (filters.workspaceId) {
     rescueWhere.push("workspace_id = ?");
     rescueParams.push(filters.workspaceId);
@@ -7623,7 +7626,7 @@ export function getRevenueIntelligenceAnalytics(filtersInput: unknown = {}): Rec
     rescueWhere.push("created_at >= ?");
     rescueParams.push(filters.since);
   }
-  const rescue = db.query<{ recoveredValue: number | null; runs: number | null }, unknown[]>(
+  const rescue = db.query<{ recoveredValue: number | null; runs: number | null }, SQLQueryBindings[]>(
     `SELECT SUM(recovered_value_eur) as recoveredValue, COUNT(*) as runs
      FROM quote_deal_rescue_runs
      WHERE ${rescueWhere.join(" AND ")}`
@@ -7636,12 +7639,12 @@ export function getRevenueIntelligenceAnalytics(filtersInput: unknown = {}): Rec
   const baselineEnd = currentSince;
   const conversionRateForWindow = (start: string, end: string): number => {
     const where: string[] = ["created_at >= ?", "created_at < ?"];
-    const params: unknown[] = [start, end];
+    const params: SQLQueryBindings[] = [start, end];
     if (filters.workspaceId) {
       where.push("workspace_id = ?");
       params.push(filters.workspaceId);
     }
-    const row = db.query<{ submitted: number | null; converted: number | null }, unknown[]>(
+    const row = db.query<{ submitted: number | null; converted: number | null }, SQLQueryBindings[]>(
       `SELECT
          SUM(CASE WHEN state IN ('submitted','approved','converted_to_order','fulfilled','rejected') THEN 1 ELSE 0 END) as submitted,
          SUM(CASE WHEN state IN ('converted_to_order','fulfilled') THEN 1 ELSE 0 END) as converted
@@ -7689,13 +7692,13 @@ function toTrustConsent(row: TrustConsentRow): Record<string, unknown> {
 export function getTrustConsentStatus(filtersInput: unknown): Record<string, unknown> {
   const filters = TrustConsentStatusFilterSchema.parse(filtersInput);
   const where: string[] = ["workspace_id = ?"];
-  const params: unknown[] = [filters.workspaceId];
+  const params: SQLQueryBindings[] = [filters.workspaceId];
   if (filters.contactKey) {
     where.push("contact_key = ?");
     params.push(normalizeContactKey(filters.contactKey));
   }
   params.push(filters.limit);
-  const rows = db.query<TrustConsentRow, unknown[]>(
+  const rows = db.query<TrustConsentRow, SQLQueryBindings[]>(
     `SELECT id, workspace_id, contact_key, status, purposes_json, source, updated_by, updated_at, created_at
      FROM trust_contact_consents
      WHERE ${where.join(" AND ")}
@@ -7873,7 +7876,7 @@ export function syncMasterDataEntity(workspaceIdInput: unknown, entityInput: unk
 export function listMasterDataMappings(filtersInput: unknown): { items: MasterDataMapping[] } {
   const filters = MasterDataMappingListSchema.parse(filtersInput);
   const where: string[] = ["workspace_id = ?"];
-  const params: unknown[] = [filters.workspaceId];
+  const params: SQLQueryBindings[] = [filters.workspaceId];
   if (filters.connectorType) {
     where.push("connector_type = ?");
     params.push(filters.connectorType);
@@ -7888,7 +7891,7 @@ export function listMasterDataMappings(filtersInput: unknown): { items: MasterDa
                ORDER BY updated_at DESC
                LIMIT ?`;
   params.push(filters.limit);
-  const rows = db.query<MasterDataMappingRow, unknown[]>(sql).all(...params);
+  const rows = db.query<MasterDataMappingRow, SQLQueryBindings[]>(sql).all(...params);
   return { items: rows.map(toMasterDataMapping) };
 }
 
@@ -8484,7 +8487,7 @@ export function getProductKpis(productInput: unknown, filtersInput: unknown = {}
   const where = filters.since ? "WHERE created_at >= ?" : "";
   const params = filters.since ? [filters.since] : [];
 
-  const workflowStats = db.query<{ total: number; completed: number; failed: number }, unknown[]>(
+  const workflowStats = db.query<{ total: number; completed: number; failed: number }, SQLQueryBindings[]>(
     `SELECT COUNT(*) as total,
             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
@@ -8492,7 +8495,7 @@ export function getProductKpis(productInput: unknown, filtersInput: unknown = {}
      WHERE product = ? ${filters.since ? "AND created_at >= ?" : ""}`
   ).get(product, ...params) ?? { total: 0, completed: 0, failed: 0 };
 
-  const syncStats = db.query<{ synced: number; failed: number; entities: number }, unknown[]>(
+  const syncStats = db.query<{ synced: number; failed: number; entities: number }, SQLQueryBindings[]>(
     `SELECT
       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as synced,
       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
@@ -8554,7 +8557,7 @@ export function getConnectorKpis(filtersInput: unknown = {}): Record<string, unk
      FROM connector_configs`
   ).get() ?? { total: 0, healthy: 0, degraded: 0, unhealthy: 0 };
 
-  const renewalRuns = db.query<{ total: number; success: number; failed: number }, unknown[]>(
+  const renewalRuns = db.query<{ total: number; success: number; failed: number }, SQLQueryBindings[]>(
     `SELECT
       COUNT(*) as total,
       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success,
@@ -8596,7 +8599,7 @@ export function listConnectorRenewals(filtersInput: unknown = {}): {
 } {
   const filters = ConnectorRenewalFeedFilterSchema.parse(filtersInput);
   const where: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
 
   if (filters.connector) {
     where.push("connector_type = ?");
@@ -8630,7 +8633,7 @@ export function listConnectorRenewals(filtersInput: unknown = {}): {
                LIMIT ?`;
   params.push(filters.limit + 1);
 
-  const rows = db.query<ConnectorRenewalRunRow, unknown[]>(sql).all(...params);
+  const rows = db.query<ConnectorRenewalRunRow, SQLQueryBindings[]>(sql).all(...params);
   const hasMore = rows.length > filters.limit;
   const sliced = hasMore ? rows.slice(0, filters.limit) : rows;
 
@@ -8760,7 +8763,7 @@ export function listPilotLaunchRuns(filtersInput: unknown = {}): { items: PilotL
   const filters = schema.parse(filtersInput);
 
   const where: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   if (filters.status) {
     where.push("status = ?");
     params.push(filters.status);
@@ -8775,7 +8778,7 @@ export function listPilotLaunchRuns(filtersInput: unknown = {}): { items: PilotL
                ORDER BY created_at DESC
                LIMIT ?`;
   params.push(filters.limit);
-  const rows = db.query<PilotLaunchRunRow, unknown[]>(sql).all(...params);
+  const rows = db.query<PilotLaunchRunRow, SQLQueryBindings[]>(sql).all(...params);
   return {
     items: rows.map((row) => ({
       id: row.id,
@@ -8877,7 +8880,7 @@ export function createOnboardingSession(input: unknown): OnboardingSession {
 export function listOnboardingSessions(filtersInput: unknown = {}): { items: OnboardingSession[] } {
   const filters = OnboardingListSchema.parse(filtersInput);
   const where: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   if (filters.status) {
     where.push("status = ?");
     params.push(filters.status);
@@ -8888,7 +8891,7 @@ export function listOnboardingSessions(filtersInput: unknown = {}): { items: Onb
                ORDER BY created_at DESC
                LIMIT ?`;
   params.push(filters.limit);
-  const rows = db.query<OnboardingSessionRow, unknown[]>(sql).all(...params);
+  const rows = db.query<OnboardingSessionRow, SQLQueryBindings[]>(sql).all(...params);
   return { items: rows.map(toOnboardingSession) };
 }
 
@@ -9058,7 +9061,7 @@ export function recordCommercialEvent(input: unknown): CommercialPipelineEvent {
 export function getCommercialKpis(filtersInput: unknown = {}): Record<string, unknown> {
   const filters = CommercialKpiFilterSchema.parse(filtersInput);
   const where: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   if (filters.product) {
     where.push("product = ?");
     params.push(filters.product);
@@ -9073,7 +9076,7 @@ export function getCommercialKpis(filtersInput: unknown = {}): Record<string, un
     stage: "qualified_call" | "proposal_sent" | "pilot_signed";
     cnt: number;
     pipelineValueEur: number | null;
-  }, unknown[]>(
+  }, SQLQueryBindings[]>(
     `SELECT stage, COUNT(*) as cnt, SUM(COALESCE(value_eur, 0)) as pipelineValueEur
      FROM commercial_pipeline_events
      ${clause}
@@ -9150,7 +9153,7 @@ export function getExecutiveAnalytics(filtersInput: unknown = {}): Record<string
     since: z.string().optional(),
   }).strict().parse(filtersInput);
   const where: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   if (filters.workspaceId) {
     where.push("workspace_id = ?");
     params.push(filters.workspaceId);
@@ -9161,7 +9164,7 @@ export function getExecutiveAnalytics(filtersInput: unknown = {}): Record<string
   }
   const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
 
-  const totals = db.query<{ submitted: number; converted: number; revenueRisk: number | null }, unknown[]>(
+  const totals = db.query<{ submitted: number; converted: number; revenueRisk: number | null }, SQLQueryBindings[]>(
     `SELECT
        SUM(CASE WHEN state IN ('submitted','approved','converted_to_order','fulfilled','rejected') THEN 1 ELSE 0 END) as submitted,
        SUM(CASE WHEN state IN ('converted_to_order','fulfilled') THEN 1 ELSE 0 END) as converted,
@@ -9169,7 +9172,7 @@ export function getExecutiveAnalytics(filtersInput: unknown = {}): Record<string
      FROM quote_to_order_records
      ${clause}`
   ).get(...params);
-  const approvalRows = db.query<{ mins: number }, unknown[]>(
+  const approvalRows = db.query<{ mins: number }, SQLQueryBindings[]>(
     `SELECT ((julianday(approval_decided_at) - julianday(created_at)) * 24 * 60) as mins
      FROM quote_to_order_records
      ${clause.length > 0 ? `${clause} AND approval_decided_at IS NOT NULL` : "WHERE approval_decided_at IS NOT NULL"}`
@@ -9192,7 +9195,7 @@ export function getExecutiveAnalytics(filtersInput: unknown = {}): Record<string
     manualStepsRemoved += num(derived.manualStepsRemoved);
     estimatedValue += num(derived.estimatedValueEur);
   }
-  const conversionRow = db.query<{ submittedAt: string | null; convertedAt: string | null }, unknown[]>(
+  const conversionRow = db.query<{ submittedAt: string | null; convertedAt: string | null }, SQLQueryBindings[]>(
     `SELECT MIN(created_at) as submittedAt, MIN(converted_at) as convertedAt
      FROM quote_to_order_records
      ${clause.length > 0 ? `${clause} AND converted_at IS NOT NULL` : "WHERE converted_at IS NOT NULL"}`
@@ -9218,7 +9221,7 @@ export function getOpsAnalytics(filtersInput: unknown = {}): Record<string, unkn
   const filters = z.object({
     since: z.string().optional(),
   }).strict().parse(filtersInput);
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   const where = filters.since ? "WHERE created_at >= ?" : "";
   if (filters.since) params.push(filters.since);
 
@@ -9227,7 +9230,7 @@ export function getOpsAnalytics(filtersInput: unknown = {}): Record<string, unkn
     entity_type: "lead" | "deal" | "invoice" | "quote" | "order" | "activity";
     total: number;
     failed: number;
-  }, unknown[]>(
+  }, SQLQueryBindings[]>(
     `SELECT connector_type, entity_type, COUNT(*) as total,
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
      FROM connector_sync_runs
@@ -9241,18 +9244,18 @@ export function getOpsAnalytics(filtersInput: unknown = {}): Record<string, unkn
     failureRatePct: row.total > 0 ? Number(((row.failed / row.total) * 100).toFixed(1)) : 0,
   }));
 
-  const retryRow = db.query<{ retries: number }, unknown[]>(
+  const retryRow = db.query<{ retries: number }, SQLQueryBindings[]>(
     `SELECT COUNT(*) as retries
      FROM connector_sync_runs
      ${where.length > 0 ? `${where} AND attempts > 1` : "WHERE attempts > 1"}`
   ).get(...params);
-  const deadLetterRow = db.query<{ cnt: number }, unknown[]>(
+  const deadLetterRow = db.query<{ cnt: number }, SQLQueryBindings[]>(
     `SELECT COUNT(*) as cnt FROM connector_dead_letters ${where}`
   ).get(...params);
-  const replayRow = db.query<{ cnt: number }, unknown[]>(
+  const replayRow = db.query<{ cnt: number }, SQLQueryBindings[]>(
     `SELECT COUNT(*) as cnt FROM connector_replay_runs ${where}`
   ).get(...params);
-  const incidentTimeline = db.query<{ day: string; openCnt: number; resolvedCnt: number }, unknown[]>(
+  const incidentTimeline = db.query<{ day: string; openCnt: number; resolvedCnt: number }, SQLQueryBindings[]>(
     `SELECT substr(created_at, 1, 10) as day,
             SUM(CASE WHEN status IN ('open','acknowledged') THEN 1 ELSE 0 END) as openCnt,
             SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolvedCnt
@@ -9293,11 +9296,11 @@ function hashFingerprint(value: string): string {
 }
 
 function computeWorkflowSlaStatus(product: ProductType, since?: string): WorkflowSlaStatusItem {
-  const params: unknown[] = [product];
+  const params: SQLQueryBindings[] = [product];
   const whereSince = since ? "AND created_at >= ?" : "";
   if (since) params.push(since);
 
-  const row = db.query<{ total: number; completed: number; failed: number }, unknown[]>(
+  const row = db.query<{ total: number; completed: number; failed: number }, SQLQueryBindings[]>(
     `SELECT COUNT(*) as total,
             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
@@ -9352,10 +9355,10 @@ function computeWorkflowSlaStatus(product: ProductType, since?: string): Workflo
     }
   }
 
-  const syncParams: unknown[] = [];
+  const syncParams: SQLQueryBindings[] = [];
   const syncWhere = since ? "AND created_at >= ?" : "";
   if (since) syncParams.push(since);
-  const syncFailure = db.query<{ cnt: number }, unknown[]>(
+  const syncFailure = db.query<{ cnt: number }, SQLQueryBindings[]>(
     `SELECT COUNT(*) as cnt
      FROM connector_sync_runs
      WHERE status = 'failed' AND entity_type IN ('quote', 'order') ${syncWhere}`
@@ -9462,7 +9465,7 @@ export function listWorkflowSlaIncidents(filtersInput: unknown = {}): { items: W
   }).strict();
   const filters = schema.parse(filtersInput);
   const where: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   if (filters.product) {
     where.push("product = ?");
     params.push(filters.product);
@@ -9477,7 +9480,7 @@ export function listWorkflowSlaIncidents(filtersInput: unknown = {}): { items: W
                ORDER BY created_at DESC
                LIMIT ?`;
   params.push(filters.limit);
-  const rows = db.query<WorkflowSlaIncidentRow, unknown[]>(sql).all(...params);
+  const rows = db.query<WorkflowSlaIncidentRow, SQLQueryBindings[]>(sql).all(...params);
   return { items: rows.map(toWorkflowIncident) };
 }
 
@@ -9801,7 +9804,7 @@ function fetchCustomer360CommunicationMetrics(
   let commRows: QuoteCommunicationEventRow[] = [];
   if (quoteIds.length > 0) {
     const placeholders = quoteIds.map(() => "?").join(",");
-    commRows = db.query<QuoteCommunicationEventRow, unknown[]>(
+    commRows = db.query<QuoteCommunicationEventRow, SQLQueryBindings[]>(
       `SELECT * FROM quote_communication_events
        WHERE workspace_id = ? AND quote_external_id IN (${placeholders})
        ORDER BY occurred_at DESC`,
@@ -9856,7 +9859,7 @@ function fetchCustomer360FollowupMetrics(
 
   if (quoteIds.length > 0) {
     const placeholders = quoteIds.map(() => "?").join(",");
-    const followupRows = db.query<{ status: string; due_at: string }, unknown[]>(
+    const followupRows = db.query<{ status: string; due_at: string }, SQLQueryBindings[]>(
       `SELECT status, due_at FROM quote_followup_actions
        WHERE workspace_id = ? AND quote_external_id IN (${placeholders})`,
     ).all(workspaceId, ...quoteIds);
@@ -10275,10 +10278,10 @@ export function getCustomer360Timeline(
       const placeholders = quoteIds.map(() => "?").join(",");
       let commSql = `SELECT * FROM quote_communication_events
         WHERE workspace_id = ? AND quote_external_id IN (${placeholders})`;
-      const commParams: unknown[] = [opts.workspaceId, ...quoteIds];
+      const commParams: SQLQueryBindings[] = [opts.workspaceId, ...quoteIds];
       if (sinceFilter) { commSql += ` AND occurred_at >= ?`; commParams.push(sinceFilter); }
       commSql += ` ORDER BY occurred_at DESC`;
-      const comms = db.query<QuoteCommunicationEventRow, unknown[]>(commSql).all(...commParams);
+      const comms = db.query<QuoteCommunicationEventRow, SQLQueryBindings[]>(commSql).all(...commParams);
       for (const c of comms) {
         entries.push({
           type: "communication",
@@ -10296,9 +10299,9 @@ export function getCustomer360Timeline(
     if (quoteIds.length > 0) {
       const placeholders = quoteIds.map(() => "?").join(",");
       let fSql = `SELECT * FROM quote_followup_actions WHERE workspace_id = ? AND quote_external_id IN (${placeholders})`;
-      const fParams: unknown[] = [opts.workspaceId, ...quoteIds];
+      const fParams: SQLQueryBindings[] = [opts.workspaceId, ...quoteIds];
       if (sinceFilter) { fSql += ` AND created_at >= ?`; fParams.push(sinceFilter); }
-      const followups = db.query<QuoteFollowupActionRow, unknown[]>(fSql).all(...fParams);
+      const followups = db.query<QuoteFollowupActionRow, SQLQueryBindings[]>(fSql).all(...fParams);
       for (const f of followups) {
         entries.push({
           type: "followup",
@@ -10334,10 +10337,10 @@ export function getCustomer360Timeline(
       const placeholders = contactKeys.map(() => "?").join(",");
       let auditSql = `SELECT * FROM trust_audit_log
         WHERE workspace_id = ? AND entity_type = 'contact' AND entity_id IN (${placeholders})`;
-      const auditParams: unknown[] = [opts.workspaceId, ...contactKeys];
+      const auditParams: SQLQueryBindings[] = [opts.workspaceId, ...contactKeys];
       if (sinceFilter) { auditSql += ` AND created_at >= ?`; auditParams.push(sinceFilter); }
       auditSql += ` ORDER BY created_at DESC LIMIT 200`;
-      const auditRows = db.query<TrustAuditRow, unknown[]>(auditSql).all(...auditParams);
+      const auditRows = db.query<TrustAuditRow, SQLQueryBindings[]>(auditSql).all(...auditParams);
       for (const a of auditRows) {
         entries.push({
           type: "consent_change",
@@ -10382,14 +10385,14 @@ export function getCustomer360Segments(filtersInput: unknown): Record<string, un
 
   // Query profiles
   const where: string[] = ["workspace_id = ?"];
-  const params: unknown[] = [filters.workspaceId];
+  const params: SQLQueryBindings[] = [filters.workspaceId];
   if (filters.segment) {
     where.push("segment = ?");
     params.push(filters.segment);
   }
   params.push(filters.limit);
 
-  const profiles = db.query<Customer360ProfileRow, unknown[]>(
+  const profiles = db.query<Customer360ProfileRow, SQLQueryBindings[]>(
     `SELECT * FROM customer360_profiles
      WHERE ${where.join(" AND ")}
      ORDER BY health_score DESC
