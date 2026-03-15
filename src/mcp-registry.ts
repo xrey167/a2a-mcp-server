@@ -109,7 +109,9 @@ function loadManifestCache(): ToolDef[] {
     const cached: CachedManifest = JSON.parse(raw);
     const age = Date.now() - cached.updatedAt;
     if (age < 24 * 60 * 60 * 1000) return cached.tools; // use if < 24h old
-  } catch {}
+  } catch (e: any) {
+    if (e?.code !== "ENOENT") process.stderr.write(`[mcp-registry] failed to load manifest cache: ${e}\n`);
+  }
   return [];
 }
 
@@ -117,7 +119,9 @@ function saveManifestCache(tools: ToolDef[]) {
   try {
     const manifest: CachedManifest = { updatedAt: Date.now(), tools };
     writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2));
-  } catch {}
+  } catch (e) {
+    process.stderr.write(`[mcp-registry] failed to save manifest cache: ${e}\n`);
+  }
 }
 
 // ── Lazy connect ─────────────────────────────────────────────────
