@@ -76,7 +76,8 @@ async function blockPrivateUrl(url: string): Promise<string | null> {
       }
     }
     return null;
-  } catch {
+  } catch (err) {
+    process.stderr.write(`[web-agent] blockPrivateUrl: unexpected error for "${url}": ${err instanceof Error ? err.message : String(err)}\n`);
     return "Blocked: invalid URL";
   }
 }
@@ -378,25 +379,54 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         const ssrfBlock = await blockPrivateUrl(url);
         if (ssrfBlock) return { url, status: null, ok: false, error: ssrfBlock };
 
+        // Single AbortController shared across HEAD + optional GET fallback so the
+        // total wall-clock time for one URL never exceeds timeoutMs.
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
-          let res = await fetch(url, {
+          const headRes = await fetch(url, {
             method: "HEAD",
             redirect: "follow",
             signal: controller.signal,
           });
-          // Some servers return 405 for HEAD — retry with GET, no body read
-          if (res.status === 405) {
-            res = await fetch(url, {
+
+          // Validate post-redirect URL to block SSRF via open redirects
+          if (headRes.url && headRes.url !== url) {
+            const redirectBlock = await blockPrivateUrl(headRes.url);
+            if (redirectBlock) {
+              try { await headRes.body?.cancel(); } catch { /* ignore cleanup errors */ }
+              return { url, status: null, ok: false, error: `Redirect blocked: ${redirectBlock}` };
+            }
+          }
+
+          // Some servers return 405 for HEAD — retry with GET, no body read.
+          // Cancel the HEAD body first to free the TCP connection.
+          if (headRes.status === 405) {
+            try { await headRes.body?.cancel(); } catch { /* ignore cleanup errors */ }
+
+            const getRes = await fetch(url, {
               method: "GET",
               redirect: "follow",
-              signal: AbortSignal.timeout(timeoutMs),
+              signal: controller.signal, // reuse same budget — no fresh timeout
             });
-            // Consume and discard body to free connection
-            await res.body?.cancel();
+
+            // Validate post-redirect URL for GET fallback too
+            if (getRes.url && getRes.url !== url) {
+              const redirectBlock = await blockPrivateUrl(getRes.url);
+              if (redirectBlock) {
+                try { await getRes.body?.cancel(); } catch { /* ignore cleanup errors */ }
+                return { url, status: null, ok: false, error: `Redirect blocked: ${redirectBlock}` };
+              }
+            }
+
+            // Discard body to free connection
+            try { await getRes.body?.cancel(); } catch { /* ignore cleanup errors */ }
+            return { url, status: getRes.status, ok: getRes.ok };
           }
-          return { url, status: res.status, ok: res.ok };
+
+          // Cancel non-405 HEAD body to free the connection
+          try { await headRes.body?.cancel(); } catch { /* ignore cleanup errors */ }
+          return { url, status: headRes.status, ok: headRes.ok };
         } catch (err) {
           const isTimeout = err instanceof Error && err.name === "AbortError";
           const msg = isTimeout ? `timed out after ${timeoutMs}ms` : (err instanceof Error ? err.message : String(err));
@@ -411,12 +441,13 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       for (let i = 0; i < urls.length; i += concurrency) {
         const batch = urls.slice(i, i + concurrency);
         const settled = await Promise.allSettled(batch.map(checkOne));
-        for (const outcome of settled) {
+        for (let j = 0; j < settled.length; j++) {
+          const outcome = settled[j] as PromiseSettledResult<LinkResult>;
           if (outcome.status === "fulfilled") {
-            results.push(outcome.value);
+            results.push((outcome as PromiseFulfilledResult<LinkResult>).value);
           } else {
             // Should not happen — checkOne never throws — but handle defensively
-            results.push({ url: "unknown", status: null, ok: false, error: String(outcome.reason) });
+            results.push({ url: batch[j] ?? "unknown", status: null, ok: false, error: String((outcome as PromiseRejectedResult).reason) });
           }
         }
       }
