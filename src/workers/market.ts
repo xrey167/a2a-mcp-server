@@ -20,6 +20,7 @@ import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-har
 import { safeStringify } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { round, validateUrlNotInternal } from "../worker-utils.js";
+import { callPeer } from "../peer.js";
 
 const PORT = 8090;
 const NAME = "market-agent";
@@ -95,6 +96,12 @@ const MarketSchemas = {
       trend: z.number().optional().default(0.15),
     }).optional().default({}),
   }),
+
+  market_report: z.looseObject({
+    symbols: z.array(z.string().min(1)).min(1).max(10),
+    range: z.enum(["1mo", "3mo", "6mo", "1y"]).optional().default("1mo"),
+    focus: z.string().optional(),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -113,6 +120,7 @@ const AGENT_CARD = {
     { id: "detect_anomalies", name: "Detect Anomalies", description: "Detect price and volume anomalies using z-score against rolling baseline" },
     { id: "correlation", name: "Correlation Matrix", description: "Compute Pearson correlation matrix between multiple price series" },
     { id: "market_composite", name: "Market Composite", description: "Compute a composite 0-100 market score combining RSI, MACD, volume anomaly, momentum, volatility, and trend" },
+    { id: "market_report", name: "Market Report", description: "Fetch quotes + 1-month price history for up to 10 symbols, compute RSI and MACD signals, then generate an AI-written market briefing with bull/bear signals, key observations, and outlook. Optional focus parameter narrows the analysis (e.g. 'tech sector', 'volatility risk')." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -878,6 +886,78 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         components,
         weights,
       }, 2);
+    }
+
+    case "market_report": {
+      const { symbols, range, focus } = MarketSchemas.market_report.parse(args);
+
+      // Fetch quote + price history for each symbol in parallel
+      const symbolData = await Promise.all(
+        symbols.map(async (sym) => {
+          try {
+            const [quote, history] = await Promise.all([
+              fetchYahooQuote(sym),
+              fetchYahooHistory(sym, "1d", range),
+            ]);
+            const closes = history.close.filter(v => v > 0);
+            const rsiSeries = closes.length >= 15 ? computeRSI(closes, 14) : [];
+            const latestRsi = rsiSeries.filter(v => v !== null).at(-1) ?? null;
+            const macdData = closes.length >= 27 ? computeMACD(closes) : null;
+            const latestMacd = macdData?.macd.filter(v => v !== null).at(-1) ?? null;
+            const latestSignal = macdData?.signal.filter(v => v !== null).at(-1) ?? null;
+            const macdCross = latestMacd !== null && latestSignal !== null
+              ? latestMacd > latestSignal ? "bullish" : "bearish"
+              : "insufficient data";
+            return {
+              symbol: sym,
+              price: quote.price,
+              change: quote.change,
+              changePercent: quote.changePercent,
+              currency: quote.currency,
+              rsi: latestRsi !== null ? round(latestRsi as number) : null,
+              macdSignal: macdCross,
+              dataPoints: closes.length,
+              error: null,
+            };
+          } catch (err) {
+            return { symbol: sym, error: err instanceof Error ? err.message : String(err) };
+          }
+        }),
+      );
+
+      const successful = symbolData.filter(d => !d.error);
+      if (successful.length === 0) {
+        return `Failed to fetch data for all symbols: ${symbolData.map(d => `${d.symbol}: ${d.error}`).join("; ")}`;
+      }
+
+      const dataSection = successful.map(d => {
+        const rsiLabel = d.rsi !== null ? ` | RSI ${d.rsi}${d.rsi > 70 ? " (overbought)" : d.rsi < 30 ? " (oversold)" : ""}` : "";
+        const macdLabel = d.macdSignal !== "insufficient data" ? ` | MACD ${d.macdSignal}` : "";
+        return `${d.symbol}: $${d.price} (${Number(d.changePercent) >= 0 ? "+" : ""}${d.changePercent}% ${d.currency ?? "USD"})${rsiLabel}${macdLabel}`;
+      }).join("\n");
+
+      const failedNote = symbolData.filter(d => d.error).length > 0
+        ? `\n\nFailed symbols: ${symbolData.filter(d => d.error).map(d => `${d.symbol} (${d.error})`).join(", ")}`
+        : "";
+
+      const focusLine = focus ? `\nFocus: ${focus}` : "";
+      const prompt = `You are a market analyst writing a concise market briefing.
+
+Date range analyzed: last ${range}${focusLine}
+
+Market data:
+${dataSection}${failedNote}
+
+Write a structured briefing with these sections:
+1. **Overview** — 2-3 sentence summary of overall market tone
+2. **Bull Signals** — assets or indicators showing strength
+3. **Bear Signals** — assets or indicators showing weakness or risk
+4. **Key Observations** — notable patterns (RSI extremes, MACD crosses, divergences)
+5. **Outlook** — short-term directional view with key risks to watch
+
+Be concise. Use the data above. Do not invent prices or signals not shown.`;
+
+      return callPeer("ask_claude", { prompt }, prompt, 90_000);
     }
 
     default:
