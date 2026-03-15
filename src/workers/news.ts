@@ -16,7 +16,7 @@ import Fastify from "fastify";
 import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
-import { safeStringify } from "../safe-json.js";
+import { safeStringify, safeParse } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { validateUrlNotInternal } from "../worker-utils.js";
 import { callPeer } from "../peer.js";
@@ -708,9 +708,24 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       // Fetch from URLs if provided, otherwise use pre-supplied articles
       let articles: Article[] = [];
       if (urls && urls.length > 0) {
-        const raw = await handleSkill("aggregate_feeds", { urls, limit: maxArticles * 2, dedup: true, sortBy: "date" }, "");
-        const parsed = JSON.parse(raw as string) as { articles: Article[] };
+        let raw: string;
+        try {
+          raw = await handleSkill("aggregate_feeds", { urls, limit: maxArticles * 2, dedup: true, sortBy: "date" }, "") as string;
+        } catch (err) {
+          process.stderr.write(`[${NAME}] summarize_news: aggregate_feeds failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+          return `Error: failed to fetch RSS feeds — ${err instanceof Error ? err.message : String(err)}`;
+        }
+        const parsed = safeParse<{ articles?: Article[]; errors?: string[] }>(raw, {});
+        if (parsed.errors && parsed.errors.length > 0) {
+          process.stderr.write(`[${NAME}] summarize_news: ${parsed.errors.length} feed(s) failed: ${parsed.errors.join("; ")}\n`);
+        }
         articles = parsed.articles ?? [];
+        if (articles.length === 0) {
+          const detail = parsed.errors?.length
+            ? `feed errors: ${parsed.errors.slice(0, 3).join("; ")}`
+            : "no articles returned";
+          return `Error: could not retrieve articles — ${detail}`;
+        }
       } else if (inputArticles && inputArticles.length > 0) {
         articles = inputArticles as Article[];
       } else {
@@ -721,8 +736,16 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       if (selected.length === 0) return "No articles to summarize";
 
       const focusLine = focus ? `\n\nFocus specifically on: ${sanitizeForPrompt(focus, "focus")}` : "";
+      // Sanitize RSS-sourced fields before embedding in LLM prompt (prompt injection defence)
       const articleList = selected
-        .map((a, i) => `${i + 1}. [${a.source || "unknown"}] ${a.title}${a.description ? ` — ${a.description.slice(0, 200)}` : ""}`)
+        .map((a, i) => {
+          const title = sanitizeForPrompt(a.title, "title");
+          const source = sanitizeForPrompt(a.source || "unknown", "source");
+          const desc = a.description
+            ? ` — ${sanitizeForPrompt(a.description.slice(0, 200), "desc")}`
+            : "";
+          return `${i + 1}. [${source}] ${title}${desc}`;
+        })
         .join("\n");
 
       const prompt = `You are a news analyst. Write a concise briefing summarizing the key developments in the following ${selected.length} news items.${focusLine}
@@ -735,7 +758,12 @@ Structure your response as:
 Articles:
 ${articleList}`;
 
-      return callPeer("ask_claude", { prompt }, prompt, 60_000);
+      try {
+        return await callPeer("ask_claude", { prompt }, prompt, 60_000);
+      } catch (err) {
+        process.stderr.write(`[${NAME}] summarize_news: callPeer("ask_claude") failed (${selected.length} articles fetched): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+        return `Error: AI summarization failed — ${err instanceof Error ? err.message : String(err)}. The ${selected.length} articles were fetched successfully.`;
+      }
     }
 
     default:
