@@ -134,7 +134,7 @@ function topologicalSort(nodes: GraphNode[], edges: GraphEdge[]): string[] {
 
   for (const edge of edges) {
     inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
-    adjacency.get(edge.from)!.push(edge.to);
+    adjacency.get(edge.from)?.push(edge.to); // skip malformed edges
   }
 
   const queue = nodes
