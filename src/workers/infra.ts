@@ -123,7 +123,7 @@ const InfraSchemas = {
   fetch_cables: z.looseObject({
     /** Optional region filter — matches cable name or landing point names (e.g. "pacific", "atlantic") */
     region: z.string().optional(),
-    /** Only return cables with this status (e.g. "active", "planned", "decommissioned") */
+    /** Free-text search applied to cable notes and RFS year field (e.g. "2024", "ready") — TeleGeography has no explicit status field */
     status: z.string().optional(),
     /** Max cable systems to return (default 100) */
     limit: z.number().int().positive().optional().default(100),
@@ -797,7 +797,14 @@ async function fetchSubmarineCables(
   const url = "https://www.submarinecablemap.com/api/v3/cable/all.json";
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
   if (!res.ok) throw new Error(`TeleGeography HTTP ${res.status}: ${res.statusText}`);
-  let cables = await res.json() as TeleGeoCable[];
+  let parsed: unknown;
+  try {
+    parsed = await res.json();
+  } catch (err) {
+    throw new Error(`TeleGeography response is not valid JSON: ${(err as Error).message}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error("TeleGeography API returned unexpected non-array response");
+  let cables = parsed as TeleGeoCable[];
 
   // Optional filters
   if (region) {
