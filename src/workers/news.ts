@@ -16,9 +16,11 @@ import Fastify from "fastify";
 import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, buildA2AError, checkRequestSize } from "../worker-harness.js";
-import { safeStringify } from "../safe-json.js";
+import { safeStringify, safeParse } from "../safe-json.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { validateUrlNotInternal } from "../worker-utils.js";
+import { callPeer } from "../peer.js";
+import { sanitizeForPrompt } from "../prompt-sanitizer.js";
 
 const PORT = 8089;
 const NAME = "news-agent";
@@ -73,6 +75,23 @@ const NewsSchemas = {
   regulatory_scan: z.looseObject({
     categories: z.array(z.enum(["supply_chain", "sustainability", "data", "automotive", "trade"])).optional(),
     maxResults: z.number().int().positive().optional().default(50),
+  }),
+
+  summarize_news: z.looseObject({
+    /** RSS feed URLs to fetch and summarize (alternative to passing articles directly) */
+    urls: z.array(z.url()).optional(),
+    /** Pre-fetched articles to summarize (alternative to urls) */
+    articles: z.array(z.object({
+      title: z.string(),
+      description: z.string().optional().default(""),
+      source: z.string().optional().default(""),
+      link: z.string().optional().default(""),
+      pubDate: z.string().optional().default(""),
+    })).optional(),
+    /** Narrow the summary to a specific aspect (e.g. "supply chain risks", "AI policy") */
+    focus: z.string().optional(),
+    /** Max articles to include in summary (default 20) */
+    maxArticles: z.number().int().positive().optional().default(20),
   }),
 };
 
@@ -164,6 +183,7 @@ const AGENT_CARD = {
     { id: "cluster_news", name: "Cluster News", description: "Group similar articles into clusters using Jaccard text similarity" },
     { id: "detect_signals", name: "Detect Signals", description: "Detect anomalous patterns: topic velocity spikes, emerging stories, source concentration" },
     { id: "regulatory_scan", name: "Regulatory Scan", description: "Scan regulatory RSS feeds for changes in supply chain, ESG, automotive, data, and trade regulations. Returns classified alerts with impact levels." },
+    { id: "summarize_news", name: "Summarize News", description: "Fetch RSS feeds or accept pre-fetched articles, then produce an AI-generated news briefing. Optional focus parameter narrows the summary to a specific topic or domain." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -680,6 +700,70 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         alerts: alerts.slice(0, maxResults),
         categories: categories ?? Object.keys(REGULATORY_KEYWORDS),
       }, 2);
+    }
+
+    case "summarize_news": {
+      const { urls, articles: inputArticles, focus, maxArticles } = NewsSchemas.summarize_news.parse(args);
+
+      // Fetch from URLs if provided, otherwise use pre-supplied articles
+      let articles: Article[] = [];
+      if (urls && urls.length > 0) {
+        let raw: string;
+        try {
+          raw = await handleSkill("aggregate_feeds", { urls, limit: maxArticles * 2, dedup: true, sortBy: "date" }, "") as string;
+        } catch (err) {
+          process.stderr.write(`[${NAME}] summarize_news: aggregate_feeds failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+          return `Error: failed to fetch RSS feeds — ${err instanceof Error ? err.message : String(err)}`;
+        }
+        const parsed = safeParse<{ articles?: Article[]; errors?: string[] }>(raw, {});
+        if (parsed.errors && parsed.errors.length > 0) {
+          process.stderr.write(`[${NAME}] summarize_news: ${parsed.errors.length} feed(s) failed: ${parsed.errors.join("; ")}\n`);
+        }
+        articles = parsed.articles ?? [];
+        if (articles.length === 0) {
+          const detail = parsed.errors?.length
+            ? `feed errors: ${parsed.errors.slice(0, 3).join("; ")}`
+            : "no articles returned";
+          return `Error: could not retrieve articles — ${detail}`;
+        }
+      } else if (inputArticles && inputArticles.length > 0) {
+        articles = inputArticles as Article[];
+      } else {
+        return "Error: provide either 'urls' (array of feed URLs) or 'articles' (pre-fetched array)";
+      }
+
+      const selected = articles.slice(0, maxArticles);
+      if (selected.length === 0) return "No articles to summarize";
+
+      const focusLine = focus ? `\n\nFocus specifically on: ${sanitizeForPrompt(focus, "focus")}` : "";
+      // Sanitize RSS-sourced fields before embedding in LLM prompt (prompt injection defence)
+      const articleList = selected
+        .map((a, i) => {
+          const title = sanitizeForPrompt(a.title, "title");
+          const source = sanitizeForPrompt(a.source || "unknown", "source");
+          const desc = a.description
+            ? ` — ${sanitizeForPrompt(a.description.slice(0, 200), "desc")}`
+            : "";
+          return `${i + 1}. [${source}] ${title}${desc}`;
+        })
+        .join("\n");
+
+      const prompt = `You are a news analyst. Write a concise briefing summarizing the key developments in the following ${selected.length} news items.${focusLine}
+
+Structure your response as:
+1. **Top Stories** — 2-3 most significant items with a sentence each
+2. **Trends** — recurring themes across multiple articles
+3. **Watch List** — items that may develop into bigger stories
+
+Articles:
+${articleList}`;
+
+      try {
+        return await callPeer("ask_claude", { prompt }, prompt, 60_000);
+      } catch (err) {
+        process.stderr.write(`[${NAME}] summarize_news: callPeer("ask_claude") failed (${selected.length} articles fetched): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+        return `Error: AI summarization failed — ${err instanceof Error ? err.message : String(err)}. The ${selected.length} articles were fetched successfully.`;
+      }
     }
 
     default:
