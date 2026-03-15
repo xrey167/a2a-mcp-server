@@ -92,8 +92,9 @@ function readAuthFile(): Record<string, McpAuth> {
 function writeAuthFile(data: Record<string, McpAuth>) {
   try {
     writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2));
-  } catch (err) {
-    process.stderr.write(`[mcp-auth] failed to write ${AUTH_FILE}: ${err}\n`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    process.stderr.write(`[mcp-auth] failed to write ${AUTH_FILE}: ${msg}\n`);
   }
 }
 
@@ -166,8 +167,9 @@ export async function getAuthHeaders(serverName: string): Promise<Record<string,
     if (now >= auth.expiresAt) {
       try {
         auth = await refreshOAuth2(serverName, auth);
-      } catch (err) {
-        process.stderr.write(`[mcp-auth] token refresh failed for ${serverName}: ${err}\n`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+        process.stderr.write(`[mcp-auth] token refresh failed for ${serverName}: ${msg}\n`);
       }
     }
     return { Authorization: `Bearer ${auth.accessToken}` };
