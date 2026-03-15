@@ -83,9 +83,18 @@ function rowToWorkspace(row: Record<string, unknown>): Workspace {
     description: (row.description as string | null) ?? undefined,
     createdAt: row.created_at as number,
     members: parseMembers(row.members),
-    env: row.env ? (JSON.parse(row.env as string) as Record<string, string>) : undefined,
-    allowedSkills: row.allowed_skills ? (JSON.parse(row.allowed_skills as string) as string[]) : undefined,
-    knowledgeTags: row.knowledge_tags ? (JSON.parse(row.knowledge_tags as string) as string[]) : undefined,
+    env: (() => {
+      if (!row.env) return undefined;
+      try { return JSON.parse(row.env as string) as Record<string, string>; } catch { return {}; }
+    })(),
+    allowedSkills: (() => {
+      if (!row.allowed_skills) return undefined;
+      try { return JSON.parse(row.allowed_skills as string) as string[]; } catch { return []; }
+    })(),
+    knowledgeTags: (() => {
+      if (!row.knowledge_tags) return undefined;
+      try { return JSON.parse(row.knowledge_tags as string) as string[]; } catch { return []; }
+    })(),
   };
 }
 

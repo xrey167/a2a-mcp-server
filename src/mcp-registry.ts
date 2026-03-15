@@ -93,8 +93,12 @@ function loadConfig(): Map<string, McpServerConfig> {
       if (added > 0) {
         process.stderr.write(`[mcp-registry] discovered ${added} server(s) from ${source.ide} (${source.path})\n`);
       }
-    } catch {
-      // Config file unreadable or malformed — skip silently
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code;
+      if (code !== "ENOENT") {
+        const msg = e instanceof Error ? e.message : String(e);
+        process.stderr.write(`[mcp-registry] failed to load config: ${msg}\n`);
+      }
     }
   }
 
