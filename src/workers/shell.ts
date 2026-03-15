@@ -125,8 +125,15 @@ app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
   const child = spawn(cmd, { shell: true });
 
   // Kill child after timeout to prevent unbounded processes
+  let sigkillTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {
     child.kill("SIGTERM");
+    sigkillTimer = setTimeout(() => {
+      try {
+        process.stderr.write('[shell] process did not exit after SIGTERM, sending SIGKILL\n');
+        child.kill("SIGKILL");
+      } catch {}
+    }, 5_000);
     reply.raw.write(`data: ${JSON.stringify({ type: "error", text: `Stream timeout after ${STREAM_TIMEOUT_MS}ms` })}\n\n`);
   }, STREAM_TIMEOUT_MS);
 
@@ -141,6 +148,7 @@ app.post<{ Body: Record<string, any> }>("/stream", async (request, reply) => {
   return new Promise<void>((resolve) => {
     child.on("close", (exitCode) => {
       clearTimeout(timer);
+      clearTimeout(sigkillTimer);
       reply.raw.write(`data: ${JSON.stringify({ type: "done", exitCode: exitCode ?? 0 })}\n\n`);
       reply.raw.end();
       resolve();

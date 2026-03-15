@@ -29,6 +29,7 @@ const PORT = 8092;
 const NAME = "monitor-agent";
 const FETCH_TIMEOUT = 20_000;
 const UA = "A2A-Monitor-Agent/1.0";
+const MAX_OPENSKY_STATES = 10_000;
 
 // ── Zod Schemas ──────────────────────────────────────────────────
 
@@ -698,12 +699,14 @@ function normalizeEntity(s: string): string {
 function fuzzyContains(haystack: string, needle: string): boolean {
   const h = normalizeEntity(haystack);
   const n = normalizeEntity(needle);
+  if (!n) return false; // empty needle would trivially match everything via includes("")
   if (h.includes(n) || n.includes(h)) return true;
   // Simple token overlap check
   const hTokens = new Set(h.split(" "));
-  const nTokens = n.split(" ");
+  const nTokens = n.split(" ").filter(t => t.length > 0);
+  if (nTokens.length === 0) return false;
   const overlap = nTokens.filter(t => hTokens.has(t)).length;
-  return nTokens.length > 0 && overlap >= Math.ceil(nTokens.length * 0.7);
+  return overlap >= Math.ceil(nTokens.length * 0.7);
 }
 
 interface WatchlistHit {
@@ -899,7 +902,7 @@ async function fetchOpenSkyFlights(
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers });
   if (!res.ok) throw new Error(`OpenSky HTTP ${res.status}: ${res.statusText}`);
   const data = await res.json() as any;
-  const states: any[] = data?.states ?? [];
+  const states: any[] = (data?.states ?? []).slice(0, MAX_OPENSKY_STATES);
 
   const flights: FlightState[] = [];
   for (const s of states) {

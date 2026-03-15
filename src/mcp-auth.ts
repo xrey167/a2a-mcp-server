@@ -24,11 +24,26 @@
  *   }
  */
 
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, statSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
 const AUTH_FILE = join(homedir(), ".a2a-mcp-auth.json");
+
+// ── Error memoization ────────────────────────────────────────────
+// Cache the last parse failure signature to avoid repeated stderr spam
+// when readAuthFile() is called per-request with a persistently corrupted file.
+let lastParseErrorSignature: string | null = null;
+
+function getFileSignature(): string | null {
+  if (!existsSync(AUTH_FILE)) return null;
+  try {
+    const stat = statSync(AUTH_FILE);
+    return `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -60,7 +75,16 @@ function readAuthFile(): Record<string, McpAuth> {
   if (!existsSync(AUTH_FILE)) return {};
   try {
     return JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
-  } catch {
+  } catch (e: unknown) {
+    // Only log the error if the file signature has changed since the last parse failure.
+    // This prevents stderr spam when readAuthFile() is called per-request with a
+    // persistently corrupted file (e.g., via getAuthHeaders() on every MCP call).
+    const sig = getFileSignature();
+    if (sig !== lastParseErrorSignature) {
+      lastParseErrorSignature = sig;
+      const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+      process.stderr.write(`[mcp-auth] failed to read ${AUTH_FILE}, returning empty auth: ${msg}\n`);
+    }
     return {};
   }
 }
@@ -68,8 +92,9 @@ function readAuthFile(): Record<string, McpAuth> {
 function writeAuthFile(data: Record<string, McpAuth>) {
   try {
     writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2));
-  } catch (err) {
-    process.stderr.write(`[mcp-auth] failed to write ${AUTH_FILE}: ${err}\n`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    process.stderr.write(`[mcp-auth] failed to write ${AUTH_FILE}: ${msg}\n`);
   }
 }
 
@@ -142,8 +167,9 @@ export async function getAuthHeaders(serverName: string): Promise<Record<string,
     if (now >= auth.expiresAt) {
       try {
         auth = await refreshOAuth2(serverName, auth);
-      } catch (err) {
-        process.stderr.write(`[mcp-auth] token refresh failed for ${serverName}: ${err}\n`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+        process.stderr.write(`[mcp-auth] token refresh failed for ${serverName}: ${msg}\n`);
       }
     }
     return { Authorization: `Bearer ${auth.accessToken}` };

@@ -51,6 +51,8 @@ export interface Subscription {
   name?: string;
   /** Created timestamp */
   createdAt: number;
+  /** Number of events delivered to this subscriber */
+  matchCount: number;
 }
 
 export interface DeadLetter {
@@ -167,6 +169,7 @@ export async function publish(
     if (!topicMatches(sub.pattern, topic)) continue;
     if (sub.filter && !matchesFilter(event, sub.filter)) continue;
 
+    sub.matchCount++;
     deliveryPromises.push(
       (async () => {
         try {
@@ -204,6 +207,7 @@ export function subscribe(
     filter: opts?.filter,
     name: opts?.name,
     createdAt: Date.now(),
+    matchCount: 0,
   };
   subscriptions.set(sub.id, sub);
   process.stderr.write(`[event-bus] subscription created: ${sub.id} (${pattern})${opts?.name ? ` [${opts.name}]` : ""}\n`);
@@ -334,7 +338,8 @@ export function resetEventBus(): void {
 // ── Internal ─────────────────────────────────────────────────────
 
 function pruneHistory(): void {
-  const cutoff = Date.now() - HISTORY_TTL_MS;
+  const now = Date.now();
+  const cutoff = now - HISTORY_TTL_MS;
   // Find first index to keep (avoids O(n²) from repeated shift())
   let removeCount = 0;
   for (let i = 0; i < eventHistory.length; i++) {
@@ -348,4 +353,13 @@ function pruneHistory(): void {
   const overCapacity = eventHistory.length - removeCount - MAX_HISTORY;
   if (overCapacity > 0) removeCount += overCapacity;
   if (removeCount > 0) eventHistory.splice(0, removeCount);
+
+  // Prune stale subscriptions: created >24h ago and never matched any event
+  const STALE_SUB_TTL_MS = 24 * 60 * 60 * 1000;
+  for (const [id, sub] of subscriptions) {
+    if (sub.matchCount === 0 && now - sub.createdAt > STALE_SUB_TTL_MS) {
+      subscriptions.delete(id);
+      process.stderr.write(`[event-bus] pruned stale subscription: ${id} (${sub.pattern})${sub.name ? ` [${sub.name}]` : ""}\n`);
+    }
+  }
 }
