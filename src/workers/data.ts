@@ -670,10 +670,23 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
       type DataRow = Record<string, unknown>;
 
-      // Detect left-side field names to know which right fields collide
-      const leftFields = new Set<string>(rawLeft.length > 0 && rawLeft[0] !== null && typeof rawLeft[0] === "object" && !Array.isArray(rawLeft[0])
-        ? Object.keys(rawLeft[0] as DataRow)
-        : []);
+      // Detect left-side field names (union across ALL rows, not just first)
+      const leftFields = new Set<string>();
+      for (const row of rawLeft) {
+        if (row !== null && typeof row === "object" && !Array.isArray(row)) {
+          for (const f of Object.keys(row as DataRow)) leftFields.add(f);
+        }
+      }
+
+      // Build left index for O(1) right-join lookups
+      const leftIndex = new Map<unknown, DataRow[]>();
+      for (const row of rawLeft) {
+        if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+        const l = row as DataRow;
+        const k = l[key];
+        if (!leftIndex.has(k)) leftIndex.set(k, []);
+        (leftIndex.get(k) as DataRow[]).push(l);
+      }
 
       // Build index: key value → list of right rows (handles duplicate keys)
       const rightIndex = new Map<unknown, DataRow[]>();
@@ -696,7 +709,13 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         return merged;
       }
 
+      const MAX_RESULT = 100_000;
       const result: DataRow[] = [];
+
+      function pushRow(row: DataRow): void {
+        if (result.length >= MAX_RESULT) throw new Error(`merge_datasets: result set exceeded ${MAX_RESULT} rows — reduce input size or use a more selective join`);
+        result.push(row);
+      }
 
       if (joinType === "inner" || joinType === "left") {
         for (const row of rawLeft) {
@@ -704,9 +723,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           const left = row as DataRow;
           const matches = rightIndex.get(left[key]);
           if (matches && matches.length > 0) {
-            for (const right of matches) result.push(mergeRow(left, right));
+            for (const right of matches) pushRow(mergeRow(left, right));
           } else if (joinType === "left") {
-            result.push(mergeRow(left, null));
+            pushRow(mergeRow(left, null));
           }
         }
       }
@@ -722,11 +741,11 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
             const matches = rightIndex.get(left[key]);
             if (matches && matches.length > 0) {
               for (const right of matches) {
-                result.push(mergeRow(left, right));
+                pushRow(mergeRow(left, right));
                 matchedRightKeys.add(left[key]);
               }
             } else {
-              result.push(mergeRow(left, null));
+              pushRow(mergeRow(left, null));
             }
           }
         }
@@ -737,23 +756,20 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           const k = right[key];
           if (joinType === "right" || !matchedRightKeys.has(k)) {
             if (joinType === "right") {
-              const matches2 = rawLeft.filter(l =>
-                l !== null && typeof l === "object" && !Array.isArray(l) &&
-                (l as DataRow)[key] === k
-              ) as DataRow[];
-              if (matches2.length > 0) {
-                for (const left of matches2) result.push(mergeRow(left, right));
+              const matches2 = leftIndex.get(k);
+              if (matches2 && matches2.length > 0) {
+                for (const left of matches2) pushRow(mergeRow(left, right));
               } else {
                 // Unmatched right row — emit with empty left fields
                 const emptyLeft: DataRow = {};
                 for (const f of leftFields) emptyLeft[f] = null;
-                result.push(mergeRow(emptyLeft, right));
+                pushRow(mergeRow(emptyLeft, right));
               }
             } else {
               // outer: unmatched right — emit with empty left
               const emptyLeft: DataRow = {};
               for (const f of leftFields) emptyLeft[f] = null;
-              result.push(mergeRow(emptyLeft, right));
+              pushRow(mergeRow(emptyLeft, right));
             }
           }
         }
