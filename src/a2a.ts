@@ -41,6 +41,7 @@ export async function sendTask(agentUrl: string, params: {
 
   const json = await res.json() as TaskResponse;
   if (json.error) throw new Error(json.error.message ?? JSON.stringify(json.error));
+  if (json.result === undefined) throw new Error("Invalid A2A response: missing both 'result' and 'error' fields.");
   const part = json.result?.artifacts?.[0]?.parts?.[0];
   if (part && part.kind === "text") return part.text;
   return JSON.stringify(json.result);

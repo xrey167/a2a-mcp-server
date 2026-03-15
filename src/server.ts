@@ -6669,7 +6669,8 @@ async function startHttpServer() {
     }
   });
 
-  app.post<{ Body: { product: string; stage: string; customerName: string; onboardingId?: string; valueEur?: number; notes?: string; occurredAt?: string } }>("/v1/commercial/events", async (request: FastifyRequest<{ Body: { product: string; stage: string; customerName: string; onboardingId?: string; valueEur?: number; notes?: string; occurredAt?: string } }>, reply: FastifyReply) => {
+  type CommercialEventsRoute = { Body: { product: string; stage: string; customerName: string; onboardingId?: string; valueEur?: number; notes?: string; occurredAt?: string } };
+  app.post<CommercialEventsRoute>("/v1/commercial/events", async (request: FastifyRequest<CommercialEventsRoute>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6690,7 +6691,8 @@ async function startHttpServer() {
     }
   });
 
-  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/commercial/kpis", async (request: FastifyRequest<{ Querystring: { product?: string; since?: string } }>, reply: FastifyReply) => {
+  type CommercialKpisRoute = { Querystring: { product?: string; since?: string } };
+  app.get<CommercialKpisRoute>("/v1/commercial/kpis", async (request: FastifyRequest<CommercialKpisRoute>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6706,7 +6708,8 @@ async function startHttpServer() {
     }
   });
 
-  app.get<{ Querystring: { product?: string; since?: string } }>("/v1/workflows/sla/status", async (request: FastifyRequest<{ Querystring: { product?: string; since?: string } }>, reply: FastifyReply) => {
+  type WorkflowSlaStatusRoute = { Querystring: { product?: string; since?: string } };
+  app.get<WorkflowSlaStatusRoute>("/v1/workflows/sla/status", async (request: FastifyRequest<WorkflowSlaStatusRoute>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6722,7 +6725,8 @@ async function startHttpServer() {
     }
   });
 
-  app.post<{ Body: { product?: string; since?: string; minIntervalMinutes?: number } }>("/v1/workflows/sla/escalate", async (request: FastifyRequest<{ Body: { product?: string; since?: string; minIntervalMinutes?: number } }>, reply: FastifyReply) => {
+  type WorkflowSlaEscalateRoute = { Body: { product?: string; since?: string; minIntervalMinutes?: number } };
+  app.post<WorkflowSlaEscalateRoute>("/v1/workflows/sla/escalate", async (request: FastifyRequest<WorkflowSlaEscalateRoute>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6739,7 +6743,8 @@ async function startHttpServer() {
     }
   });
 
-  app.get<{ Querystring: { product?: string; status?: string; limit?: string } }>("/v1/workflows/sla/incidents", async (request: FastifyRequest<{ Querystring: { product?: string; status?: string; limit?: string } }>, reply: FastifyReply) => {
+  type WorkflowSlaIncidentsRoute = { Querystring: { product?: string; status?: string; limit?: string } };
+  app.get<WorkflowSlaIncidentsRoute>("/v1/workflows/sla/incidents", async (request: FastifyRequest<WorkflowSlaIncidentsRoute>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
@@ -6758,7 +6763,8 @@ async function startHttpServer() {
     }
   });
 
-  app.patch<{ Params: { id: string }; Body: { status: string } }>("/v1/workflows/sla/incidents/:id", async (request: FastifyRequest<{ Params: { id: string }; Body: { status: string } }>, reply: FastifyReply) => {
+  type WorkflowSlaIncidentUpdateRoute = { Params: { id: string }; Body: { status: string } };
+  app.patch<WorkflowSlaIncidentUpdateRoute>("/v1/workflows/sla/incidents/:id", async (request: FastifyRequest<WorkflowSlaIncidentUpdateRoute>, reply: FastifyReply) => {
     if (!checkAuth(request as any)) {
       reply.code(401);
       return { error: "Unauthorized" };
