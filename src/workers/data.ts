@@ -244,6 +244,7 @@ function applyOperations(data: unknown, operations: Array<{
         break;
       }
       case "unique": {
+        if (current.length > 50_000) throw new Error("unique: input exceeds 50,000 rows");
         if (op.field) {
           const seen = new Set<string>();
           current = current.filter(row => {

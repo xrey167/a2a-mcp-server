@@ -40,7 +40,7 @@ import { compose, getPipeline, listPipelines as listComposerPipelines, removePip
 import { collaborate, type CollaborationRequest } from "./agent-collaboration.js";
 import { startTrace, getTrace, listTraces, getWaterfall, searchTraces, getTracingStats } from "./tracing.js";
 import { getFromCache, putInCache, invalidateSkill, invalidateAll, getCacheStats, configureCacheSkill } from "./skill-cache.js";
-import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive } from "./capability-negotiation.js";
+import { registerCapability, negotiate, listCapabilities, getCapabilityStats, updateAgentHealth, incrementActive, decrementActive, pruneCapabilities } from "./capability-negotiation.js";
 import { auditLog, auditQuery, auditStats, closeAuditDb } from "./audit.js";
 import { validateApiKey, lookupApiKey, isSkillAllowed, createApiKey, revokeApiKey, listApiKeys, getRolePermissions, flushPendingLastUsed, type ApiKeyEntry } from "./auth.js";
 import { createWorkspace, getWorkspace, listWorkspaces, addMember, removeMember, updateWorkspace, isMember } from "./workspace.js";
@@ -278,8 +278,8 @@ const workerProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
 const workerFailures = new Map<string, number>();
 const respawning = new Set<string>();
 const respawnTimers = new Map<string, ReturnType<typeof setTimeout>>();
-let healthPollInterval: ReturnType<typeof setInterval>;
-let teePruneInterval: ReturnType<typeof setInterval>;
+let healthPollInterval: ReturnType<typeof setInterval> | undefined;
+let teePruneInterval: ReturnType<typeof setInterval> | undefined;
 let workerCards: AgentCard[] = [];
 
 interface WorkerHealth { healthy: boolean; failCount: number; lastCheck: number; uptime?: number; }
@@ -8746,6 +8746,8 @@ async function main() {
     }
   }
 
+  pruneCapabilities();
+
   // Clean up old sandbox vars and populate adapter list
   sandboxStore.prune(7);
   const adapterList: Array<{ id: string; description: string }> = [];
@@ -8836,8 +8838,8 @@ async function main() {
 // and from the fatal-error handler below. SIGINT/SIGTERM are handled by
 // installShutdownHandlers() (cloud.ts) which runs the onShutdown callbacks above.
 function shutdownWorkers() {
-  clearInterval(healthPollInterval);
-  clearInterval(teePruneInterval);
+  if (healthPollInterval !== undefined) clearInterval(healthPollInterval);
+  if (teePruneInterval !== undefined) clearInterval(teePruneInterval);
   for (const timer of respawnTimers.values()) clearTimeout(timer);
   for (const proc of workerProcs.values()) proc.kill();
 }

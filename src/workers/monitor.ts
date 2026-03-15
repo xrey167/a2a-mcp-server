@@ -702,6 +702,7 @@ function fuzzyContains(haystack: string, needle: string): boolean {
   // Simple token overlap check
   const hTokens = new Set(h.split(" "));
   const nTokens = n.split(" ");
+  if (!n || nTokens.length === 0 || nTokens[0] === "") return false;
   const overlap = nTokens.filter(t => hTokens.has(t)).length;
   return nTokens.length > 0 && overlap >= Math.ceil(nTokens.length * 0.7);
 }
@@ -899,7 +900,7 @@ async function fetchOpenSkyFlights(
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers });
   if (!res.ok) throw new Error(`OpenSky HTTP ${res.status}: ${res.statusText}`);
   const data = await res.json() as any;
-  const states: any[] = data?.states ?? [];
+  const states: any[] = (data?.states ?? []).slice(0, 10_000);
 
   const flights: FlightState[] = [];
   for (const s of states) {
