@@ -845,6 +845,10 @@ async function handleSkill(
 
     case "estimate_effort": {
       const { idea, pipeline, teamSize } = FactorySchemas.estimate_effort.parse({ idea: args.idea ?? text, ...args });
+      // Validate pipeline against known types (matches pattern used by normalize_intent, create_project)
+      if (!getPipeline(pipeline)) {
+        throw new Error(`Unknown pipeline: ${pipeline}. Available: ${Array.from(PIPELINES.keys()).join(", ")}`);
+      }
       const safeIdea = sanitizeUserInput(idea, "project_idea");
       const safePipeline = sanitizeUserInput(pipeline, "pipeline_type");
 
@@ -869,19 +873,43 @@ Team size: ${teamSize}
 Project idea: ${safeIdea}`;
 
       const raw = await askClaude(userPrompt, systemPrompt);
+
+      // Guard: empty response or A2A task envelope (no model content in artifacts)
+      if (!raw || !raw.trim()) {
+        log(`estimate_effort: askClaude returned empty response for idea="${idea.slice(0, 80)}"`);
+        throw new Error("estimate_effort: AI returned an empty response — retry or check model availability");
+      }
+      const trimmedRaw = raw.trimStart();
+      if (trimmedRaw.startsWith('{"jsonrpc"') || trimmedRaw.startsWith('{"id"')) {
+        log(`estimate_effort: askClaude returned an A2A task envelope instead of model content`);
+        throw new Error("estimate_effort: AI worker returned a malformed response — no model content in artifacts");
+      }
+
       // Strip any accidental markdown fences the model may have added
-      const cleaned = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+      const cleaned = stripJsonFences(raw);
 
       let parsed: unknown;
       try {
         parsed = JSON.parse(cleaned);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log(`estimate_effort: JSON.parse failed (${msg}) — returning raw response`);
-        throw new Error(`estimate_effort: AI returned malformed JSON (${msg})`);
+        const preview = cleaned.slice(0, 300).replace(/\n/g, " ");
+        log(`estimate_effort: JSON.parse failed (${msg}) — raw model output: "${preview}"`);
+        throw new Error(`estimate_effort: AI returned malformed JSON — ${msg}`);
       }
 
-      return safeStringify({ idea, pipeline, teamSize, estimate: parsed }, 2);
+      // Validate that the parsed result looks like an effort estimate
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        typeof (parsed as Record<string, unknown>).totalHours !== "number"
+      ) {
+        const preview = cleaned.slice(0, 200);
+        log(`estimate_effort: AI returned structurally invalid estimate — missing totalHours. Preview: "${preview}"`);
+        throw new Error("estimate_effort: AI returned a structurally invalid effort estimate — missing required fields");
+      }
+
+      return safeStringify({ idea: safeIdea, pipeline: safePipeline, teamSize, estimate: parsed }, 2);
     }
 
     case "list_pipelines":

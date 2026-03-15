@@ -125,11 +125,17 @@ Generate comprehensive ${sanitizedFramework} unit tests for the code above. Requ
 - Include any necessary imports and setup
 - Output ONLY the test code — no explanation, no markdown fences`;
 
-  return sendTask(AI_WORKER_URL, {
+  const result = await sendTask(AI_WORKER_URL, {
     skillId: "ask_claude",
     args: { prompt },
     message: { role: "user" as const, parts: [{ kind: "text" as const, text: prompt }] },
   }, { timeoutMs: CODEX_TIMEOUT });
+
+  if (!result || !result.trim()) {
+    process.stderr.write(`[${NAME}] generate_tests: AI worker returned empty response\n`);
+    throw new Error("generate_tests: AI returned an empty response — retry or check model availability");
+  }
+  return result;
 }
 
 function handleSkill(skillId: string, args: Record<string, unknown>, text: string): string | Promise<string> {
