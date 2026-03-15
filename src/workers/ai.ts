@@ -36,7 +36,7 @@ const AiSchemas = {
     /** Description of what to extract, e.g. "name, email, phone" or a JSON Schema */
     schema: z.string().min(1).max(2_000),
     /** Optional few-shot example of the expected output (valid JSON) */
-    example: z.string().optional(),
+    example: z.string().max(5_000).optional(),
   }),
 };
 import { readFileSync, existsSync } from "node:fs";
@@ -214,9 +214,10 @@ ${safeText}`;
         return `Error: text input is ${rawText.length} characters — exceeds 50,000 character limit for extraction`;
       }
 
-      const safeText = sanitizeUserInput(rawText, "text_to_parse");
+      const safeText = sanitizeUserInput(rawText, "text_to_parse", 50_000);
       const safeSchema = sanitizeUserInput(rawSchema, "extraction_schema");
-      const exampleLine = example ? `\n\nExpected output shape (example):\n${example}` : "";
+      const safeExample = example ? sanitizeUserInput(example, "example_output") : null;
+      const exampleLine = safeExample ? `\n\nExpected output shape (example):\n${safeExample}` : "";
 
       const prompt = `You are a data extraction assistant. Extract the requested fields from the text below and return ONLY valid JSON — no explanation, no markdown fences, no preamble.
 
@@ -228,20 +229,29 @@ ${exampleLine}
 
 ${safeText}`;
 
-      const raw = await handleSkill("ask_claude", { prompt }, prompt);
+      let raw: Awaited<ReturnType<typeof handleSkill>>;
+      try {
+        raw = await handleSkill("ask_claude", { prompt }, prompt);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] extract_json: ask_claude failed: ${errMsg}\n`);
+        throw err;
+      }
       if (!raw || (typeof raw === "string" && !raw.trim())) {
         return "Error: extract_json returned an empty response — retry or check model availability";
       }
       const rawStr = typeof raw === "string" ? raw : JSON.stringify(raw);
 
-      // Strip markdown code fences if Claude wrapped the JSON despite instructions
-      const stripped = rawStr.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+      // Strip markdown code fences if Claude wrapped the JSON despite instructions.
+      // Uses a greedy inner match to handle preamble text before the opening fence.
+      const fenceMatch = rawStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/i);
+      const stripped = (fenceMatch?.[1] ?? rawStr).trim();
 
       // Validate that the output is actually parseable JSON
       try {
         JSON.parse(stripped);
-      } catch {
-        process.stderr.write(`[${NAME}] extract_json: Claude returned non-JSON output (${stripped.slice(0, 80)}...)\n`);
+      } catch (parseErr) {
+        process.stderr.write(`[${NAME}] extract_json: Claude returned non-JSON output. parse error="${parseErr instanceof Error ? parseErr.message : String(parseErr)}" raw(0..80)="${rawStr.slice(0, 80)}"\n`);
         return `Error: extract_json: model did not return valid JSON — try simplifying the schema or adding an example`;
       }
 
