@@ -3,9 +3,18 @@ import Anthropic from "@anthropic-ai/sdk";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
 import { z } from "zod";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { handleMemorySkill } from "../worker-memory.js";
 import { buildA2AResponse, checkRequestSize } from "../worker-harness.js";
 import { safeStringify } from "../safe-json.js";
+import { runClaudeCLI } from "../claude-cli.js";
+import { getPersona, watchPersonas } from "../persona-loader.js";
+import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
+import { sanitizePath } from "../path-utils.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = dirname(__dirname);
 
 const AiSchemas = {
   ask_claude: z.looseObject({ prompt: z.string().min(1), model: z.string().optional(), max_tokens: z.number().int().positive().optional() }),
@@ -22,15 +31,6 @@ const AiSchemas = {
   }),
 };
 import { readFileSync, existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { runClaudeCLI } from "../claude-cli.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = dirname(__dirname); // src/ → project root
-import { getPersona, watchPersonas } from "../persona-loader.js";
-import { initPlugins, watchPlugins, pluginSkills } from "../skill-loader.js";
-import { sanitizePath } from "../path-utils.js";
 import { sanitizeUserInput, sanitizeForPrompt } from "../prompt-sanitizer.js";
 
 const PORT = 8083;
