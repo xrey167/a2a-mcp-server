@@ -320,7 +320,7 @@ async function waitForWorker(w: typeof WORKERS[number], maxWaitMs = 10_000): Pro
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     try {
-      const res = await fetch(`http://localhost:${w.port}/healthz`);
+      const res = await fetch(`http://localhost:${w.port}/healthz`, { signal: AbortSignal.timeout(5_000) });
       if (res.ok) {
         workerHealth.set(w.name, { healthy: true, failCount: 0, lastCheck: Date.now() });
         return true;
@@ -2676,6 +2676,7 @@ function isSearchThrottled(sessionId: string): { allowed: boolean; remaining: nu
 
   // Prune timestamps outside the window
   state.timestamps = state.timestamps.filter(t => now - t < SEARCH_WINDOW_MS);
+  if (state.timestamps.length === 0 && state.blocked === 0) { searchThrottle.delete(sessionId); }
 
   const total = state.timestamps.length;
   const max = total >= SEARCH_MAX_NORMAL ? SEARCH_MAX_BURST : SEARCH_MAX_NORMAL;
@@ -4709,6 +4710,7 @@ async function exchangeWizardMailboxOAuthCode(input: {
       "Accept": "application/json",
     },
     body: form.toString(),
+    signal: AbortSignal.timeout(10_000),
   });
   const data = await res.json().catch(() => ({})) as Record<string, unknown>;
   if (!res.ok) {
@@ -5791,6 +5793,7 @@ async function startHttpServer() {
     const now = Date.now();
     const entry = webhookRateLimiter.get(ip);
     if (!entry || now - entry.windowStart > WEBHOOK_RATE_WINDOW_MS) {
+      webhookRateLimiter.delete(ip);
       webhookRateLimiter.set(ip, { count: 1, windowStart: now });
     } else {
       entry.count++;
