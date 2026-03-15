@@ -415,7 +415,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
       const { sessionId, prompt } = p;
 
       const session = sessions.get(sessionId);
-      if (!session) throw { code: -32602, message: `Unknown session: ${sessionId}` };
+      if (!session) throw Object.assign(new Error(`Unknown session: ${sessionId}`), { code: -32602 });
 
       // Extract text from content blocks
       const userText = prompt
@@ -455,6 +455,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
       // Update session history
       session.history.push({ role: "user", text: userText, ts: Date.now() });
       session.history.push({ role: "assistant", text: resultText, ts: Date.now() });
+      if (session.history.length > 200) session.history.splice(0, session.history.length - 200);
 
       // Persist to memory (same format as server.ts)
       memory.set("sessions", sessionId, JSON.stringify(session.history.slice(-40)));
@@ -479,7 +480,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<unknown> {
     }
 
     default:
-      throw { code: -32601, message: `Method not found: ${method}` };
+      throw Object.assign(new Error(`Method not found: ${method}`), { code: -32601 });
   }
 }
 
@@ -528,8 +529,18 @@ async function main() {
     }
   });
 
+  // Prune sessions older than 30 days every hour
+  const sessionPruneInterval = setInterval(() => {
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    for (const [id, session] of sessions) {
+      const lastTs = session.history.at(-1)?.ts ?? 0;
+      if (lastTs < cutoff) sessions.delete(id);
+    }
+  }, 60 * 60 * 1000);
+
   // Graceful shutdown
   const cleanup = () => {
+    clearInterval(sessionPruneInterval);
     log("shutting down...");
     closeTransport();
     shutdownWorkers();

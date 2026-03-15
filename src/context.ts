@@ -79,13 +79,13 @@ export function setProjectContext(update: Partial<ProjectContext>): ProjectConte
   // Write cache
   try {
     writeFileSync(CACHE_FILE, JSON.stringify(updated, null, 2));
-  } catch {}
+  } catch (e) { process.stderr.write(`[context] cache write failed: ${e}\n`); }
 
   // Write Obsidian note
   try {
     mkdirSync(dirname(OBSIDIAN_FILE), { recursive: true });
     writeFileSync(OBSIDIAN_FILE, toMarkdown(updated));
-  } catch {}
+  } catch (e) { process.stderr.write(`[context] Obsidian write failed: ${e}\n`); }
 
   return updated;
 }

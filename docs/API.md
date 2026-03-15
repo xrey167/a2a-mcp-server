@@ -1255,7 +1255,7 @@ Main task dispatch endpoint (tasks/send, JSON-RPC format).
   "params": {
     "skillId": "run_shell",
     "args": {
-      "cmd": "ls -la"
+      "command": "ls -la"
     },
     "message": "List directory"
   },
@@ -1285,12 +1285,13 @@ Retrieve orchestrator agent card (A2A AgentCard format).
 **Response:**
 ```json
 {
-  "name": "a2a-orchestrator",
-  "version": "1.0.0",
+  "name": "Local A2A Orchestrator",
+  "version": "3.0.0",
   "description": "Multi-protocol automation orchestrator",
   "skills": [
     {
       "id": "delegate",
+      "name": "Delegate",
       "description": "Route skill to worker",
       "inputs": {
         "type": "object",
@@ -1313,8 +1314,8 @@ Retrieve orchestrator agent card (A2A AgentCard format).
 Liveness probe (always returns 200 if server is up).
 
 **Response:**
-```
-OK
+```json
+{ "status": "alive", "timestamp": "2024-01-01T00:00:00.000Z" }
 ```
 
 ---
@@ -1322,13 +1323,14 @@ OK
 #### `GET /readyz`
 Readiness probe (503 if workers not fully healthy).
 
-**Response:**
+**Response (200 OK):**
 ```json
-{
-  "ready": true,
-  "workersHealthy": 14,
-  "workersTotal": 14
-}
+{ "status": "ready", "timestamp": "2024-01-01T00:00:00.000Z" }
+```
+
+**Response (503 Service Unavailable):**
+```json
+{ "status": "not_ready", "timestamp": "2024-01-01T00:00:00.000Z" }
 ```
 
 ---
@@ -1375,7 +1377,7 @@ Incoming webhook handler (HMAC-SHA256 verified).
 
 **Request Headers:**
 ```
-X-Webhook-Signature: sha256=<HMAC-SHA256 hex>
+X-Hub-Signature-256: sha256=<HMAC-SHA256 hex>
 Content-Type: application/json
 ```
 
@@ -1391,7 +1393,7 @@ Content-Type: application/json
 **Verification:**
 ```
 signature = hex(HMAC-SHA256(secret, body))
-X-Webhook-Signature == "sha256=" + signature
+X-Hub-Signature-256 == "sha256=" + signature
 ```
 
 **Response:**
@@ -1406,20 +1408,51 @@ X-Webhook-Signature == "sha256=" + signature
 ---
 
 #### `GET /metrics`
-Prometheus-style metrics export.
+JSON metrics snapshot. No authentication required.
 
-**Response (text/plain):**
+**Response (application/json):**
+```json
+{
+  "timestamp": "2024-01-01T00:00:00.000Z",
+  "uptime": 3600,
+  "system": {
+    "totalCalls": 142,
+    "totalErrors": 3,
+    "errorRate": "2.1%",
+    "avgLatencyMs": 287
+  },
+  "skills": [
+    {
+      "skillId": "run_shell",
+      "worker": "shell-agent",
+      "calls": 89,
+      "errors": 1,
+      "errorRate": "1.1%",
+      "latency": { "p50": 124, "p95": 891, "p99": 2103, "max": 4200 },
+      "lastCalled": "2024-01-01T00:59:12.000Z"
+    }
+  ],
+  "workers": [
+    {
+      "name": "shell-agent",
+      "url": "http://localhost:8081",
+      "totalCalls": 89,
+      "totalErrors": 1,
+      "errorRate": "1.1%",
+      "avgLatencyMs": 312
+    }
+  ],
+  "tokenSavings": {
+    "totalInputTokens": 45000,
+    "totalOutputTokens": 12000,
+    "totalSavedTokens": 8000,
+    "savingsRate": "15.4%",
+    "topSkills": [{ "skillId": "ask_claude", "saved": 4200, "count": 18 }]
+  }
+}
 ```
-# HELP a2a_skill_calls_total Total skill invocations
-# TYPE a2a_skill_calls_total counter
-a2a_skill_calls_total{skill="run_shell"} 152
-a2a_skill_calls_total{skill="read_file"} 487
 
-# HELP a2a_skill_duration_ms Skill execution duration
-# TYPE a2a_skill_duration_ms histogram
-a2a_skill_duration_ms_bucket{skill="run_shell",le="100"} 95
-a2a_skill_duration_ms_bucket{skill="run_shell",le="1000"} 148
-```
+> `tokenSavings` is optional — only present if token tracking is initialized with data.
 
 ---
 
@@ -1570,17 +1603,11 @@ data: {"exitCode": 0, "totalTime": 5000}
 No authentication required. Claude Code passes tasks via stdin/stdout.
 
 ### A2A HTTP Endpoints
-Bearer token via `Authorization` header or `AUTHORIZATION` query param.
+Bearer token via `Authorization` header only.
 
 **Request:**
 ```
 Authorization: Bearer sk_live_abc123...
-```
-
-or
-
-```
-GET /health?authorization=sk_live_abc123...
 ```
 
 ### API Key Management
@@ -2049,43 +2076,52 @@ delegate
   message="Process order with audit trail"
 ```
 
-**Traces auto-created (integrated into delegate flow):**
+**Traces auto-created (integrated into delegate flow). Retrieve via MCP tool:**
 
 ```
-GET /traces → [
-  {
-    "traceId": "trace_abc123",
-    "startTime": "2026-03-14T10:00:00Z",
-    "spans": [
-      {
-        "spanId": "span_1",
-        "name": "delegate:process_order",
-        "duration": 1200,
-        "spans": [
-          {
-            "spanId": "span_1a",
-            "name": "worker:data.fetch_order",
-            "duration": 150,
-            "status": "OK"
-          },
-          {
-            "spanId": "span_1b",
-            "name": "worker:shell.audit_log",
-            "duration": 80,
-            "status": "OK"
-          },
-          {
-            "spanId": "span_1c",
-            "name": "worker:ai.validate",
-            "duration": 900,
-            "status": "OK"
-          }
-        ]
-      }
-    ]
-  }
-]
+get_trace
+  traceId="trace_abc123"
 ```
+
+**Response:**
+```json
+{
+  "traceId": "trace_abc123",
+  "startTime": "2026-03-14T10:00:00Z",
+  "waterfall": [
+    {
+      "spanId": "span_1",
+      "parentSpanId": null,
+      "operationName": "delegate:process_order",
+      "durationMs": 1200,
+      "status": "ok"
+    },
+    {
+      "spanId": "span_1a",
+      "parentSpanId": "span_1",
+      "operationName": "worker:data.fetch_order",
+      "durationMs": 150,
+      "status": "ok"
+    },
+    {
+      "spanId": "span_1b",
+      "parentSpanId": "span_1",
+      "operationName": "worker:shell.audit_log",
+      "durationMs": 80,
+      "status": "ok"
+    },
+    {
+      "spanId": "span_1c",
+      "parentSpanId": "span_1",
+      "operationName": "worker:ai.validate",
+      "durationMs": 900,
+      "status": "ok"
+    }
+  ]
+}
+```
+
+> Tracing is MCP-only. There is no `GET /traces` HTTP endpoint. Use the `list_traces`, `get_trace`, and `search_traces` MCP tools to access trace data.
 
 ---
 

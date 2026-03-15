@@ -1,14 +1,11 @@
 import { randomUUID } from "crypto";
+import type { AgentCard, Part } from "./types.js";
 
-export interface AgentCard {
-  name: string; description: string; url: string; version: string;
-  capabilities: { streaming: boolean };
-  skills: Array<{ id: string; name: string; description: string }>;
-}
+export type { AgentCard };
 
 export async function sendTask(agentUrl: string, params: {
   skillId?: string; args?: Record<string, unknown>;
-  message: { role: string; parts: Array<{ text: string }> };
+  message: { role: string; parts: Part[] };
   [key: string]: unknown;
 }, opts?: { apiKey?: string; timeoutMs?: number }): Promise<string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -53,6 +50,7 @@ export async function fetchWithTimeout(
 export async function discoverAgent(agentUrl: string): Promise<AgentCard> {
   const res = await fetch(`${agentUrl}/.well-known/agent.json`, {
     redirect: "manual", // Prevent following redirects to bypass SSRF checks
+    signal: AbortSignal.timeout(10_000),
   });
 
   // Reject redirects
@@ -60,6 +58,6 @@ export async function discoverAgent(agentUrl: string): Promise<AgentCard> {
     throw new Error(`Redirect detected (${res.status}) — rejected to prevent SSRF bypass`);
   }
 
-  return res.json();
+  return res.json() as Promise<AgentCard>;
 }
 
