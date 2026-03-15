@@ -316,7 +316,7 @@ function aggregateSignals(signals: Signal[], windowHours: number, dedup: boolean
   const byCountry = new Map<string, Signal[]>();
   for (const s of filtered) {
     const country = s.country || "unknown";
-    (byCountry.get(country) ?? (byCountry.set(country, []), byCountry.get(country))!).push(s);
+    (byCountry.get(country) ?? (byCountry.set(country, []), byCountry.get(country) ?? [])).push(s);
   }
 
   // Build clusters with geo-normalization
@@ -501,7 +501,7 @@ function detectConvergence(signals: GeoSignal[], radiusKm: number, minTypes: num
     const cellY = Math.floor(signals[i]!.lat / cellSizeDeg);
     const key = `${cellX},${cellY}`;
     if (!grid.has(key)) grid.set(key, []);
-    grid.get(key)!.push(i);
+    (grid.get(key) ?? []).push(i);
   }
 
   // How many adjacent cells to check based on radius vs cell size
@@ -851,11 +851,11 @@ function detectCorrelationPatterns(
     const domains = classifySignalDomain(sig);
     for (const d of domains) {
       if (!byDomain.has(d)) byDomain.set(d, []);
-      byDomain.get(d)!.push(sig);
+      (byDomain.get(d) ?? []).push(sig);
     }
     const country = sig.country || "unknown";
     if (!byCountry.has(country)) byCountry.set(country, []);
-    byCountry.get(country)!.push(sig);
+    (byCountry.get(country) ?? []).push(sig);
   }
 
   const domainCount = (d: string) => (byDomain.get(d) ?? []).length;
@@ -1004,7 +1004,7 @@ function detectCorrelationPatterns(
       const domains = classifySignalDomain(sig);
       for (const d of domains) {
         if (!typeCountries.has(d)) typeCountries.set(d, new Set());
-        typeCountries.get(d)!.add(sig.country);
+        (typeCountries.get(d) ?? new Set()).add(sig.country);
       }
     }
     const spillovers: string[] = [];
@@ -1171,6 +1171,7 @@ async function fetchIodaOutages(country?: string, days: number = 7): Promise<Rec
     };
   } catch (err) {
     // IODA API may be unreliable; return graceful degradation
+    process.stderr.write(`[${NAME}] fetch_outages: IODA request failed: ${err instanceof Error ? err.message : String(err)}\n`);
     return {
       source: "ioda",
       description: "Internet outage signals (IODA)",
