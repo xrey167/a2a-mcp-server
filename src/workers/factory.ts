@@ -207,6 +207,9 @@ Rules:
 
     if (variantId && variants.some(v => v.variantId === variantId)) {
       const variantSpec = await loadVariantSpec(pipelineId, variantId);
+      if (!variantSpec) {
+        return { variantId: null, variantSpec: null, confidence: "none", reason: "variant spec not found" };
+      }
       return {
         variantId,
         variantSpec,
@@ -427,7 +430,7 @@ async function scaffoldProject(
   });
 
   // Ensure output directory exists
-  await runShell(`mkdir -p ${safeDir}`);
+  await runShell(`mkdir -p ${JSON.stringify(safeDir)}`);
 
   // Collect all unique directories we need to create
   const dirs = new Set<string>();
@@ -440,7 +443,7 @@ async function scaffoldProject(
   if (dirs.size > 0) {
     // Sanitize each directory path before shell execution
     const safeDirs = Array.from(dirs).map(d => sanitizePath(d));
-    await runShell(`mkdir -p ${safeDirs.join(" ")}`);
+    await runShell(`mkdir -p ${safeDirs.map(d => JSON.stringify(d)).join(" ")}`);
   }
 
   // Write all template files (uses write_file skill, not shell)
@@ -684,7 +687,7 @@ For each file, use this exact format:
       const dir = fullPath.substring(0, fullPath.lastIndexOf("/"));
       if (dir) {
         const safeDir = sanitizePath(dir);
-        await runShell(`mkdir -p ${safeDir}`);
+        await runShell(`mkdir -p ${JSON.stringify(safeDir)}`);
       }
       await writeFile(fullPath, content);
       files.push(fullPath);
