@@ -325,6 +325,9 @@ async function mapReduce(
   }
 
   // Distribute items across agents round-robin; only use as many agents as there are items
+  if (request.agents.length === 0) {
+    return { id, strategy: "map_reduce", output: "No agents available for map_reduce", responses: [], totalDurationMs: Date.now() - startTime };
+  }
   const agentCount = Math.min(request.agents.length, items.length);
   const chunks: Array<{ agent: string; items: unknown[] }> = request.agents.slice(0, agentCount).map(a => ({ agent: a, items: [] }));
   for (let i = 0; i < items.length; i++) {
