@@ -32,6 +32,14 @@ const FactorySchemas = {
   create_project: z.looseObject({ idea: z.string().min(1), pipeline: z.string().optional().default("app"), outputDir: z.string().optional(), variant: z.string().optional() }),
   quality_gate: z.looseObject({ code: z.string().min(1), spec: z.string().optional().default("{}"), pipeline: z.string().optional().default("app"), variant: z.string().optional() }),
   list_templates: z.looseObject({ pipeline: z.string().optional().default("") }),
+  estimate_effort: z.looseObject({
+    /** Project idea or description to estimate */
+    idea: z.string().min(1),
+    /** Pipeline type for context (app, website, api, cli, mcp-server, agent) */
+    pipeline: z.string().optional().default("app"),
+    /** Team size (default 1) — affects calendar time estimates */
+    teamSize: z.number().int().positive().optional().default(1),
+  }),
 };
 import { getPersona, watchPersonas } from "../persona-loader.js";
 import { PIPELINES, listPipelines, getPipeline } from "../pipelines/index.js";
@@ -100,6 +108,11 @@ const AGENT_CARD = {
       id: "list_templates",
       name: "List Templates",
       description: "List available template variants for a pipeline (e.g. saas-starter, e-commerce, social-app for mobile apps).",
+    },
+    {
+      id: "estimate_effort",
+      name: "Estimate Effort",
+      description: "AI-powered effort estimate for a project idea: returns total hours, complexity rating, per-component breakdown, key assumptions, and top risks. Faster than normalize_intent — no spec file is written.",
     },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory" },
@@ -828,6 +841,47 @@ async function handleSkill(
 
       const result = await qualityGate(code, spec, pipeline, variantSpec);
       return safeStringify(result, 2);
+    }
+
+    case "estimate_effort": {
+      const { idea, pipeline, teamSize } = FactorySchemas.estimate_effort.parse({ idea: args.idea ?? text, ...args });
+      const safeIdea = sanitizeUserInput(idea, "project_idea");
+      const safePipeline = sanitizeUserInput(pipeline, "pipeline_type");
+
+      const systemPrompt = `You are a senior software architect estimating development effort for a new project.
+Respond ONLY with a valid JSON object — no markdown fences, no explanation.
+Schema:
+{
+  "complexity": "low" | "medium" | "high" | "very_high",
+  "totalHours": number,
+  "calendarWeeks": number,
+  "breakdown": [{ "component": string, "hours": number, "complexity": "low" | "medium" | "high" }],
+  "assumptions": [string],
+  "risks": [string],
+  "recommendation": string
+}
+Base estimates on a single engineer (adjust calendarWeeks for team size provided).
+Be realistic — do not underestimate. Include setup, testing, and deployment in totalHours.`;
+
+      const userPrompt = `Pipeline type: ${safePipeline}
+Team size: ${teamSize}
+
+Project idea: ${safeIdea}`;
+
+      const raw = await askClaude(userPrompt, systemPrompt);
+      // Strip any accidental markdown fences the model may have added
+      const cleaned = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`estimate_effort: JSON.parse failed (${msg}) — returning raw response`);
+        throw new Error(`estimate_effort: AI returned malformed JSON (${msg})`);
+      }
+
+      return safeStringify({ idea, pipeline, teamSize, estimate: parsed }, 2);
     }
 
     case "list_pipelines":
