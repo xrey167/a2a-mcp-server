@@ -48,10 +48,10 @@ env -u CLAUDECODE claude -p "Use the delegate tool to ..." --allowedTools "mcp__
 | `src/workers/data.ts` | 8088 | parse_csv, parse_json, transform_data, analyze_data, pivot_table, fetch_dataset |
 | `src/workers/news.ts` | 8089 | fetch_rss, aggregate_feeds, classify_news, cluster_news, detect_signals, regulatory_scan, summarize_news |
 | `src/workers/market.ts` | 8090 | fetch_quote, price_history, technical_analysis, screen_market, detect_anomalies, correlation, market_composite |
-| `src/workers/signal.ts` | 8091 | aggregate_signals, classify_threat, detect_convergence, baseline_compare, instability_index, correlate_signals, fetch_cyber_c2, fetch_malicious_urls, fetch_outages |
+| `src/workers/signal.ts` | 8091 | aggregate_signals, classify_threat, detect_convergence, baseline_compare, instability_index, correlate_signals, fetch_cyber_c2, fetch_malicious_urls, fetch_outages, threat_brief |
 | `src/workers/monitor.ts` | 8092 | track_conflicts, detect_surge, theater_posture, track_vessels, check_freshness, watchlist_check, fetch_conflicts, fetch_flights, fetch_vessels |
 | `src/workers/infra.ts` | 8093 | cascade_analysis, supply_chain_map, chokepoint_assess, redundancy_score, dependency_graph, load_infrastructure, fetch_cables |
-| `src/workers/climate.ts` | 8094 | fetch_earthquakes, fetch_wildfires, fetch_natural_events, assess_exposure, climate_anomalies, event_correlate, fetch_weather |
+| `src/workers/climate.ts` | 8094 | fetch_earthquakes, fetch_wildfires, fetch_natural_events, assess_exposure, climate_anomalies, event_correlate, fetch_weather, climate_report |
 | `src/workers/supply-chain.ts` | 8095 | connect_erp, analyze_orders, critical_path, assess_risk, recommend_actions, monitor_dashboard, intelligence_report, predict_bottlenecks, deep_bom_analysis, run_mrp, mrp_impact, vendor_health, firm_orders, execute_interventions, value_stream_map, smed_analysis, line_balance, supplier_audit_prepare, dual_source_optimize |
 
 All workers also have `remember` / `recall` skills backed by `src/memory.ts`.
