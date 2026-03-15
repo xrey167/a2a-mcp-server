@@ -513,8 +513,6 @@ const NAVAL_MID_PREFIXES = [
 
 /** AIS ship type codes indicating military/government */
 const MILITARY_SHIP_TYPES = new Set([35, 50, 51, 52, 53, 54, 55]);
-/** MMSI prefixes 00x = warships per ITU */
-const MILITARY_MMSI_PREFIXES = ["00"];
 
 interface Vessel {
   mmsi: string;
@@ -983,7 +981,9 @@ async function fetchAisVessels(
     const url = `https://services.marinetraffic.com/api/getVesselsInArea/${apiKey}?${params}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
     if (!res.ok) throw new Error(`MarineTraffic HTTP ${res.status}: ${res.statusText}`);
-    raw = await res.json() as Array<Record<string, unknown>>;
+    const mt = await res.json();
+    if (!Array.isArray(mt)) throw new Error("MarineTraffic API returned unexpected non-array response");
+    raw = mt as Array<Record<string, unknown>>;
   } else {
     // AISHub free tier — no auth, 60 s cache, bounding box optional
     const params = new URLSearchParams({ format: "1", output: "json" });
@@ -994,8 +994,12 @@ async function fetchAisVessels(
     const url = `http://data.aishub.net/ws.php?${params}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { "User-Agent": UA } });
     if (!res.ok) throw new Error(`AISHub HTTP ${res.status}: ${res.statusText}`);
-    // AISHub returns [metadata, [...vessels]]
-    const body = await res.json() as [unknown, Array<Record<string, unknown>>];
+    // AISHub returns [metadata, [...vessels]] on success, or {"ERROR":"..."} on failure (still HTTP 200)
+    const body = await res.json() as Record<string, unknown> | [unknown, Array<Record<string, unknown>>];
+    if (!Array.isArray(body)) {
+      const errMsg = String((body as Record<string, unknown>)["ERROR"] ?? "unknown error");
+      throw new Error(`AISHub API error: ${errMsg}`);
+    }
     raw = Array.isArray(body[1]) ? body[1] : [];
   }
 
@@ -1005,10 +1009,10 @@ async function fetchAisVessels(
     const mmsi = String(v["MMSI"] ?? v["mmsi"] ?? "");
     const lat = parseFloat(String(v["LATITUDE"] ?? v["LAT"] ?? v["lat"] ?? "0"));
     const lon = parseFloat(String(v["LONGITUDE"] ?? v["LON"] ?? v["lon"] ?? "0"));
-    if (!mmsi || !lat || !lon) continue;
+    if (!mmsi || isNaN(lat) || isNaN(lon)) continue;
 
     const shipType = parseInt(String(v["SHIPTYPE"] ?? v["TYPE"] ?? v["type"] ?? "0"), 10);
-    const isMilitary = MILITARY_SHIP_TYPES.has(shipType) || MILITARY_MMSI_PREFIXES.some(p => mmsi.startsWith(p));
+    const isMilitary = MILITARY_SHIP_TYPES.has(shipType) || NAVAL_MID_PREFIXES.some(np => mmsi.startsWith(np.prefix));
     if (militaryOnly && !isMilitary) continue;
 
     vessels.push({
@@ -1133,7 +1137,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     case "fetch_vessels": {
       const { lamin, lamax, lomin, lomax, militaryOnly, limit } = MonitorSchemas.fetch_vessels.parse(args);
       const vessels = await fetchAisVessels(lamin, lamax, lomin, lomax, militaryOnly, limit);
-      const militaryCount = vessels.filter(v => MILITARY_SHIP_TYPES.has(v.shipType) || MILITARY_MMSI_PREFIXES.some(p => v.mmsi.startsWith(p))).length;
+      const militaryCount = vessels.filter(v => MILITARY_SHIP_TYPES.has(v.shipType) || NAVAL_MID_PREFIXES.some(np => v.mmsi.startsWith(np.prefix))).length;
       const byType: Record<number, number> = {};
       for (const v of vessels) {
         byType[v.shipType] = (byType[v.shipType] ?? 0) + 1;

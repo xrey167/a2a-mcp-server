@@ -510,14 +510,18 @@ async function fetchDataset(
 
   // Detect format from Content-Type or URL extension when "auto"
   let resolved = format;
+  const ct = res.headers.get("content-type") ?? "";
   if (resolved === "auto") {
-    const ct = res.headers.get("content-type") ?? "";
     const urlLower = url.toLowerCase();
     if (ct.includes("text/csv") || ct.includes("application/csv") || urlLower.endsWith(".csv") || urlLower.includes(".csv?")) {
       resolved = "csv";
     } else {
       resolved = "json"; // default: treat as JSON
     }
+  }
+  // Bail early on HTML responses (redirects, error pages) regardless of format hint
+  if (ct.includes("text/html") || ct.includes("application/xhtml")) {
+    throw new Error(`fetch_dataset received HTML response from ${url} — likely a redirect or error page, not a dataset`);
   }
 
   const body = await res.text();
@@ -531,6 +535,7 @@ async function fetchDataset(
     try {
       parsed = JSON.parse(body);
     } catch (err) {
+      process.stderr.write(`[${NAME}] fetch_dataset JSON parse error for ${url}: ${(err as Error).message}\n`);
       throw new Error(`Response is not valid JSON: ${(err as Error).message}`);
     }
     // Drill into nested path if requested
