@@ -28,13 +28,13 @@ const CodeSchemas = {
   }),
   fix_bug: z.looseObject({
     /** Code containing the bug */
-    code: z.string().min(1).refine(s => s.trim().length > 0, "code must not be blank"),
+    code: z.string().min(1).max(10_000, "code must be ≤ 10,000 characters").refine(s => s.trim().length > 0, "code must not be blank"),
     /** Error message, stack trace, or failing test output that describes the bug */
-    error: z.string().min(1).refine(s => s.trim().length > 0, "error must not be blank"),
+    error: z.string().min(1).max(4_000, "error must be ≤ 4,000 characters").refine(s => s.trim().length > 0, "error must not be blank"),
     /** Programming language (default: typescript) */
-    language: z.string().optional().default("typescript"),
+    language: z.string().max(100).optional().default("typescript"),
     /** Optional extra context about what the code is supposed to do */
-    context: z.string().optional(),
+    context: z.string().max(2_000).optional(),
   }),
 };
 
@@ -49,8 +49,14 @@ try {
   execSync("which codex", { encoding: "utf-8", timeout: 5_000 });
   codexAvailable = true;
   process.stderr.write(`[${NAME}] codex CLI found\n`);
-} catch {
-  process.stderr.write(`[${NAME}] codex CLI not found — will use Claude fallback for code review\n`);
+} catch (startupErr) {
+  const startupMsg = startupErr instanceof Error ? startupErr.message : String(startupErr);
+  // Exit code 1 = "not found" — anything else indicates an unexpected system error
+  if (startupMsg.includes("non-zero exit code 1") || startupMsg.includes("ENOENT")) {
+    process.stderr.write(`[${NAME}] codex CLI not found — will use Claude fallback for code review\n`);
+  } else {
+    process.stderr.write(`[${NAME}] WARNING: codex availability check failed unexpectedly: ${startupMsg} — treating as unavailable\n`);
+  }
 }
 
 const AGENT_CARD = {
@@ -88,11 +94,17 @@ Provide:
 
 ${sanitizedCode}`;
 
-  return sendTask(AI_WORKER_URL, {
+  const result = await sendTask(AI_WORKER_URL, {
     skillId: "ask_claude",
     args: { prompt },
     message: { role: "user" as const, parts: [{ kind: "text" as const, text: prompt }] },
   }, { timeoutMs: CODEX_TIMEOUT });
+
+  if (!result || !result.trim()) {
+    process.stderr.write(`[${NAME}] codex_review: AI worker returned empty response\n`);
+    throw new Error("codex_review: AI returned an empty response — retry or check model availability");
+  }
+  return result;
 }
 
 /** Default test framework per language when caller doesn't specify */
@@ -155,6 +167,7 @@ async function fixBugWithClaude(
   language: string,
   context: string | undefined,
 ): Promise<string> {
+  // Pre-sanitization size check — early rejection before expensive sanitization
   if (code.length > 10_000) {
     throw new Error(`fix_bug: code input is ${code.length} characters — exceeds 10,000 character limit`);
   }
@@ -166,6 +179,14 @@ async function fixBugWithClaude(
   const sanitizedError = sanitizeUserInput(error, "error_message");
   const sanitizedLanguage = sanitizeUserInput(language, "language");
   const sanitizedContext = context ? sanitizeUserInput(context, "context") : null;
+
+  // Post-sanitization check: XML-escaping can expand inputs (& → &amp;, < → &lt;)
+  if (sanitizedCode.length > 15_000) {
+    throw new Error(`fix_bug: sanitized code is ${sanitizedCode.length} characters — input likely contains many special characters that expand during sanitization`);
+  }
+  if (sanitizedError.length > 6_000) {
+    throw new Error(`fix_bug: sanitized error is ${sanitizedError.length} characters — input likely contains many special characters that expand during sanitization`);
+  }
 
   const prompt = `You are a senior software engineer. Fix the bug in the code below.
 
@@ -205,6 +226,10 @@ CHANGES:
   if (!result || !result.trim()) {
     process.stderr.write(`[${NAME}] fix_bug: AI worker returned empty response\n`);
     throw new Error("fix_bug: AI returned an empty response — retry or check model availability");
+  }
+  if (!result.includes("FIXED CODE:")) {
+    process.stderr.write(`[${NAME}] fix_bug: AI response missing expected structure. Got: ${result.slice(0, 200)}\n`);
+    throw new Error("fix_bug: AI response did not follow the expected format — missing 'FIXED CODE:' section. Retry or check model behavior.");
   }
   return result;
 }
@@ -314,7 +339,9 @@ app.post<{ Body: Record<string, any> }>("/", async (request, reply) => {
   try {
     resultText = await handleSkill(sid, args ?? { prompt: text }, text);
   } catch (err) {
-    resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[${NAME}] unhandled error in skill "${sid}": ${msg}\n`);
+    resultText = `Error: ${msg}`;
   }
 
   return buildA2AResponse(data.id, taskId, resultText);
