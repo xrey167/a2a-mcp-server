@@ -89,7 +89,8 @@ const healthStatus = new Map<string, boolean>();
 function parseSemVer(version: string): { major: number; minor: number; patch: number } | null {
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
-  return { major: parseInt(match[1]!, 10), minor: parseInt(match[2]!, 10), patch: parseInt(match[3]!, 10) };
+  if (!match[1] || !match[2] || !match[3]) return null;
+  return { major: parseInt(match[1], 10), minor: parseInt(match[2], 10), patch: parseInt(match[3], 10) };
 }
 
 function compareSemVer(a: string, b: string): number {
