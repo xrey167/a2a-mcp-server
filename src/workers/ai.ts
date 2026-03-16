@@ -58,6 +58,17 @@ const AiSchemas = {
     /** Proofreading depth: "grammar-only" fixes errors only; "grammar-and-style" also improves clarity; "full" adds tone and structure suggestions (default "grammar-and-style") */
     style: z.enum(["grammar-only", "grammar-and-style", "full"]).optional().default("grammar-and-style"),
   }),
+
+  generate_sql: z.looseObject({
+    /** Natural language description of the query to generate */
+    question: z.string().min(1).max(2_000).refine(s => s.trim().length > 0, "question must not be blank"),
+    /** Database schema: CREATE TABLE statements, table descriptions, or field lists (max 20 000 chars) */
+    schema: z.string().min(1).max(20_000),
+    /** SQL dialect — controls syntax choices such as date functions and LIMIT syntax (default "generic") */
+    dialect: z.enum(["generic", "sqlite", "postgresql", "mysql", "bigquery"]).optional().default("generic"),
+    /** If true, allow only SELECT statements; write operations are rejected (default true) */
+    readOnly: z.boolean().optional().default(true),
+  }),
 };
 import { readFileSync, existsSync } from "node:fs";
 import { sanitizeUserInput, sanitizeForPrompt } from "../prompt-sanitizer.js";
@@ -80,6 +91,7 @@ const AGENT_CARD = {
     { id: "extract_json", name: "Extract JSON", description: "Extract structured JSON from unstructured text using Claude. Provide a schema description (field names/types) or JSON Schema. Returns valid JSON matching the schema. Optional example guides the output shape." },
     { id: "classify_text", name: "Classify Text", description: "Classify text into one or more user-defined categories using Claude. Returns JSON with label, confidence (0-1), and reasoning. Supports single-label (default) and multi-label modes. Optional domain hint (e.g. 'sentiment', 'intent') improves accuracy." },
     { id: "proofread", name: "Proofread", description: "Proofread text using Claude. Returns JSON with a corrected version, a list of changes (original, corrected, reason), change count, and a summary. Supports grammar-only, grammar-and-style (default), or full depth. Optional language parameter for non-English text." },
+    { id: "generate_sql", name: "Generate SQL", description: "Generate a SQL query from a natural language question and a database schema (CREATE TABLE statements or table descriptions). Returns the SQL, an explanation, and a list of tables used. Supports sqlite, postgresql, mysql, bigquery, and generic dialects. Read-only mode (default) rejects write operations." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -485,6 +497,132 @@ ${safeText}`;
         return "Error: proofread: failed to serialize response — retry";
       }
     }
+    case "generate_sql": {
+      let parsed: ReturnType<typeof AiSchemas.generate_sql.parse>;
+      try {
+        parsed = AiSchemas.generate_sql.parse({ question: args.question ?? text, ...args });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] generate_sql: Zod parse error: ${detail}\n`);
+        throw err;
+      }
+      const { question, schema: rawSchema, dialect, readOnly } = parsed;
+
+      // Inline prompt injection guards — schema and question are untrusted user content
+      const safeSchema = sanitizeUserInput(rawSchema, "schema", 20_000);
+      const safeQuestion = sanitizeUserInput(question, "question", 2_000);
+
+      const dialectNote = dialect === "generic"
+        ? "Use standard ANSI SQL syntax."
+        : `Use ${dialect} dialect syntax (e.g. date functions, LIMIT/OFFSET, quoting conventions specific to ${dialect}).`;
+
+      const readOnlyNote = readOnly
+        ? "IMPORTANT: Generate only SELECT queries. If the question requires INSERT, UPDATE, DELETE, DROP, TRUNCATE, or any write operation, respond with a JSON error explaining why."
+        : "You may generate any SQL statement the schema supports.";
+
+      const prompt = `You are a SQL expert. Given a database schema and a natural language question, generate a precise, correct SQL query.
+
+${dialectNote}
+${readOnlyNote}
+
+Return ONLY valid JSON in this exact shape — no markdown fences, no explanation outside the JSON:
+{
+  "sql": "<the complete SQL query>",
+  "explanation": "<one to three sentences explaining what the query does and why>",
+  "tablesUsed": ["<table1>", "<table2>"],
+  "dialect": "${dialect}"
+}
+
+If the question cannot be answered with the given schema, return:
+{
+  "error": "<brief explanation of why the query cannot be generated>",
+  "sql": null
+}
+
+${safeSchema}
+
+${safeQuestion}`;
+
+      let raw: Awaited<ReturnType<typeof handleSkill>>;
+      try {
+        raw = await handleSkill("ask_claude", { prompt }, prompt);
+      } catch (err) {
+        const errMsg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+        process.stderr.write(`[${NAME}] generate_sql: ask_claude failed (dialect=${dialect}, questionLen=${question.length}): ${errMsg}\n`);
+        throw err;
+      }
+
+      if (!raw || typeof raw !== "string" || !raw.trim()) {
+        process.stderr.write(`[${NAME}] generate_sql: unexpected empty response from ask_claude\n`);
+        return "Error: generate_sql returned an unexpected empty response — retry";
+      }
+
+      // Strip optional markdown fences the model may add despite instructions
+      const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+      const jsonCandidate = (fenceMatch ? (fenceMatch[1] ?? raw) : raw).trim();
+
+      if (!jsonCandidate) {
+        process.stderr.write(`[${NAME}] generate_sql: empty JSON candidate from response (len=${raw.length})\n`);
+        return "Error: generate_sql: model returned an empty JSON block — retry";
+      }
+
+      let parsed2: Record<string, unknown>;
+      try {
+        parsed2 = JSON.parse(jsonCandidate);
+      } catch (parseErr) {
+        const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+        const preview = jsonCandidate.length > 300 ? jsonCandidate.slice(0, 300) + "…" : jsonCandidate;
+        process.stderr.write(`[${NAME}] generate_sql: Claude returned non-JSON output (${preview}): ${msg}\n`);
+        return "Error: generate_sql: model did not return valid JSON — retry";
+      }
+
+      // Error path — model couldn't generate SQL for this question+schema combo
+      if (typeof parsed2.error === "string" && parsed2.sql === null) {
+        process.stderr.write(`[${NAME}] generate_sql: model returned error: ${parsed2.error}\n`);
+        try {
+          return JSON.stringify({ error: parsed2.error, sql: null });
+        } catch {
+          return `generate_sql: ${parsed2.error}`;
+        }
+      }
+
+      // Validate required fields
+      if (typeof parsed2.sql !== "string" || !parsed2.sql.trim()) {
+        process.stderr.write(`[${NAME}] generate_sql: JSON missing sql field: ${jsonCandidate.slice(0, 120)}\n`);
+        return "Error: generate_sql: model response missing 'sql' field — retry";
+      }
+
+      // Safety: reject write operations when readOnly is enabled.
+      // Strip SQL comments first (prevents "-- DROP TABLE" and /* */ bypasses).
+      // Scan full SQL string to catch multi-statement and CTE bypasses:
+      //   "WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d" has no `;` prefix.
+      // Left-context (?:^|[\s;(]) catches: start-of-string, whitespace, semicolons, and open-paren
+      //   (handles CTE subqueries: `... (DELETE FROM ...)`).
+      // Use (?=\s|$|\() instead of \b — \b is broken in some Bun versions (interpreted as backspace).
+      if (readOnly) {
+        const sqlNoComments = (parsed2.sql as string)
+          .replace(/--[^\n]*/g, "")
+          .replace(/\/\*[\s\S]*?\*\//g, "");
+        const WRITE_OPS = ["INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER", "CREATE", "REPLACE", "MERGE", "CALL"];
+        const writeOpPattern = WRITE_OPS.join("|");
+        const writeOpRe = new RegExp(`(?:^|[\\s;(])(${writeOpPattern})(?=\\s|$|\\()`, "im");
+        const writeMatch = writeOpRe.exec(sqlNoComments);
+        if (writeMatch) {
+          const op = (writeMatch[1] ?? "WRITE").toUpperCase();
+          process.stderr.write(`[${NAME}] generate_sql: rejecting write operation "${op}" in readOnly mode\n`);
+          return `generate_sql: generated query contains a write operation (${op}) but readOnly=true — set readOnly: false to allow write queries`;
+        }
+      }
+
+      try {
+        return JSON.stringify(parsed2);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] generate_sql: JSON.stringify failed: ${msg}\n`);
+        return "Error: generate_sql: failed to serialize response — retry";
+      }
+    }
+
     default: {
       // Check dynamically loaded plugin skills
       const plugin = pluginSkills.get(skillId);
