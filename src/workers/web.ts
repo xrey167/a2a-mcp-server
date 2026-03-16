@@ -270,14 +270,24 @@ type ExtractedTable = {
  */
 function extractHtmlTables(html: string, maxTables: number, maxRowsPerTable: number): ExtractedTable[] {
   const results: ExtractedTable[] = [];
-  const tableRe = /<table(\s[^>]*)?>[\s\S]*?<\/table>/gi;
+  // Greedy match to the LAST </table> so nested tables don't truncate the outer match.
+  // This intentionally uses [\s\S]* (greedy) to find each outermost <table>...</table>.
+  // Because greedy [\s\S]* backtracks to the last </table>, it correctly captures the whole
+  // outer table. Each match is then processed independently.
+  const tableRe = /<table(\s[^>]*)?>[\s\S]*<\/table>/gi;
   let tm: RegExpExecArray | null;
   let idx = 0;
 
   while ((tm = tableRe.exec(html)) !== null && results.length < maxTables) {
     idx++;
-    // Strip nested tables so inner </table> tags don't close this match early in row parsing
-    const tableHtml = tm[0].replace(/<table(\s[^>]*)?>[\s\S]*?<\/table>/gi, "");
+    // Strip nested tables from the INNER content only.
+    // tm[0] starts with <table...> and ends with </table>.
+    // Slicing off the outer open/close tags before stripping prevents the nested-strip
+    // regex from matching and deleting the outer table's own body.
+    const outerOpenEnd = tm[0].indexOf(">") + 1;
+    const innerContent = tm[0].slice(outerOpenEnd, tm[0].lastIndexOf("</table>"));
+    const cleanedInner = innerContent.replace(/<table(\s[^>]*)?>[\s\S]*?<\/table>/gi, "");
+    const tableHtml = `<table>${cleanedInner}</table>`;
 
     // Optional caption
     const captionM = tableHtml.match(/<caption[^>]*>([\s\S]*?)<\/caption>/i);
@@ -322,7 +332,7 @@ function extractHtmlTables(html: string, maxTables: number, maxRowsPerTable: num
     const truncated = rowCount > maxRowsPerTable;
     const rows = dataRows.slice(0, maxRowsPerTable).map(cells => {
       const obj: Record<string, string> = {};
-      for (let i = 0; i < headers.length; i++) obj[headers[i]] = cells[i] ?? "";
+      for (let i = 0; i < headers.length; i++) obj[headers[i] ?? `col_${i}`] = cells[i] ?? "";
       return obj;
     });
 
