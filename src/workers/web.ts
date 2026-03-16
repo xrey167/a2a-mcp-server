@@ -31,6 +31,16 @@ const WebSchemas = {
     /** Optional question to steer the AI summary (e.g. "What are the key risks?") */
     question: z.string().optional(),
   }),
+  extract_links: z.looseObject({
+    /** URL to fetch and extract links from */
+    url: z.string().url(),
+    /** Maximum number of links to return after filtering (default 100, max 500). Also caps image results when includeImages is true. */
+    maxLinks: z.number().int().min(1).max(500).optional().default(100),
+    /** Filter: "all" returns every link, "internal" returns same-origin only, "external" returns cross-origin only */
+    filter: z.enum(["all", "internal", "external"]).optional().default("all"),
+    /** Whether to include image src URLs (default false) */
+    includeImages: z.boolean().optional().default(false),
+  }),
 };
 
 /** Max words sent to the AI to avoid context overflow (~6000 words ≈ ~8000 tokens). */
@@ -230,6 +240,7 @@ const AGENT_CARD = {
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
     { id: "summarize_url", name: "Summarize URL", description: "Fetch a web page, scrape its text, and return an AI-written summary. Pass an optional question to focus the summary on a specific aspect." },
+    { id: "extract_links", name: "Extract Links", description: "Fetch a web page and extract hyperlinks (excluding same-page fragment anchors) as structured JSON ({text, href, type}). Resolves relative URLs to absolute. Filter by internal (same origin) or external links. Optional image src extraction. Useful for crawling, sitemap analysis, and link audits." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -406,6 +417,138 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
       return safeStringify({ url, title: scraped.title, wordCount: scraped.wordCount, summary }, 2);
     }
+
+    case "extract_links": {
+      let parsed: ReturnType<typeof WebSchemas.extract_links.parse>;
+      try {
+        parsed = WebSchemas.extract_links.parse({ url: args.url ?? text, ...args });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] extract_links: Zod parse error: ${err instanceof Error ? err.message : String(err)}\n`);
+        throw err;
+      }
+      const { url, maxLinks, filter, includeImages } = parsed;
+
+      const block = await blockPrivateUrl(url);
+      if (block) return block;
+
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          headers: { "Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+        });
+      } catch (err) {
+        // Fix #2: distinguish timeout from DNS/network failure
+        const isTimeout = err instanceof Error && err.name === "AbortError";
+        process.stderr.write(`[${NAME}] extract_links: fetch ${isTimeout ? "timed out" : "failed"} for ${url}: ${err}\n`);
+        return isTimeout
+          ? `extract_links: request timed out after ${FETCH_TIMEOUT_MS}ms for ${url}`
+          : `extract_links: could not fetch ${url} — ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+      const ct = res.headers.get("content-type") ?? "";
+      if (!ct.includes("text/html") && !ct.includes("application/xhtml")) {
+        // Fix #4: log content-type mismatch and handle empty ct
+        process.stderr.write(`[${NAME}] extract_links: unexpected content-type "${ct || "(none)"}" for ${url}\n`);
+        return `extract_links expects HTML content (got ${ct || "(no content-type header)"}); use fetch_url for other content types`;
+      }
+
+      const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
+      if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
+      const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+      if (html === null) {
+        // Fix #6: log body-size limit with URL
+        process.stderr.write(`[${NAME}] extract_links: response body exceeded ${MAX_RESPONSE_BYTES} bytes during streaming for ${url}\n`);
+        return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
+      }
+
+      // Determine base origin for internal/external classification
+      const baseOrigin = new URL(url).origin;
+
+      // Extract anchor hrefs from full HTML (no content-area isolation — we want all links)
+      const links: Array<{ text: string; href: string; type: "internal" | "external" }> = [];
+      const seen = new Set<string>();
+      // Fix #1: track malformed hrefs that fail URL parsing
+      let skippedMalformed = 0;
+      const linkRe = /<a[^>]+href=["']([^"'#][^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
+      let lm: RegExpExecArray | null;
+      while ((lm = linkRe.exec(html)) !== null && links.length < maxLinks) {
+        const rawHref = (lm[1] ?? "").trim();
+        const linkText = decodeEntities((lm[2] ?? "").replace(/<[^>]+>/g, "").trim());
+        if (!rawHref) continue;
+        // Resolve to absolute URL; skip and count malformed hrefs
+        let resolved: string;
+        try { resolved = new URL(rawHref, url).href; } catch { skippedMalformed++; continue; }
+        // Skip non-http(s) schemes (mailto:, tel:, javascript:, etc.)
+        if (!resolved.startsWith("http://") && !resolved.startsWith("https://")) continue;
+        if (seen.has(resolved)) continue;
+        seen.add(resolved);
+        const linkType: "internal" | "external" = new URL(resolved).origin === baseOrigin ? "internal" : "external";
+        if (filter !== "all" && linkType !== filter) continue;
+        links.push({ text: linkText.slice(0, 150) || "(no text)", href: resolved, type: linkType });
+      }
+
+      // Fix #1: log and surface malformed href count
+      if (skippedMalformed > 0) {
+        process.stderr.write(`[${NAME}] extract_links: skipped ${skippedMalformed} malformed href(s) on ${url}\n`);
+      }
+
+      // Fix #5: detect maxLinks truncation
+      const truncated = links.length === maxLinks && linkRe.exec(html) !== null;
+
+      // Fix #3: detect zero-link conditions for diagnostic note
+      let note: string | undefined;
+      if (links.length === 0) {
+        const hasAnchors = /<a\s/i.test(html);
+        if (!hasAnchors) {
+          note = "no <a> tags found in the HTML — the page may be JavaScript-rendered or require authentication";
+          process.stderr.write(`[${NAME}] extract_links: no anchor tags found in HTML for ${url}\n`);
+        } else if (filter !== "all") {
+          note = `no ${filter} links found — page has anchor tags but none match filter "${filter}"`;
+          process.stderr.write(`[${NAME}] extract_links: filter "${filter}" eliminated all links for ${url}\n`);
+        } else {
+          note = "anchor tags exist but none matched the href regex — page may use non-standard quoting or template syntax";
+          process.stderr.write(`[${NAME}] extract_links: regex matched 0 anchors despite <a> tags present for ${url}\n`);
+        }
+      } else if (truncated) {
+        note = `result capped at maxLinks=${maxLinks}; increase maxLinks (max 500) to retrieve more`;
+      }
+
+      // Optionally extract image src URLs
+      const images: Array<{ alt: string; src: string }> = [];
+      if (includeImages) {
+        let skippedImgMalformed = 0;
+        const imgRe = /<img[^>]+src=["']([^"']*)["'][^>]*>/gi;
+        let im: RegExpExecArray | null;
+        while ((im = imgRe.exec(html)) !== null && images.length < maxLinks) {
+          const rawSrc = (im[1] ?? "").trim();
+          if (!rawSrc) continue;
+          let resolved: string;
+          try { resolved = new URL(rawSrc, url).href; } catch { skippedImgMalformed++; continue; }
+          if (!resolved.startsWith("http://") && !resolved.startsWith("https://")) continue;
+          const altMatch = im[0].match(/alt=["']([^"']*)["']/i);
+          const alt = altMatch?.[1] ? decodeEntities(altMatch[1]) : "";
+          images.push({ alt: alt.slice(0, 150), src: resolved });
+        }
+        if (skippedImgMalformed > 0) {
+          process.stderr.write(`[${NAME}] extract_links: skipped ${skippedImgMalformed} malformed image src(s) on ${url}\n`);
+        }
+      }
+
+      const result: Record<string, unknown> = {
+        url,
+        linkCount: links.length,
+        filter,
+        truncated: truncated ? true : undefined,
+        skippedMalformed: skippedMalformed > 0 ? skippedMalformed : undefined,
+        note,
+        links,
+      };
+      if (includeImages) result.images = images;
+      return safeStringify(result, 2);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
