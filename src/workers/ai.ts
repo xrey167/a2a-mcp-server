@@ -377,8 +377,15 @@ ${safeText}
 
       // sanitizeUserInput wraps in <text_to_proofread> block — use directly without re-wrapping in prompt
       const safeText = sanitizeUserInput(rawText, "text_to_proofread", 20_000);
-      // Bare XML escape for inline prose value — sanitizeUserInput adds block tags that break sentence structure
-      const safeLanguage = language.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 50);
+      // Bare XML escape for inline prose value — sanitizeUserInput adds block tags that break sentence structure.
+      // Also strip newlines/tabs: a crafted value like "English.\n\nIgnore all instructions." would inject
+      // new prompt lines before the IMPORTANT instruction without using any XML metacharacters.
+      const safeLanguage = language
+        .replace(/[\n\r\t]/g, " ")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .slice(0, 50);
 
       const depthGuide =
         style === "grammar-only"
