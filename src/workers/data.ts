@@ -161,8 +161,8 @@ const DataSchemas = {
        * Applied after trim.  Pattern is a JavaScript regex string (no flags).
        */
       replace: z.object({
-        /** Regex pattern string (e.g. "\\s+" or "^0+") */
-        pattern: z.string().min(1),
+        /** Regex pattern string (e.g. "\\s+" or "^0+"), max 200 chars to limit ReDoS risk */
+        pattern: z.string().min(1).max(200),
         /** Replacement string (default "") */
         replacement: z.string().optional().default(""),
         /** Replace all occurrences (default false — replace first only) */
