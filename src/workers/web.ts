@@ -31,6 +31,14 @@ const WebSchemas = {
     /** Optional question to steer the AI summary (e.g. "What are the key risks?") */
     question: z.string().optional(),
   }),
+  extract_tables: z.looseObject({
+    /** URL of the page containing HTML tables */
+    url: z.string().url(),
+    /** Maximum number of tables to return (default 10, max 20) */
+    maxTables: z.number().int().min(1).max(20).optional().default(10),
+    /** Maximum rows returned per table — larger tables are truncated (default 500, max 5000) */
+    maxRowsPerTable: z.number().int().min(1).max(5_000).optional().default(500),
+  }),
 };
 
 /** Max words sent to the AI to avoid context overflow (~6000 words ≈ ~8000 tokens). */
@@ -218,6 +226,119 @@ function decodeEntities(s: string): string {
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
 
+// ── HTML Table Extractor ─────────────────────────────────────────
+
+/** Flatten an HTML snippet to trimmed plain text. */
+function cellText(cellHtml: string): string {
+  return decodeEntities(cellHtml.replace(/<[^>]+>/g, " ").replace(/\s{2,}/g, " ").trim());
+}
+
+/** Extract <td>/<th> cell text values from a <tr> HTML snippet. */
+function extractCells(rowHtml: string): string[] {
+  const cells: string[] = [];
+  const cellRe = /<t[hd](\s[^>]*)?>[\s\S]*?<\/t[hd]>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = cellRe.exec(rowHtml)) !== null) cells.push(cellText(m[0]));
+  return cells;
+}
+
+/** Extract rows (as cell-text arrays) from an HTML section (thead/tbody/table). */
+function extractTableRows(sectionHtml: string): string[][] {
+  const rows: string[][] = [];
+  const rowRe = /<tr(\s[^>]*)?>[\s\S]*?<\/tr>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = rowRe.exec(sectionHtml)) !== null) {
+    const cells = extractCells(m[0]);
+    if (cells.length > 0) rows.push(cells);
+  }
+  return rows;
+}
+
+type ExtractedTable = {
+  index: number;
+  caption?: string;
+  headers: string[];
+  rows: Record<string, string>[];
+  rowCount: number;
+  rowsTruncated?: boolean;
+};
+
+/**
+ * Extract all HTML tables from a page into structured JSON.
+ * Strips nested tables before row extraction to avoid regex boundary issues.
+ * Tables without <th> headers use col_0, col_1, ... as field names.
+ */
+function extractHtmlTables(html: string, maxTables: number, maxRowsPerTable: number): ExtractedTable[] {
+  const results: ExtractedTable[] = [];
+  const tableRe = /<table(\s[^>]*)?>[\s\S]*?<\/table>/gi;
+  let tm: RegExpExecArray | null;
+  let idx = 0;
+
+  while ((tm = tableRe.exec(html)) !== null && results.length < maxTables) {
+    idx++;
+    // Strip nested tables so inner </table> tags don't close this match early in row parsing
+    const tableHtml = tm[0].replace(/<table(\s[^>]*)?>[\s\S]*?<\/table>/gi, "");
+
+    // Optional caption
+    const captionM = tableHtml.match(/<caption[^>]*>([\s\S]*?)<\/caption>/i);
+    const caption = captionM ? cellText(captionM[0]) : undefined;
+
+    // Prefer <thead> for headers; fall back to first <tr> of all-<th> cells
+    const theadM = tableHtml.match(/<thead(\s[^>]*)?>[\s\S]*?<\/thead>/i);
+    const tbodyM = tableHtml.match(/<tbody(\s[^>]*)?>[\s\S]*?<\/tbody>/i);
+
+    let headerCells: string[] | null = null;
+    let dataRows: string[][];
+
+    if (theadM) {
+      const theadRows = extractTableRows(theadM[0]);
+      headerCells = theadRows[0] ?? null;
+      dataRows = tbodyM ? extractTableRows(tbodyM[0]) : extractTableRows(tableHtml);
+    } else {
+      const allRows = tbodyM ? extractTableRows(tbodyM[0]) : extractTableRows(tableHtml);
+      const firstRowHtml = tableHtml.match(/<tr(\s[^>]*)?>[\s\S]*?<\/tr>/i)?.[0] ?? "";
+      if (/<th[\s>]/i.test(firstRowHtml) && allRows.length > 0) {
+        headerCells = allRows[0] ?? null;
+        dataRows = allRows.slice(1);
+      } else {
+        headerCells = null;
+        dataRows = allRows;
+      }
+    }
+
+    if (dataRows.length === 0 && !headerCells) continue;
+
+    const colCount = Math.max(
+      headerCells?.length ?? 0,
+      ...dataRows.slice(0, 5).map(r => r.length),
+    );
+    if (colCount === 0) continue;
+
+    const headers = headerCells
+      ? headerCells.map((h, i) => h.trim() || `col_${i}`)
+      : Array.from({ length: colCount }, (_, i) => `col_${i}`);
+
+    const rowCount = dataRows.length;
+    const truncated = rowCount > maxRowsPerTable;
+    const rows = dataRows.slice(0, maxRowsPerTable).map(cells => {
+      const obj: Record<string, string> = {};
+      for (let i = 0; i < headers.length; i++) obj[headers[i]] = cells[i] ?? "";
+      return obj;
+    });
+
+    results.push({
+      index: idx,
+      ...(caption ? { caption } : {}),
+      headers,
+      rows,
+      rowCount,
+      ...(truncated ? { rowsTruncated: true } : {}),
+    });
+  }
+
+  return results;
+}
+
 const AGENT_CARD = {
   name: NAME,
   description: "Web/HTTP agent — fetch URLs, scrape pages, call APIs, persistent memory",
@@ -230,6 +351,7 @@ const AGENT_CARD = {
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
     { id: "summarize_url", name: "Summarize URL", description: "Fetch a web page, scrape its text, and return an AI-written summary. Pass an optional question to focus the summary on a specific aspect." },
+    { id: "extract_tables", name: "Extract Tables", description: "Fetch a web page and extract all HTML tables as structured JSON arrays. Returns each table with headers and rows. Useful for scraping data tables, pricing grids, sports stats, and financial data. Tables without <th> headers use col_0, col_1, ... as field names." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -406,6 +528,54 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
       return safeStringify({ url, title: scraped.title, wordCount: scraped.wordCount, summary }, 2);
     }
+
+    case "extract_tables": {
+      let parsed: ReturnType<typeof WebSchemas.extract_tables.parse>;
+      try {
+        parsed = WebSchemas.extract_tables.parse({ url: args.url ?? text, ...args });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] extract_tables: Zod parse error: ${msg}\n`);
+        return `extract_tables: invalid arguments — ${msg}`;
+      }
+      const { url, maxTables, maxRowsPerTable } = parsed;
+
+      const blockReason = await blockPrivateUrl(url);
+      if (blockReason) {
+        process.stderr.write(`[${NAME}] extract_tables: SSRF blocked: ${url} — ${blockReason}\n`);
+        return `extract_tables: ${blockReason}`;
+      }
+
+      let html: string;
+      try {
+        const res = await fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; a2a-mcp-bridge/1.0)" },
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (!res.ok) {
+          process.stderr.write(`[${NAME}] extract_tables: HTTP ${res.status} for ${url}\n`);
+          return `extract_tables: HTTP ${res.status} fetching ${url}`;
+        }
+        const body = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+        if (body === null) {
+          process.stderr.write(`[${NAME}] extract_tables: response too large for ${url}\n`);
+          return `extract_tables: response too large — exceeded ${MAX_RESPONSE_BYTES} byte limit`;
+        }
+        html = body;
+      } catch (err) {
+        const isTimeout = err instanceof Error && err.name === "TimeoutError";
+        const cause = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] extract_tables: fetch failed for ${url}: ${cause}\n`);
+        return isTimeout
+          ? `extract_tables: request timed out after ${FETCH_TIMEOUT_MS}ms`
+          : `extract_tables: fetch failed — ${cause}`;
+      }
+
+      const tables = extractHtmlTables(html, maxTables, maxRowsPerTable);
+      process.stderr.write(`[${NAME}] extract_tables: found ${tables.length} table(s) at ${url}\n`);
+      return safeStringify({ url, tableCount: tables.length, tables }, 2);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
