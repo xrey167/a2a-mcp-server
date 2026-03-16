@@ -31,6 +31,16 @@ const WebSchemas = {
     /** Optional question to steer the AI summary (e.g. "What are the key risks?") */
     question: z.string().optional(),
   }),
+  extract_links: z.looseObject({
+    /** URL to fetch and extract links from */
+    url: z.string().url(),
+    /** Maximum number of links to return (default 100, max 500) */
+    maxLinks: z.number().int().min(1).max(500).optional().default(100),
+    /** Filter: "all" returns every link, "internal" returns same-origin only, "external" returns cross-origin only */
+    filter: z.enum(["all", "internal", "external"]).optional().default("all"),
+    /** Whether to include image src URLs (default false) */
+    includeImages: z.boolean().optional().default(false),
+  }),
 };
 
 /** Max words sent to the AI to avoid context overflow (~6000 words ≈ ~8000 tokens). */
@@ -230,6 +240,7 @@ const AGENT_CARD = {
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
     { id: "summarize_url", name: "Summarize URL", description: "Fetch a web page, scrape its text, and return an AI-written summary. Pass an optional question to focus the summary on a specific aspect." },
+    { id: "extract_links", name: "Extract Links", description: "Fetch a web page and extract all hyperlinks as structured JSON ({text, href, type}). Resolves relative URLs to absolute. Filter by internal (same origin) or external links. Optional image src extraction. Useful for crawling, sitemap analysis, and link audits." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -406,6 +417,93 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
 
       return safeStringify({ url, title: scraped.title, wordCount: scraped.wordCount, summary }, 2);
     }
+
+    case "extract_links": {
+      let parsed: ReturnType<typeof WebSchemas.extract_links.parse>;
+      try {
+        parsed = WebSchemas.extract_links.parse({ url: args.url ?? text, ...args });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] extract_links: Zod parse error: ${err instanceof Error ? err.message : String(err)}\n`);
+        throw err;
+      }
+      const { url, maxLinks, filter, includeImages } = parsed;
+
+      const block = await blockPrivateUrl(url);
+      if (block) return block;
+
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          headers: { "Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
+        });
+      } catch (err) {
+        process.stderr.write(`[${NAME}] extract_links: fetch failed for ${url}: ${err}\n`);
+        return `extract_links: could not fetch ${url} — ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
+      const ct = res.headers.get("content-type") ?? "";
+      if (!ct.includes("text/html") && !ct.includes("application/xhtml")) {
+        return `extract_links expects HTML content (got ${ct}); use fetch_url for other content types`;
+      }
+
+      const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
+      if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
+      const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
+      if (html === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
+
+      // Determine base origin for internal/external classification
+      const baseOrigin = new URL(url).origin;
+
+      // Extract anchor hrefs from full HTML (no content-area isolation — we want all links)
+      const links: Array<{ text: string; href: string; type: "internal" | "external" }> = [];
+      const seen = new Set<string>();
+      const linkRe = /<a[^>]+href=["']([^"'#][^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
+      let lm: RegExpExecArray | null;
+      while ((lm = linkRe.exec(html)) !== null && links.length < maxLinks) {
+        const rawHref = (lm[1] ?? "").trim();
+        const linkText = decodeEntities((lm[2] ?? "").replace(/<[^>]+>/g, "").trim());
+        if (!rawHref) continue;
+        // Resolve to absolute URL; skip malformed hrefs silently
+        let resolved: string;
+        try { resolved = new URL(rawHref, url).href; } catch { continue; }
+        // Skip non-http(s) schemes (mailto:, tel:, javascript:, etc.)
+        if (!resolved.startsWith("http://") && !resolved.startsWith("https://")) continue;
+        if (seen.has(resolved)) continue;
+        seen.add(resolved);
+        const linkType: "internal" | "external" = new URL(resolved).origin === baseOrigin ? "internal" : "external";
+        if (filter !== "all" && linkType !== filter) continue;
+        links.push({ text: linkText.slice(0, 150) || "(no text)", href: resolved, type: linkType });
+      }
+
+      // Optionally extract image src URLs
+      const images: Array<{ alt: string; src: string }> = [];
+      if (includeImages) {
+        const imgRe = /<img[^>]+src=["']([^"']*)["'][^>]*>/gi;
+        let im: RegExpExecArray | null;
+        while ((im = imgRe.exec(html)) !== null && images.length < maxLinks) {
+          const rawSrc = (im[1] ?? "").trim();
+          if (!rawSrc) continue;
+          let resolved: string;
+          try { resolved = new URL(rawSrc, url).href; } catch { continue; }
+          if (!resolved.startsWith("http://") && !resolved.startsWith("https://")) continue;
+          const altMatch = im[0].match(/alt=["']([^"']*)["']/i);
+          const alt = altMatch?.[1] ? decodeEntities(altMatch[1]) : "";
+          images.push({ alt: alt.slice(0, 150), src: resolved });
+        }
+      }
+
+      const result: Record<string, unknown> = {
+        url,
+        linkCount: links.length,
+        filter,
+        links,
+      };
+      if (includeImages) result.images = images;
+      return safeStringify(result, 2);
+    }
+
     default:
       return `Unknown skill: ${skillId}`;
   }
