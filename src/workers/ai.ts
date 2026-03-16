@@ -418,31 +418,45 @@ ${safeText}
         return "Error: proofread returned an unexpected response — retry or check model availability";
       }
 
-      // Strip markdown fences if Claude wrapped despite instructions
-      const stripped = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+      // Extract JSON from fence block — handles prose preamble/postamble that ^/$ anchors miss
+      const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+      const jsonCandidate = (fenceMatch ? (fenceMatch[1] ?? raw) : raw).trim();
 
       // Parse and validate structure
       let parsed2: Record<string, unknown>;
       try {
-        parsed2 = JSON.parse(stripped);
+        parsed2 = JSON.parse(jsonCandidate);
       } catch (parseErr) {
         const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-        const preview = stripped.length > 300 ? stripped.slice(0, 300) + "…" : stripped;
+        const preview = jsonCandidate.length > 300 ? jsonCandidate.slice(0, 300) + "…" : jsonCandidate;
         process.stderr.write(`[${NAME}] proofread: Claude returned non-JSON output (${preview}): ${msg}\n`);
         return "Error: proofread: model did not return valid JSON — retry";
       }
 
       // Validate required fields: corrected must be a string, changes must be an array
       if (typeof parsed2.corrected !== "string") {
-        process.stderr.write(`[${NAME}] proofread: JSON missing corrected field: ${stripped.slice(0, 120)}\n`);
+        process.stderr.write(`[${NAME}] proofread: JSON missing corrected field: ${jsonCandidate.slice(0, 120)}\n`);
         return "Error: proofread: model response missing 'corrected' field — retry";
       }
       if (!Array.isArray(parsed2.changes)) {
-        process.stderr.write(`[${NAME}] proofread: JSON missing changes array: ${stripped.slice(0, 120)}\n`);
+        process.stderr.write(`[${NAME}] proofread: JSON missing changes array: ${jsonCandidate.slice(0, 120)}\n`);
         return "Error: proofread: model response missing 'changes' array — retry";
       }
 
-      return stripped;
+      // Normalize changeCount to actual array length — model-reported value may diverge
+      const actualChangeCount = (parsed2.changes as unknown[]).length;
+      const reportedCount = typeof parsed2.changeCount === "number" ? parsed2.changeCount : -1;
+      if (reportedCount !== actualChangeCount) {
+        process.stderr.write(`[${NAME}] proofread: changeCount mismatch — reported ${reportedCount}, actual ${actualChangeCount}; normalizing\n`);
+        parsed2.changeCount = actualChangeCount;
+      }
+
+      // Warn if corrected text differs from input but changes[] is empty (model inconsistency)
+      if (actualChangeCount === 0 && parsed2.corrected !== rawText) {
+        process.stderr.write(`[${NAME}] proofread: WARNING — corrected text differs from input but changes[] is empty (textLen=${rawText.length})\n`);
+      }
+
+      return JSON.stringify(parsed2);
     }
     default: {
       // Check dynamically loaded plugin skills
