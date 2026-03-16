@@ -376,8 +376,8 @@ ${safeText}
       }
 
       const safeText = sanitizeUserInput(rawText, "text_to_proofread", 20_000);
-      // language is a short constrained value (e.g. "English", "Spanish") — safe for inline use
-      const safeLanguage = sanitizeForPrompt(language, "language");
+      // sanitizeUserInput XML-escapes content — needed to prevent tag injection via language value
+      const safeLanguage = sanitizeUserInput(language, "language", 50);
 
       const depthGuide =
         style === "grammar-only"
