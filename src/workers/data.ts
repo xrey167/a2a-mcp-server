@@ -116,6 +116,26 @@ const DataSchemas = {
     /** Max records to analyse — avoids huge prompt (default 500) */
     maxRecords: z.number().int().positive().optional().default(500),
   }),
+
+  validate_schema: z.looseObject({
+    /** Array of records to validate */
+    data: z.unknown(),
+    /** Schema definition: object mapping field names to rules */
+    schema: z.record(z.string(), z.looseObject({
+      /** Expected type: "string", "number", "boolean", "array", "object", or "any" */
+      type: z.enum(["string", "number", "boolean", "array", "object", "any"]).optional().default("any"),
+      /** Whether this field is required (default false) */
+      required: z.boolean().optional().default(false),
+      /** Regex pattern the string value must match (strings only) */
+      pattern: z.string().optional(),
+      /** Minimum value (numbers) or minimum string length (strings) */
+      min: z.number().optional(),
+      /** Maximum value (numbers) or maximum string length (strings) */
+      max: z.number().optional(),
+    })),
+    /** Maximum number of row-level errors to include in output (default 100, max 1000) */
+    maxErrors: z.number().int().min(1).max(1000).optional().default(100),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -136,6 +156,7 @@ const AGENT_CARD = {
     { id: "visualize_data", name: "Visualize Data", description: "Generate a Vega-Lite JSON chart specification from a dataset or analyze_data/pivot_table output. Claude picks the best chart type or you can specify bar/line/scatter/area/pie/histogram/heatmap." },
     { id: "data_brief", name: "Data Brief", description: "AI-generated narrative analysis of a dataset: runs statistical analysis then calls ask_claude to produce a plain-language summary of patterns, outliers, and insights. Accepts an optional question to focus the analysis." },
     { id: "export_csv", name: "Export CSV", description: "Serialise an array of objects to CSV text. Optional fields param controls column selection and order. Completes the ETL loop: fetch_dataset/parse_csv → transform_data → export_csv." },
+    { id: "validate_schema", name: "Validate Schema", description: "Validate an array of records against a field schema. Checks required fields, types (string/number/boolean/array/object), regex patterns, and min/max bounds. Returns pass/fail with per-row errors and a summary. Useful for data quality gates in ETL pipelines." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -889,6 +910,115 @@ Requirements:
         rows.push(cols.map(c => escapeCell(row[c])).join(delimiter));
       }
       return rows.join("\n");
+    }
+
+    case "validate_schema": {
+      let parsed: ReturnType<typeof DataSchemas.validate_schema.parse>;
+      try {
+        parsed = DataSchemas.validate_schema.parse(args);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] validate_schema: Zod parse error: ${msg}\n`);
+        return `validate_schema: invalid arguments — ${msg}`;
+      }
+      const { data, schema, maxErrors } = parsed;
+
+      if (!Array.isArray(data)) {
+        process.stderr.write(`[${NAME}] validate_schema: data is not an array (got ${typeof data})\n`);
+        return "validate_schema: data must be an array of records";
+      }
+
+      const MAX_INPUT_ROWS = 50_000;
+      if (data.length > MAX_INPUT_ROWS) {
+        process.stderr.write(`[${NAME}] validate_schema: data too large (${data.length} rows, max ${MAX_INPUT_ROWS})\n`);
+        return `validate_schema: data exceeds ${MAX_INPUT_ROWS} rows — slice the dataset first`;
+      }
+
+      type RowError = { row: number; field: string; message: string };
+      const errors: RowError[] = [];
+      let errorsTruncated = false;
+
+      for (let i = 0; i < data.length; i++) {
+        if (errorsTruncated) break;
+        const row = data[i];
+        if (row === null || typeof row !== "object" || Array.isArray(row)) {
+          if (errors.length < maxErrors) {
+            errors.push({ row: i, field: "(row)", message: `expected an object, got ${Array.isArray(row) ? "array" : String(row === null ? "null" : typeof row)}` });
+          } else {
+            errorsTruncated = true;
+          }
+          continue;
+        }
+        const record = row as Record<string, unknown>;
+
+        for (const [field, rules] of Object.entries(schema)) {
+          if (errors.length >= maxErrors) { errorsTruncated = true; break; }
+
+          const value = record[field];
+          const absent = !(field in record) || value === undefined || value === null;
+
+          if (absent) {
+            if (rules.required) {
+              errors.push({ row: i, field, message: "required field is missing or null" });
+            }
+            continue; // remaining checks don't apply to absent values
+          }
+
+          // Type check
+          const actualType = Array.isArray(value) ? "array" : typeof value;
+          if (rules.type !== "any" && actualType !== rules.type) {
+            errors.push({ row: i, field, message: `expected type "${rules.type}", got "${actualType}"` });
+            continue; // skip further checks on wrong type
+          }
+
+          // Numeric bounds
+          if (rules.type === "number" && typeof value === "number") {
+            if (rules.min !== undefined && value < rules.min) {
+              errors.push({ row: i, field, message: `value ${value} is below minimum ${rules.min}` });
+            }
+            if (rules.max !== undefined && value > rules.max) {
+              errors.push({ row: i, field, message: `value ${value} exceeds maximum ${rules.max}` });
+            }
+          }
+
+          // String pattern + length bounds
+          if (rules.type === "string" && typeof value === "string") {
+            if (rules.min !== undefined && value.length < rules.min) {
+              errors.push({ row: i, field, message: `string length ${value.length} is below minimum ${rules.min}` });
+            }
+            if (rules.max !== undefined && value.length > rules.max) {
+              errors.push({ row: i, field, message: `string length ${value.length} exceeds maximum ${rules.max}` });
+            }
+            if (rules.pattern) {
+              let regex: RegExp;
+              try {
+                regex = new RegExp(rules.pattern);
+              } catch {
+                // Pattern compilation failure is a schema authoring error — skip check, log once
+                process.stderr.write(`[${NAME}] validate_schema: invalid regex pattern for field "${field}": ${rules.pattern}\n`);
+                continue;
+              }
+              if (!regex.test(value)) {
+                errors.push({ row: i, field, message: `value "${value.length > 50 ? value.slice(0, 50) + "…" : value}" does not match pattern ${rules.pattern}` });
+              }
+            }
+          }
+        }
+      }
+
+      const valid = errors.length === 0;
+      if (!valid) {
+        process.stderr.write(`[${NAME}] validate_schema: ${errors.length} error(s) in ${data.length} rows (truncated=${errorsTruncated})\n`);
+      }
+
+      return safeStringify({
+        valid,
+        rowCount: data.length,
+        errorCount: errors.length + (errorsTruncated ? 1 : 0), // +1 signals truncation happened
+        errorsTruncated: errorsTruncated ? true : undefined,
+        schemaFields: Object.keys(schema),
+        errors,
+      }, 2);
     }
 
     default:
