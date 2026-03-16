@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { spawnSync, spawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, lstatSync } from "fs";
+import { resolve } from "path";
 import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
@@ -65,14 +66,16 @@ const AGENT_CARD = {
 const SHELL_BRIEF_CHAR_LIMIT = 30_000;
 
 /** Convert a glob pattern to a predicate function.
- *  Supports: * (non-slash wildcard), ** (any wildcard), ? (single non-slash char), literals. */
+ *  Supports: * (non-slash wildcard), double-star-slash (optional dir prefix), double-star (any), ? (single char), literals.
+ *  Throws SyntaxError if the resulting regex is invalid — callers must try-catch. */
 function globToMatcher(pattern: string): (name: string) => boolean {
   const regexStr = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&") // escape regex specials (not * or ?)
     .replace(/\*\*/g, "\x00")             // temporarily mark ** to avoid collision
     .replace(/\*/g, "[^/]*")              // * → any non-slash sequence
     .replace(/\?/g, "[^/]")              // ? → any single non-slash char
-    .replace(/\x00/g, ".*");              // ** → any sequence including /
+    .replace(/\x00\//g, "(.*/)?")         // **/ → optional directory prefix (matches root-level too)
+    .replace(/\x00/g, ".*");              // remaining ** → any sequence including /
   const regex = new RegExp(`^${regexStr}$`);
   return (name: string) => regex.test(name);
 }
@@ -213,7 +216,9 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
 
       let safeRoot: string;
       try {
-        safeRoot = sanitizePath(rootPath);
+        // Resolve to absolute so relative paths (e.g. "src") work consistently and
+        // relPath computation below is correct regardless of CWD at call time
+        safeRoot = resolve(sanitizePath(rootPath));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[${NAME}] find_files: rejected unsafe path "${rootPath}": ${msg}\n`);
@@ -235,7 +240,15 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
         return `find_files: ${safeRoot} is not a directory`;
       }
 
-      const matchesPattern = globToMatcher(pattern);
+      // Validate and compile glob pattern — wrap in try-catch in case regex compilation fails
+      let matchesPattern: (name: string) => boolean;
+      try {
+        matchesPattern = globToMatcher(pattern);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] find_files: invalid glob pattern "${pattern}": ${msg}\n`);
+        return `find_files: invalid glob pattern — ${msg}`;
+      }
       // Match against relative path (from root) if pattern contains "/", otherwise basename only
       const matchByRelPath = pattern.includes("/");
 
@@ -243,6 +256,8 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
       const results: FileEntry[] = [];
       let truncated = false;
       let scanned = 0;
+      let skippedCount = 0;
+      let skippedDirs = 0;
 
       function walk(dir: string, depth: number): void {
         if (truncated) return;
@@ -252,25 +267,31 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
         try {
           entries = readdirSync(dir);
         } catch (err) {
-          process.stderr.write(`[${NAME}] find_files: readdirSync failed for ${dir}: ${err instanceof Error ? err.message : err}\n`);
+          const code = (err as NodeJS.ErrnoException).code ?? "UNKNOWN";
+          process.stderr.write(`[${NAME}] find_files: readdirSync failed for ${dir} (${code}): ${err instanceof Error ? err.message : String(err)}\n`);
+          skippedDirs++;
           return;
         }
 
         for (const name of entries) {
           if (truncated) break;
           const fullPath = `${dir}/${name}`;
-          scanned++;
 
           let st: ReturnType<typeof lstatSync>;
           try {
             st = lstatSync(fullPath); // lstatSync: does NOT follow symlinks
-          } catch {
-            continue; // skip inaccessible entries
+          } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code ?? "UNKNOWN";
+            process.stderr.write(`[${NAME}] find_files: lstatSync skipped "${fullPath}" (${code}): ${err instanceof Error ? err.message : String(err)}\n`);
+            skippedCount++;
+            continue;
           }
+          scanned++; // count only successfully stat'd entries
 
           // Skip symlinks to prevent infinite loops and out-of-scope traversal
           if (st.isSymbolicLink()) {
             process.stderr.write(`[${NAME}] find_files: skipping symlink: ${fullPath}\n`);
+            skippedCount++;
             continue;
           }
 
@@ -312,15 +333,24 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
       walk(safeRoot, 1);
       results.sort((a, b) => a.path.localeCompare(b.path));
 
-      return safeStringify({
+      const payload: Record<string, unknown> = {
         root: safeRoot,
         pattern,
         typeFilter,
         resultCount: results.length,
         scanned,
         truncated: truncated ? true : undefined,
+        skippedCount: skippedCount > 0 ? skippedCount : undefined,
+        skippedDirs: skippedDirs > 0 ? skippedDirs : undefined,
         results,
-      }, 2);
+      };
+      try {
+        return safeStringify(payload, 2);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] find_files: safeStringify failed: ${msg}\n`);
+        return `find_files: result serialization failed — ${msg}. Try reducing maxResults or maxDepth.`;
+      }
     }
     default:
       return `Unknown skill: ${skillId}`;
