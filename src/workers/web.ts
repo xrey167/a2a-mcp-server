@@ -31,6 +31,14 @@ const WebSchemas = {
     /** Optional question to steer the AI summary (e.g. "What are the key risks?") */
     question: z.string().optional(),
   }),
+  check_url: z.looseObject({
+    /** URL to check */
+    url: z.string().url(),
+    /** Follow redirects and return the chain (default true) */
+    followRedirects: z.boolean().optional().default(true),
+    /** Timeout in ms (default 10000, max 30000) */
+    timeoutMs: z.number().int().min(500).max(30_000).optional().default(10_000),
+  }),
 };
 
 /** Max words sent to the AI to avoid context overflow (~6000 words ≈ ~8000 tokens). */
@@ -230,6 +238,7 @@ const AGENT_CARD = {
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
     { id: "summarize_url", name: "Summarize URL", description: "Fetch a web page, scrape its text, and return an AI-written summary. Pass an optional question to focus the summary on a specific aspect." },
+    { id: "check_url", name: "Check URL", description: "Check if a URL is reachable using a HEAD request. Returns status code, response time (ms), content-type, and redirect chain. Useful for link validation and health checks. Does not download the response body." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -405,6 +414,157 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       }
 
       return safeStringify({ url, title: scraped.title, wordCount: scraped.wordCount, summary }, 2);
+    }
+    case "check_url": {
+      let parsed: ReturnType<typeof WebSchemas.check_url.parse>;
+      try {
+        parsed = WebSchemas.check_url.parse({ url: args.url ?? text, ...args });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] check_url: Zod parse error: ${msg}\n`);
+        return `check_url: invalid arguments — ${msg}`;
+      }
+      const { url, followRedirects, timeoutMs } = parsed;
+
+      // SSRF guard — same protection as all other URL-fetching skills
+      const blockReason = await blockPrivateUrl(url);
+      if (blockReason) {
+        process.stderr.write(`[${NAME}] check_url: SSRF blocked: ${url} — ${blockReason}\n`);
+        return `check_url: ${blockReason}`;
+      }
+
+      if (!checkRateLimit()) {
+        process.stderr.write(`[${NAME}] check_url: rate limit hit for ${url}\n`);
+        return "check_url: rate limit exceeded — try again in a minute";
+      }
+
+      const redirectChain: Array<{ url: string; status: number }> = [];
+      let currentUrl = url;
+      const startMs = Date.now();
+      const MAX_REDIRECTS = 10;
+
+      try {
+        // Follow redirects manually to capture the chain
+        while (true) {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+          let res: Response;
+          try {
+            res = await fetch(currentUrl, {
+              method: "HEAD",
+              redirect: "manual",  // handle redirects ourselves to track the chain
+              signal: controller.signal,
+              headers: { "User-Agent": "Mozilla/5.0 (compatible; a2a-mcp-bridge/1.0)" },
+            });
+          } catch (fetchErr) {
+            clearTimeout(timer);
+            const isAbort = fetchErr instanceof Error && fetchErr.name === "AbortError";
+            const cause = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+            if (isAbort) {
+              process.stderr.write(`[${NAME}] check_url: HEAD timed out after ${timeoutMs}ms for ${currentUrl}\n`);
+              return safeStringify({ url, reachable: false, error: `timed out after ${timeoutMs}ms`, responseTimeMs: Date.now() - startMs, redirectChain }, 2);
+            }
+            process.stderr.write(`[${NAME}] check_url: network error for ${currentUrl}: ${cause}\n`);
+            return safeStringify({ url, reachable: false, error: cause, responseTimeMs: Date.now() - startMs, redirectChain }, 2);
+          }
+          clearTimeout(timer);
+
+          const status = res.status;
+          const isRedirect = status >= 300 && status < 400;
+
+          if (isRedirect && followRedirects) {
+            const location = res.headers.get("location");
+            redirectChain.push({ url: currentUrl, status });
+
+            if (!location) {
+              // Redirect with no Location header — can't follow
+              process.stderr.write(`[${NAME}] check_url: redirect ${status} with no Location header at ${currentUrl}\n`);
+              return safeStringify({
+                url,
+                finalUrl: currentUrl,
+                reachable: false,
+                statusCode: status,
+                error: `redirect ${status} returned no Location header`,
+                responseTimeMs: Date.now() - startMs,
+                redirectChain,
+              }, 2);
+            }
+
+            if (redirectChain.length >= MAX_REDIRECTS) {
+              process.stderr.write(`[${NAME}] check_url: redirect loop or excessive redirects (>${MAX_REDIRECTS}) for ${url}\n`);
+              return safeStringify({
+                url,
+                finalUrl: currentUrl,
+                reachable: false,
+                statusCode: status,
+                error: `too many redirects (>${MAX_REDIRECTS})`,
+                responseTimeMs: Date.now() - startMs,
+                redirectChain,
+              }, 2);
+            }
+
+            // Resolve relative redirect URLs
+            let nextUrl: string;
+            try {
+              nextUrl = new URL(location, currentUrl).href;
+            } catch {
+              process.stderr.write(`[${NAME}] check_url: malformed Location header "${location}" at ${currentUrl}\n`);
+              return safeStringify({
+                url,
+                finalUrl: currentUrl,
+                reachable: false,
+                statusCode: status,
+                error: `malformed Location header: ${location}`,
+                responseTimeMs: Date.now() - startMs,
+                redirectChain,
+              }, 2);
+            }
+
+            // SSRF guard on redirect target
+            const redirectBlock = await blockPrivateUrl(nextUrl);
+            if (redirectBlock) {
+              process.stderr.write(`[${NAME}] check_url: SSRF blocked redirect target: ${nextUrl} — ${redirectBlock}\n`);
+              return safeStringify({
+                url,
+                finalUrl: currentUrl,
+                reachable: false,
+                error: `redirect target blocked: ${redirectBlock}`,
+                responseTimeMs: Date.now() - startMs,
+                redirectChain,
+              }, 2);
+            }
+
+            currentUrl = nextUrl;
+            continue;
+          }
+
+          // Final response (non-redirect, or followRedirects=false)
+          const contentType = res.headers.get("content-type") ?? undefined;
+          const responseTimeMs = Date.now() - startMs;
+          const reachable = status < 400;
+
+          if (!reachable) {
+            process.stderr.write(`[${NAME}] check_url: ${url} returned ${status} (finalUrl=${currentUrl})\n`);
+          }
+
+          return safeStringify({
+            url,
+            finalUrl: currentUrl !== url ? currentUrl : undefined,
+            reachable,
+            statusCode: status,
+            contentType,
+            responseTimeMs,
+            redirectCount: redirectChain.length > 0 ? redirectChain.length : undefined,
+            redirectChain: redirectChain.length > 0 ? redirectChain : undefined,
+          }, 2);
+        }
+      } catch (err) {
+        // Unexpected error outside the fetch loop
+        const cause = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] check_url: unexpected error for ${url}: ${cause}\n`);
+        return safeStringify({ url, reachable: false, error: cause, responseTimeMs: Date.now() - startMs, redirectChain }, 2);
+      }
     }
     default:
       return `Unknown skill: ${skillId}`;
