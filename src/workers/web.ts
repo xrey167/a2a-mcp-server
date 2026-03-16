@@ -264,29 +264,73 @@ type ExtractedTable = {
 };
 
 /**
- * Extract all HTML tables from a page into structured JSON.
- * Strips nested tables before row extraction to avoid regex boundary issues.
- * Tables without <th> headers use col_0, col_1, ... as field names.
+ * Remove all <table>...</table> blocks from HTML at any nesting depth.
+ * Uses depth counting instead of regex to handle arbitrary nesting.
  */
+function removeNestedTables(html: string): string {
+  let result = "";
+  let depth = 0;
+  let lastEnd = 0;
+  const tagRe = /<(\/?)table(\s[^>]*)?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(html)) !== null) {
+    const isClose = m[1] === "/";
+    if (!isClose) {
+      if (depth === 0) result += html.slice(lastEnd, m.index);
+      depth++;
+    } else {
+      if (depth > 0) depth--;
+      if (depth === 0) lastEnd = m.index + m[0].length;
+    }
+  }
+  result += html.slice(lastEnd);
+  return result;
+}
+
+/**
+ * Find outermost <table>...</table> blocks by counting nesting depth.
+ * Regex alternatives are unsafe: greedy [\s\S]* spans multiple sibling tables,
+ * non-greedy [\s\S]*? truncates at the first inner </table>.
+ */
+function findOuterTables(html: string): string[] {
+  const tables: string[] = [];
+  let depth = 0;
+  let start = -1;
+  // Match opening and closing table tags (self-closing <table /> is not valid HTML but handled by depth=0 guard)
+  const tagRe = /<(\/?)table(\s[^>]*)?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(html)) !== null) {
+    const isClose = m[1] === "/";
+    if (!isClose) {
+      if (depth === 0) start = m.index;
+      depth++;
+    } else {
+      if (depth > 0) depth--;
+      if (depth === 0 && start >= 0) {
+        const end = m.index + m[0].length;
+        tables.push(html.slice(start, end));
+        start = -1;
+      }
+    }
+  }
+  return tables;
+}
+
 function extractHtmlTables(html: string, maxTables: number, maxRowsPerTable: number): ExtractedTable[] {
   const results: ExtractedTable[] = [];
-  // Greedy match to the LAST </table> so nested tables don't truncate the outer match.
-  // This intentionally uses [\s\S]* (greedy) to find each outermost <table>...</table>.
-  // Because greedy [\s\S]* backtracks to the last </table>, it correctly captures the whole
-  // outer table. Each match is then processed independently.
-  const tableRe = /<table(\s[^>]*)?>[\s\S]*<\/table>/gi;
-  let tm: RegExpExecArray | null;
+  const outerTables = findOuterTables(html);
   let idx = 0;
 
-  while ((tm = tableRe.exec(html)) !== null && results.length < maxTables) {
+  for (const outerHtml of outerTables) {
+    if (results.length >= maxTables) break;
     idx++;
-    // Strip nested tables from the INNER content only.
-    // tm[0] starts with <table...> and ends with </table>.
-    // Slicing off the outer open/close tags before stripping prevents the nested-strip
-    // regex from matching and deleting the outer table's own body.
-    const outerOpenEnd = tm[0].indexOf(">") + 1;
-    const innerContent = tm[0].slice(outerOpenEnd, tm[0].lastIndexOf("</table>"));
-    const cleanedInner = innerContent.replace(/<table(\s[^>]*)?>[\s\S]*?<\/table>/gi, "");
+    // Strip all nested tables from the inner content so only the outermost table's
+    // direct rows are parsed. Use depth-based stripping via the same findOuterTables
+    // approach rather than regex to handle arbitrary nesting depth.
+    const outerOpenEnd = outerHtml.indexOf(">") + 1;
+    const innerContent = outerHtml.slice(outerOpenEnd, outerHtml.lastIndexOf("</table>"));
+    // Remove any nested <table>...</table> blocks (at any depth) from the inner content
+    const cleanedInner = removeNestedTables(innerContent);
     const tableHtml = `<table>${cleanedInner}</table>`;
 
     // Optional caption
