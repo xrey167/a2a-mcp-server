@@ -433,11 +433,6 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         return `check_url: ${blockReason}`;
       }
 
-      if (!checkRateLimit()) {
-        process.stderr.write(`[${NAME}] check_url: rate limit hit for ${url}\n`);
-        return "check_url: rate limit exceeded — try again in a minute";
-      }
-
       const redirectChain: Array<{ url: string; status: number }> = [];
       let currentUrl = url;
       const startMs = Date.now();
@@ -446,11 +441,18 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       try {
         // Follow redirects manually to capture the chain
         while (true) {
+          // Consume one rate limit token per HTTP request — redirect chains count individually
+          if (!checkRateLimit()) {
+            process.stderr.write(`[${NAME}] check_url: rate limit hit for ${currentUrl}\n`);
+            return safeStringify({ url, reachable: false, error: "rate limit exceeded — try again in a minute", responseTimeMs: Date.now() - startMs, redirectChain }, 2);
+          }
+
           const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), timeoutMs);
+          let timer: ReturnType<typeof setTimeout> | undefined;
 
           let res: Response;
           try {
+            timer = setTimeout(() => controller.abort(), timeoutMs);
             res = await fetch(currentUrl, {
               method: "HEAD",
               redirect: "manual",  // handle redirects ourselves to track the chain
@@ -458,7 +460,6 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
               headers: { "User-Agent": "Mozilla/5.0 (compatible; a2a-mcp-bridge/1.0)" },
             });
           } catch (fetchErr) {
-            clearTimeout(timer);
             const isAbort = fetchErr instanceof Error && fetchErr.name === "AbortError";
             const cause = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
             if (isAbort) {
@@ -467,8 +468,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
             }
             process.stderr.write(`[${NAME}] check_url: network error for ${currentUrl}: ${cause}\n`);
             return safeStringify({ url, reachable: false, error: cause, responseTimeMs: Date.now() - startMs, redirectChain }, 2);
+          } finally {
+            clearTimeout(timer);  // always runs — prevents timer leak even on early return
           }
-          clearTimeout(timer);
 
           const status = res.status;
           const isRedirect = status >= 300 && status < 400;
@@ -561,9 +563,13 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         }
       } catch (err) {
         // Unexpected error outside the fetch loop
-        const cause = err instanceof Error ? err.message : String(err);
+        const cause = err instanceof Error ? err.message : (typeof err === "string" ? err : JSON.stringify(err));
         process.stderr.write(`[${NAME}] check_url: unexpected error for ${url}: ${cause}\n`);
-        return safeStringify({ url, reachable: false, error: cause, responseTimeMs: Date.now() - startMs, redirectChain }, 2);
+        try {
+          return safeStringify({ url, reachable: false, error: cause, responseTimeMs: Date.now() - startMs, redirectChain }, 2);
+        } catch {
+          return `check_url: unexpected error — ${cause}`;
+        }
       }
     }
     default:
