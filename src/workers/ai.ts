@@ -592,13 +592,22 @@ ${safeQuestion}`;
         return "Error: generate_sql: model response missing 'sql' field — retry";
       }
 
-      // Safety: reject write operations when readOnly is enabled
+      // Safety: reject write operations when readOnly is enabled.
+      // Strip SQL comments first (prevents "-- DROP TABLE" and /* */ bypasses).
+      // Scan full SQL string (not just start) to catch multi-statement and CTE bypasses.
+      // Use (?=\s|$|\() instead of \b — \b is broken in some Bun versions (interpreted as backspace).
       if (readOnly) {
-        const writeOpRe = /^\s*(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|REPLACE|MERGE|CALL|EXEC)\b/i;
-        if (writeOpRe.test(parsed2.sql)) {
-          const op = (parsed2.sql.trim().split(/\s+/)[0] ?? "").toUpperCase();
+        const sqlNoComments = (parsed2.sql as string)
+          .replace(/--[^\n]*/g, "")
+          .replace(/\/\*[\s\S]*?\*\//g, "");
+        const WRITE_OPS = ["INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER", "CREATE", "REPLACE", "MERGE", "CALL"];
+        const writeOpPattern = WRITE_OPS.join("|");
+        const writeOpRe = new RegExp(`(?:^|;\\s*)(${writeOpPattern})(?=\\s|$|\\()`, "im");
+        const writeMatch = writeOpRe.exec(sqlNoComments);
+        if (writeMatch) {
+          const op = (writeMatch[1] ?? "WRITE").toUpperCase();
           process.stderr.write(`[${NAME}] generate_sql: rejecting write operation "${op}" in readOnly mode\n`);
-          return `generate_sql: generated query starts with a write operation (${op}) but readOnly=true — set readOnly: false to allow write queries`;
+          return `generate_sql: generated query contains a write operation (${op}) but readOnly=true — set readOnly: false to allow write queries`;
         }
       }
 
