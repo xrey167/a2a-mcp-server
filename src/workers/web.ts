@@ -34,7 +34,7 @@ const WebSchemas = {
   extract_links: z.looseObject({
     /** URL to fetch and extract links from */
     url: z.string().url(),
-    /** Maximum number of links to return (default 100, max 500) */
+    /** Maximum number of links to return after filtering (default 100, max 500). Also caps image results when includeImages is true. */
     maxLinks: z.number().int().min(1).max(500).optional().default(100),
     /** Filter: "all" returns every link, "internal" returns same-origin only, "external" returns cross-origin only */
     filter: z.enum(["all", "internal", "external"]).optional().default("all"),
@@ -240,7 +240,7 @@ const AGENT_CARD = {
     { id: "scrape_page", name: "Scrape Page", description: "Fetch a web page and extract clean readable text, title, description, and links. Strips HTML, scripts, nav, and boilerplate. Output ready for ask_claude." },
     { id: "search_web", name: "Search Web", description: "Search the web using DuckDuckGo and return structured results (title, url, snippet) for a query. No API key required." },
     { id: "summarize_url", name: "Summarize URL", description: "Fetch a web page, scrape its text, and return an AI-written summary. Pass an optional question to focus the summary on a specific aspect." },
-    { id: "extract_links", name: "Extract Links", description: "Fetch a web page and extract all hyperlinks as structured JSON ({text, href, type}). Resolves relative URLs to absolute. Filter by internal (same origin) or external links. Optional image src extraction. Useful for crawling, sitemap analysis, and link audits." },
+    { id: "extract_links", name: "Extract Links", description: "Fetch a web page and extract hyperlinks (excluding same-page fragment anchors) as structured JSON ({text, href, type}). Resolves relative URLs to absolute. Filter by internal (same origin) or external links. Optional image src extraction. Useful for crawling, sitemap analysis, and link audits." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
