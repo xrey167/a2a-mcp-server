@@ -563,7 +563,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         }
       } catch (err) {
         // Unexpected error outside the fetch loop
-        const cause = err instanceof Error ? err.message : (typeof err === "string" ? err : JSON.stringify(err));
+        const cause = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[${NAME}] check_url: unexpected error for ${url}: ${cause}\n`);
         try {
           return safeStringify({ url, reachable: false, error: cause, responseTimeMs: Date.now() - startMs, redirectChain }, 2);
