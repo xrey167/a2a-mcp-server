@@ -136,6 +136,42 @@ const DataSchemas = {
     /** Maximum number of row-level errors to include in output (default 100, max 1000) */
     maxErrors: z.number().int().min(1).max(1000).optional().default(100),
   }),
+
+  normalize_data: z.looseObject({
+    /** Array of records to normalize */
+    data: z.unknown(),
+    /** Per-field normalization rules */
+    rules: z.record(z.string(), z.looseObject({
+      /**
+       * Coerce the field value to this type:
+       *   "number"  — parse numeric strings (e.g. "3.14" → 3.14); non-parseable values become null
+       *   "string"  — stringify the value
+       *   "boolean" — coerce truthy strings ("true","yes","1") → true, falsy → false
+       */
+      coerce: z.enum(["number", "string", "boolean"]).optional(),
+      /** Trim leading/trailing whitespace from string values (default false) */
+      trim: z.boolean().optional().default(false),
+      /**
+       * Fill null/undefined/empty-string values with this default.
+       * Applied after coerce and trim.
+       */
+      defaultValue: z.unknown().optional(),
+      /**
+       * Replace a matching substring or regex pattern within string values.
+       * Applied after trim.  Pattern is a JavaScript regex string (no flags).
+       */
+      replace: z.object({
+        /** Regex pattern string (e.g. "\\s+" or "^0+") */
+        pattern: z.string().min(1),
+        /** Replacement string (default "") */
+        replacement: z.string().optional().default(""),
+        /** Replace all occurrences (default false — replace first only) */
+        all: z.boolean().optional().default(false),
+      }).optional(),
+    })),
+    /** Maximum input rows (default 50 000, max 200 000) */
+    maxRows: z.number().int().min(1).max(200_000).optional().default(50_000),
+  }),
 };
 
 // ── Agent Card ───────────────────────────────────────────────────
@@ -157,6 +193,7 @@ const AGENT_CARD = {
     { id: "data_brief", name: "Data Brief", description: "AI-generated narrative analysis of a dataset: runs statistical analysis then calls ask_claude to produce a plain-language summary of patterns, outliers, and insights. Accepts an optional question to focus the analysis." },
     { id: "export_csv", name: "Export CSV", description: "Serialise an array of objects to CSV text. Optional fields param controls column selection and order. Completes the ETL loop: fetch_dataset/parse_csv → transform_data → export_csv." },
     { id: "validate_schema", name: "Validate Schema", description: "Validate an array of records against a field schema. Checks required fields, types (string/number/boolean/array/object), regex patterns, and min/max bounds. Returns pass/fail with per-row errors and a summary. Useful for data quality gates in ETL pipelines." },
+    { id: "normalize_data", name: "Normalize Data", description: "Normalize fields in an array of records: coerce types (string→number/boolean), trim whitespace, apply regex replacements, and fill null/missing values with defaults. Returns the normalized records plus a per-field change summary. Useful as a pre-processing step before validate_schema or analyze_data." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -1025,6 +1062,137 @@ Requirements:
         schemaFields: Object.keys(schema),
         errors,
       }, 2);
+    }
+
+    case "normalize_data": {
+      let parsed: ReturnType<typeof DataSchemas.normalize_data.parse>;
+      try {
+        parsed = DataSchemas.normalize_data.parse(args);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] normalize_data: Zod parse error: ${msg}\n`);
+        return `normalize_data: invalid arguments — ${msg}`;
+      }
+      const { data, rules, maxRows } = parsed;
+
+      if (!Array.isArray(data)) {
+        process.stderr.write(`[${NAME}] normalize_data: data is not an array (got ${typeof data})\n`);
+        return "normalize_data: data must be an array of records";
+      }
+
+      if (data.length > maxRows) {
+        process.stderr.write(`[${NAME}] normalize_data: data too large (${data.length} rows, max ${maxRows})\n`);
+        return `normalize_data: data exceeds ${maxRows} rows — slice the dataset first`;
+      }
+
+      // Pre-compile replace patterns once — avoids O(n*m) recompilation in the row loop
+      const compiledReplace = new Map<string, RegExp>();
+      for (const [field, rule] of Object.entries(rules)) {
+        if (rule.replace?.pattern) {
+          try {
+            const flags = rule.replace.all ? "g" : "";
+            compiledReplace.set(field, new RegExp(rule.replace.pattern, flags));
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`[${NAME}] normalize_data: invalid replace pattern for field "${field}": ${msg}\n`);
+            return `normalize_data: invalid regex pattern for field "${field}" — ${msg}`;
+          }
+        }
+      }
+
+      // Per-field change counters for the summary
+      const changeCounts: Record<string, number> = {};
+      for (const field of Object.keys(rules)) {
+        changeCounts[field] = 0;
+      }
+
+      /** Normalize a single field value according to its rule. Returns [normalizedValue, changed]. */
+      function normalizeValue(value: unknown, field: string): [unknown, boolean] {
+        const rule = rules[field];
+        if (!rule) return [value, false];
+
+        let v: unknown = value;
+        let changed = false;
+
+        // 1. Coerce type
+        if (rule.coerce !== undefined && v !== null && v !== undefined) {
+          const original = v;
+          if (rule.coerce === "number") {
+            const n = typeof v === "number" ? v : Number(String(v).trim());
+            v = Number.isFinite(n) ? n : null;
+          } else if (rule.coerce === "string") {
+            v = String(v);
+          } else if (rule.coerce === "boolean") {
+            if (typeof v !== "boolean") {
+              const s = String(v).trim().toLowerCase();
+              v = s === "true" || s === "yes" || s === "1" || s === "on";
+            }
+          }
+          if (v !== original) changed = true;
+        }
+
+        // 2. Trim whitespace (strings only)
+        if (rule.trim && typeof v === "string") {
+          const trimmed = v.trim();
+          if (trimmed !== v) { v = trimmed; changed = true; }
+        }
+
+        // 3. Apply regex replacement (strings only)
+        const replaceRe = compiledReplace.get(field);
+        if (replaceRe && typeof v === "string") {
+          const replacement = rule.replace?.replacement ?? "";
+          const replaced = v.replace(replaceRe, replacement);
+          if (replaced !== v) { v = replaced; changed = true; }
+        }
+
+        // 4. Fill default for null/undefined/empty-string
+        if (rule.defaultValue !== undefined) {
+          const isEmpty = v === null || v === undefined || v === "";
+          if (isEmpty) { v = rule.defaultValue; changed = true; }
+        }
+
+        return [v, changed];
+      }
+
+      const normalizedData: unknown[] = [];
+      for (const row of data) {
+        if (row === null || typeof row !== "object" || Array.isArray(row)) {
+          // Pass non-object rows through unchanged
+          normalizedData.push(row);
+          continue;
+        }
+        const record = row as Record<string, unknown>;
+        const normalizedRow: Record<string, unknown> = { ...record };
+
+        for (const field of Object.keys(rules)) {
+          const [newVal, changed] = normalizeValue(record[field], field);
+          normalizedRow[field] = newVal;
+          if (changed) changeCounts[field] = (changeCounts[field] ?? 0) + 1;
+        }
+        normalizedData.push(normalizedRow);
+      }
+
+      // Build summary: only include fields that had at least one change
+      const summary: Record<string, number> = {};
+      for (const [field, count] of Object.entries(changeCounts)) {
+        if (count > 0) summary[field] = count;
+      }
+      const totalChanges = Object.values(changeCounts).reduce((a, b) => a + b, 0);
+
+      process.stderr.write(`[${NAME}] normalize_data: processed ${data.length} rows, ${totalChanges} field value(s) changed\n`);
+
+      try {
+        return safeStringify({
+          rowCount: data.length,
+          totalChanges,
+          ...(Object.keys(summary).length > 0 ? { changesByField: summary } : {}),
+          data: normalizedData,
+        }, 2);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] normalize_data: safeStringify failed: ${msg}\n`);
+        return `normalize_data: failed to serialize result — ${msg}`;
+      }
     }
 
     default:
