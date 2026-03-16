@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { spawnSync, spawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, lstatSync } from "fs";
 import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
 import { getPersona, watchPersonas } from "../persona-loader.js";
@@ -24,6 +24,18 @@ const ShellSchemas = {
     /** Timeout for the shell command in ms (default 15000, max 60000) */
     timeoutMs: z.number().int().positive().max(60_000).optional().default(15_000),
   }),
+  find_files: z.looseObject({
+    /** Directory to search (default: ".") */
+    path: z.string().optional().default("."),
+    /** Glob pattern to match filenames — e.g. "*.ts", "*.json", "src/**" (default: "*") */
+    pattern: z.string().optional().default("*"),
+    /** Filter by entry type: "file", "dir", or "all" (default: "file") */
+    type: z.enum(["file", "dir", "all"]).optional().default("file"),
+    /** Maximum recursion depth (default 5, max 20) */
+    maxDepth: z.number().int().min(1).max(20).optional().default(5),
+    /** Maximum number of results to return (default 200, max 1000) */
+    maxResults: z.number().int().min(1).max(1000).optional().default(200),
+  }),
 };
 
 const PORT = 8081;
@@ -42,6 +54,7 @@ const AGENT_CARD = {
 
     { id: "list_dir", name: "List Directory", description: "List files and subdirectories in a directory (non-recursive). Returns name and type (file/dir) for each entry." },
     { id: "shell_brief", name: "Shell Brief", description: "Execute a shell command and ask Claude to explain the output in plain language. Useful for interpreting git log, diff, ps, df, netstat, and other diagnostic commands." },
+    { id: "find_files", name: "Find Files", description: "Recursively search a directory for files or directories matching a glob pattern (e.g. '*.ts', 'src/**'). Returns structured JSON with path, type, sizeBytes, and modifiedAt. Skips symlinks to prevent loops. Supports depth and result-count limits." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -50,6 +63,19 @@ const AGENT_CARD = {
 /** Character limit for shell output sent to AI prompt — avoids token budget overrun.
  *  Char-based (not word-based) preserves column alignment in tabular output (ps, df, ls). */
 const SHELL_BRIEF_CHAR_LIMIT = 30_000;
+
+/** Convert a glob pattern to a predicate function.
+ *  Supports: * (non-slash wildcard), ** (any wildcard), ? (single non-slash char), literals. */
+function globToMatcher(pattern: string): (name: string) => boolean {
+  const regexStr = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&") // escape regex specials (not * or ?)
+    .replace(/\*\*/g, "\x00")             // temporarily mark ** to avoid collision
+    .replace(/\*/g, "[^/]*")              // * → any non-slash sequence
+    .replace(/\?/g, "[^/]")              // ? → any single non-slash char
+    .replace(/\x00/g, ".*");              // ** → any sequence including /
+  const regex = new RegExp(`^${regexStr}$`);
+  return (name: string) => regex.test(name);
+}
 
 async function handleSkill(skillId: string, args: Record<string, unknown>, text: string): Promise<string> {
   const memResult = handleMemorySkill(NAME, skillId, args);
@@ -85,7 +111,7 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
     }
 
     case "list_dir": {
-      const { path } = ShellSchemas.list_dir.parse({ path: args.path ?? text || ".", ...args });
+      const { path } = ShellSchemas.list_dir.parse({ path: (args.path ?? text) || ".", ...args });
       const safePath = sanitizePath(path);
       if (!existsSync(safePath)) return `Directory not found: ${safePath}`;
       const entries = readdirSync(safePath);
@@ -173,6 +199,128 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
       }
 
       return safeStringify({ command: safeCommand, exitCode, outputLines, dataQuality, brief }, 2);
+    }
+    case "find_files": {
+      let parsed: ReturnType<typeof ShellSchemas.find_files.parse>;
+      try {
+        parsed = ShellSchemas.find_files.parse({ path: (args.path ?? text) || ".", ...args });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] find_files: Zod parse error: ${msg}\n`);
+        return `find_files: invalid arguments — ${msg}`;
+      }
+      const { path: rootPath, pattern, type: typeFilter, maxDepth, maxResults } = parsed;
+
+      let safeRoot: string;
+      try {
+        safeRoot = sanitizePath(rootPath);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] find_files: rejected unsafe path "${rootPath}": ${msg}\n`);
+        return `find_files: unsafe path rejected — ${msg}`;
+      }
+
+      // Single statSync — TOCTOU-safe directory existence check
+      let rootStat: ReturnType<typeof statSync>;
+      try {
+        rootStat = statSync(safeRoot);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] find_files: cannot access root "${safeRoot}": ${msg}\n`);
+        return code === "ENOENT" ? `find_files: directory not found: ${safeRoot}` : `find_files: cannot access path — ${msg}`;
+      }
+      if (!rootStat.isDirectory()) {
+        process.stderr.write(`[${NAME}] find_files: root is not a directory: ${safeRoot}\n`);
+        return `find_files: ${safeRoot} is not a directory`;
+      }
+
+      const matchesPattern = globToMatcher(pattern);
+      // Match against relative path (from root) if pattern contains "/", otherwise basename only
+      const matchByRelPath = pattern.includes("/");
+
+      type FileEntry = { path: string; type: string; sizeBytes: number; modifiedAt: string };
+      const results: FileEntry[] = [];
+      let truncated = false;
+      let scanned = 0;
+
+      function walk(dir: string, depth: number): void {
+        if (truncated) return;
+        if (depth > maxDepth) return;
+
+        let entries: string[];
+        try {
+          entries = readdirSync(dir);
+        } catch (err) {
+          process.stderr.write(`[${NAME}] find_files: readdirSync failed for ${dir}: ${err instanceof Error ? err.message : err}\n`);
+          return;
+        }
+
+        for (const name of entries) {
+          if (truncated) break;
+          const fullPath = `${dir}/${name}`;
+          scanned++;
+
+          let st: ReturnType<typeof lstatSync>;
+          try {
+            st = lstatSync(fullPath); // lstatSync: does NOT follow symlinks
+          } catch {
+            continue; // skip inaccessible entries
+          }
+
+          // Skip symlinks to prevent infinite loops and out-of-scope traversal
+          if (st.isSymbolicLink()) {
+            process.stderr.write(`[${NAME}] find_files: skipping symlink: ${fullPath}\n`);
+            continue;
+          }
+
+          const isDir = st.isDirectory();
+          const isFile = st.isFile();
+          const entryType = isDir ? "dir" : "file";
+
+          const typeMatch =
+            typeFilter === "all" ||
+            (typeFilter === "file" && isFile) ||
+            (typeFilter === "dir" && isDir);
+
+          // Build the match target: relative path from root or basename
+          const relPath = fullPath.startsWith(safeRoot + "/")
+            ? fullPath.slice(safeRoot.length + 1)
+            : fullPath;
+          const matchTarget = matchByRelPath ? relPath : name;
+          const patternMatch = matchesPattern(matchTarget);
+
+          if (typeMatch && patternMatch) {
+            results.push({
+              path: fullPath,
+              type: entryType,
+              sizeBytes: isFile ? st.size : 0,
+              modifiedAt: st.mtime.toISOString(),
+            });
+            if (results.length >= maxResults) {
+              truncated = true;
+              break;
+            }
+          }
+
+          if (isDir) {
+            walk(fullPath, depth + 1);
+          }
+        }
+      }
+
+      walk(safeRoot, 1);
+      results.sort((a, b) => a.path.localeCompare(b.path));
+
+      return safeStringify({
+        root: safeRoot,
+        pattern,
+        typeFilter,
+        resultCount: results.length,
+        scanned,
+        truncated: truncated ? true : undefined,
+        results,
+      }, 2);
     }
     default:
       return `Unknown skill: ${skillId}`;
