@@ -409,7 +409,9 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
         return `tail_file: cannot resolve file path — ${msg}`;
       }
       if (realPath !== safePath) {
-        process.stderr.write(`[${NAME}] tail_file: symlink followed: ${safePath} -> ${realPath}\n`);
+        // Reject symlinks — the resolved target may escape any path boundary the caller intended
+        process.stderr.write(`[${NAME}] tail_file: symlink detected and rejected: ${safePath} -> ${realPath}\n`);
+        return `tail_file: ${safePath} is a symbolic link — provide the resolved path directly: ${realPath}`;
       }
       // Fix #2: size guard — reject files larger than 100 MB to avoid OOM
       const MAX_TAIL_BYTES = 100 * 1024 * 1024;
