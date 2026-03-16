@@ -370,9 +370,16 @@ BREAKING CHANGES:
     process.stderr.write(`[${NAME}] convert_code: AI response missing expected structure. Got: ${result.slice(0, 200)}\n`);
     throw new Error("convert_code: AI response did not follow the expected format — missing 'CONVERTED CODE:' section. Retry or check model behavior.");
   }
+  if (!result.includes("NOTES:")) {
+    process.stderr.write(`[${NAME}] convert_code: AI response missing NOTES: section. Got: ${result.slice(0, 200)}\n`);
+    throw new Error("convert_code: AI response did not follow the expected format — missing 'NOTES:' section. Retry or check model behavior.");
+  }
   // Guard against structurally-valid-but-empty CONVERTED CODE section.
-  // Split on line-anchored "\nNOTES:" so source comments like "# NOTES: see README"
-  // inside the converted code body don't prematurely truncate the section.
+  // Validate NOTES: is present (above) before using it as a boundary — without that
+  // check, split("NOTES:")[0] returns the whole tail including BREAKING CHANGES: which
+  // passes trim() even when no actual code was emitted.
+  // Split on line-anchored "\nNOTES:" so source comments mid-line ("# NOTES:") don't
+  // prematurely truncate the section.
   const codeSection = result.split("CONVERTED CODE:")[1]?.split(/\nNOTES:/)[0] ?? "";
   if (!codeSection.trim()) {
     process.stderr.write(`[${NAME}] convert_code: CONVERTED CODE section is empty. Full response: ${result.slice(0, 300)}\n`);
