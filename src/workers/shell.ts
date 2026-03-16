@@ -37,6 +37,12 @@ const ShellSchemas = {
     /** Maximum number of results to return (default 200, max 1000) */
     maxResults: z.number().int().min(1).max(1000).optional().default(200),
   }),
+  tail_file: z.looseObject({
+    /** Absolute or relative path to the file */
+    path: z.string().min(1),
+    /** Number of lines to return from the end of the file (default 100, max 10000) */
+    lines: z.number().int().min(1).max(10_000).optional().default(100),
+  }),
 };
 
 const PORT = 8081;
@@ -56,6 +62,7 @@ const AGENT_CARD = {
     { id: "list_dir", name: "List Directory", description: "List files and subdirectories in a directory (non-recursive). Returns name and type (file/dir) for each entry." },
     { id: "shell_brief", name: "Shell Brief", description: "Execute a shell command and ask Claude to explain the output in plain language. Useful for interpreting git log, diff, ps, df, netstat, and other diagnostic commands." },
     { id: "find_files", name: "Find Files", description: "Recursively search a directory for files or directories matching a glob pattern (e.g. '*.ts', 'src/**'). Returns structured JSON with path, type, sizeBytes, and modifiedAt. Skips symlinks to prevent loops. Supports depth and result-count limits." },
+    { id: "tail_file", name: "Tail File", description: "Read the last N lines of a text file (default 100, max 10 000). Ideal for inspecting log files and build output. Returns structured JSON with totalLines, returnedLines, and content." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -350,6 +357,95 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[${NAME}] find_files: safeStringify failed: ${msg}\n`);
         return `find_files: result serialization failed — ${msg}. Try reducing maxResults or maxDepth.`;
+      }
+    }
+    case "tail_file": {
+      let parsed: ReturnType<typeof ShellSchemas.tail_file.parse>;
+      try {
+        parsed = ShellSchemas.tail_file.parse({ path: args.path ?? text, ...args });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: Zod parse error: ${msg}\n`);
+        return `tail_file: invalid arguments — ${msg}`;
+      }
+      const { path, lines } = parsed;
+      // NEW-4: explicit guard before Zod (args may omit path when text is empty)
+      if (!path) {
+        process.stderr.write(`[${NAME}] tail_file: called with no path argument\n`);
+        return "tail_file: missing required argument — provide a file path";
+      }
+      // Fix #5: wrap sanitizePath to log traversal probes and return a clean string
+      let safePath: string;
+      try {
+        safePath = sanitizePath(path);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: rejected unsafe path "${path}": ${msg}\n`);
+        return `tail_file: unsafe path rejected — ${msg}`;
+      }
+      // lstatSync does NOT follow symlinks — isSymbolicLink() correctly identifies links
+      // statSync follows links so isFile() returns true for symlink→file, making symlink detection impossible
+      let stat: ReturnType<typeof lstatSync>;
+      try {
+        stat = lstatSync(safePath);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: lstatSync failed for ${safePath}: ${msg}\n`);
+        const isNotFound = err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
+        return isNotFound ? `File not found: ${safePath}` : `tail_file: cannot access file — ${msg}`;
+      }
+      // Reject symlinks — the resolved target may escape any path boundary the caller intended
+      if (stat.isSymbolicLink()) {
+        process.stderr.write(`[${NAME}] tail_file: symlink rejected: ${safePath}\n`);
+        return `tail_file: ${safePath} is a symbolic link — use run_shell with "readlink -f ${safePath}" to find the real path`;
+      }
+      // Reject directories, device files, FIFOs, sockets
+      if (!stat.isFile()) {
+        const kind = stat.isDirectory() ? "directory" : stat.isBlockDevice() || stat.isCharacterDevice() ? "device file" : "non-regular file";
+        process.stderr.write(`[${NAME}] tail_file: path is a ${kind}, not a regular file: ${safePath}\n`);
+        return `tail_file: ${safePath} is a ${kind}, not a regular file`;
+      }
+      // Fix #2: size guard — reject files larger than 100 MB to avoid OOM
+      const MAX_TAIL_BYTES = 100 * 1024 * 1024;
+      if (stat.size > MAX_TAIL_BYTES) {
+        process.stderr.write(`[${NAME}] tail_file: file too large (${stat.size} bytes) for ${safePath}; use run_shell with tail -n\n`);
+        return `tail_file: file too large (${stat.size} bytes, max ${MAX_TAIL_BYTES}); use run_shell with "tail -n ${lines} ${safePath}"`;
+      }
+      // TOCTOU note: a directory-writable attacker could swap this file for a symlink between
+      // lstatSync and readFileSync. Fully closing this requires O_NOFOLLOW (unavailable in Bun's
+      // sync fs API). Risk is accepted: tail_file operates on sanitized paths and this worker
+      // runs with user-level filesystem permissions only.
+      let content: string;
+      try {
+        content = readFileSync(safePath, "utf-8");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: readFileSync failed for ${safePath}: ${msg}\n`);
+        return `tail_file: could not read file — ${msg}`;
+      }
+      // Fix #4: binary file guard — null bytes indicate non-text content
+      if (content.includes("\x00")) {
+        process.stderr.write(`[${NAME}] tail_file: binary file detected at ${safePath}; use run_shell with xxd or file\n`);
+        return `tail_file: ${safePath} appears to be a binary file; use run_shell with "xxd ${safePath} | head" or "file ${safePath}"`;
+      }
+      // Fix #3: strip trailing newline before splitting to avoid phantom empty last line
+      const normalized = content.endsWith("\n") ? content.slice(0, -1) : content;
+      const allLines = normalized.length === 0 ? [] : normalized.split("\n");
+      const tail = allLines.slice(-lines);
+      const totalLines = allLines.length;
+      // NEW-2: output size cap before serialization to avoid downstream DoS
+      const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+      const joinedContent = tail.join("\n");
+      if (Buffer.byteLength(joinedContent, "utf-8") > MAX_RESPONSE_BYTES) {
+        process.stderr.write(`[${NAME}] tail_file: response too large (>${MAX_RESPONSE_BYTES} bytes) for ${safePath}\n`);
+        return `tail_file: the requested ${lines} lines exceed the 2 MB response limit; use run_shell with "tail -n ${lines} ${safePath}" or request fewer lines`;
+      }
+      try {
+        return safeStringify({ path: safePath, totalLines, returnedLines: tail.length, content: joinedContent }, 2);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: safeStringify failed for ${safePath}: ${msg}\n`);
+        return `tail_file: failed to serialize response — ${msg}`;
       }
     }
     default:
