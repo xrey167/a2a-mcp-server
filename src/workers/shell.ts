@@ -411,6 +411,10 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
         process.stderr.write(`[${NAME}] tail_file: file too large (${stat.size} bytes) for ${safePath}; use run_shell with tail -n\n`);
         return `tail_file: file too large (${stat.size} bytes, max ${MAX_TAIL_BYTES}); use run_shell with "tail -n ${lines} ${safePath}"`;
       }
+      // TOCTOU note: a directory-writable attacker could swap this file for a symlink between
+      // lstatSync and readFileSync. Fully closing this requires O_NOFOLLOW (unavailable in Bun's
+      // sync fs API). Risk is accepted: tail_file operates on sanitized paths and this worker
+      // runs with user-level filesystem permissions only.
       let content: string;
       try {
         content = readFileSync(safePath, "utf-8");
