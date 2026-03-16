@@ -594,7 +594,10 @@ ${safeQuestion}`;
 
       // Safety: reject write operations when readOnly is enabled.
       // Strip SQL comments first (prevents "-- DROP TABLE" and /* */ bypasses).
-      // Scan full SQL string (not just start) to catch multi-statement and CTE bypasses.
+      // Scan full SQL string to catch multi-statement and CTE bypasses:
+      //   "WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d" has no `;` prefix.
+      // Left-context (?:^|[\s;(]) catches: start-of-string, whitespace, semicolons, and open-paren
+      //   (handles CTE subqueries: `... (DELETE FROM ...)`).
       // Use (?=\s|$|\() instead of \b — \b is broken in some Bun versions (interpreted as backspace).
       if (readOnly) {
         const sqlNoComments = (parsed2.sql as string)
@@ -602,7 +605,7 @@ ${safeQuestion}`;
           .replace(/\/\*[\s\S]*?\*\//g, "");
         const WRITE_OPS = ["INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER", "CREATE", "REPLACE", "MERGE", "CALL"];
         const writeOpPattern = WRITE_OPS.join("|");
-        const writeOpRe = new RegExp(`(?:^|;\\s*)(${writeOpPattern})(?=\\s|$|\\()`, "im");
+        const writeOpRe = new RegExp(`(?:^|[\\s;(])(${writeOpPattern})(?=\\s|$|\\()`, "im");
         const writeMatch = writeOpRe.exec(sqlNoComments);
         if (writeMatch) {
           const op = (writeMatch[1] ?? "WRITE").toUpperCase();
