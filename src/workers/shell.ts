@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { spawnSync, spawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, lstatSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, lstatSync, realpathSync } from "fs";
 import { resolve } from "path";
 import { z } from "zod";
 import { handleMemorySkill } from "../worker-memory.js";
@@ -369,6 +369,11 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
         return `tail_file: invalid arguments — ${msg}`;
       }
       const { path, lines } = parsed;
+      // NEW-4: explicit guard before Zod (args may omit path when text is empty)
+      if (!path) {
+        process.stderr.write(`[${NAME}] tail_file: called with no path argument\n`);
+        return "tail_file: missing required argument — provide a file path";
+      }
       // Fix #5: wrap sanitizePath to log traversal probes and return a clean string
       let safePath: string;
       try {
@@ -378,13 +383,33 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
         process.stderr.write(`[${NAME}] tail_file: rejected unsafe path "${path}": ${msg}\n`);
         return `tail_file: unsafe path rejected — ${msg}`;
       }
-      if (!existsSync(safePath)) return `File not found: ${safePath}`;
-      // Fix #1: check isFile() — reject directories, device files, FIFOs, sockets
-      const stat = statSync(safePath);
+      // NEW-1: single statSync in try-catch eliminates TOCTOU race (no existsSync pre-check)
+      let stat: ReturnType<typeof statSync>;
+      try {
+        stat = statSync(safePath);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: statSync failed for ${safePath}: ${msg}\n`);
+        const isNotFound = err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
+        return isNotFound ? `File not found: ${safePath}` : `tail_file: cannot access file — ${msg}`;
+      }
+      // Fix #1: reject directories, device files, FIFOs, sockets
       if (!stat.isFile()) {
         const kind = stat.isDirectory() ? "directory" : stat.isBlockDevice() || stat.isCharacterDevice() ? "device file" : "non-regular file";
         process.stderr.write(`[${NAME}] tail_file: path is a ${kind}, not a regular file: ${safePath}\n`);
         return `tail_file: ${safePath} is a ${kind}, not a regular file`;
+      }
+      // NEW-3: resolve symlinks so isFile() on a symlink→/etc/passwd is caught
+      let realPath: string;
+      try {
+        realPath = realpathSync(safePath);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: realpathSync failed for ${safePath}: ${msg}\n`);
+        return `tail_file: cannot resolve file path — ${msg}`;
+      }
+      if (realPath !== safePath) {
+        process.stderr.write(`[${NAME}] tail_file: symlink followed: ${safePath} -> ${realPath}\n`);
       }
       // Fix #2: size guard — reject files larger than 100 MB to avoid OOM
       const MAX_TAIL_BYTES = 100 * 1024 * 1024;
@@ -394,23 +419,36 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
       }
       let content: string;
       try {
-        content = readFileSync(safePath, "utf-8");
+        content = readFileSync(realPath, "utf-8");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`[${NAME}] tail_file: readFileSync failed for ${safePath}: ${msg}\n`);
+        process.stderr.write(`[${NAME}] tail_file: readFileSync failed for ${realPath}: ${msg}\n`);
         return `tail_file: could not read file — ${msg}`;
       }
       // Fix #4: binary file guard — null bytes indicate non-text content
       if (content.includes("\x00")) {
-        process.stderr.write(`[${NAME}] tail_file: binary file detected at ${safePath}; use run_shell with xxd or file\n`);
-        return `tail_file: ${safePath} appears to be a binary file; use run_shell with "xxd ${safePath} | head" or "file ${safePath}"`;
+        process.stderr.write(`[${NAME}] tail_file: binary file detected at ${realPath}; use run_shell with xxd or file\n`);
+        return `tail_file: ${realPath} appears to be a binary file; use run_shell with "xxd ${realPath} | head" or "file ${realPath}"`;
       }
       // Fix #3: strip trailing newline before splitting to avoid phantom empty last line
       const normalized = content.endsWith("\n") ? content.slice(0, -1) : content;
       const allLines = normalized.length === 0 ? [] : normalized.split("\n");
       const tail = allLines.slice(-lines);
       const totalLines = allLines.length;
-      return safeStringify({ path: safePath, totalLines, returnedLines: tail.length, content: tail.join("\n") }, 2);
+      // NEW-2: output size cap before serialization to avoid downstream DoS
+      const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+      const joinedContent = tail.join("\n");
+      if (Buffer.byteLength(joinedContent, "utf-8") > MAX_RESPONSE_BYTES) {
+        process.stderr.write(`[${NAME}] tail_file: response too large (>${MAX_RESPONSE_BYTES} bytes) for ${realPath}\n`);
+        return `tail_file: the requested ${lines} lines exceed the 2 MB response limit; use run_shell with "tail -n ${lines} ${realPath}" or request fewer lines`;
+      }
+      try {
+        return safeStringify({ path: realPath, totalLines, returnedLines: tail.length, content: joinedContent }, 2);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: safeStringify failed for ${realPath}: ${msg}\n`);
+        return `tail_file: failed to serialize response — ${msg}`;
+      }
     }
     default:
       return `Unknown skill: ${skillId}`;
