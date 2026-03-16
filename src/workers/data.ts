@@ -934,6 +934,19 @@ Requirements:
         return `validate_schema: data exceeds ${MAX_INPUT_ROWS} rows — slice the dataset first`;
       }
 
+      // Pre-compile all regex patterns once — compiling inside the row loop is O(n*m) and a ReDoS vector
+      const compiledPatterns = new Map<string, RegExp>();
+      for (const [field, rules] of Object.entries(schema)) {
+        if (rules.pattern) {
+          try {
+            compiledPatterns.set(field, new RegExp(rules.pattern));
+          } catch {
+            // Schema authoring error — log once, field will be skipped during validation
+            process.stderr.write(`[${NAME}] validate_schema: invalid regex pattern for field "${field}": ${rules.pattern}\n`);
+          }
+        }
+      }
+
       type RowError = { row: number; field: string; message: string };
       const errors: RowError[] = [];
       let errorsTruncated = false;
@@ -990,15 +1003,8 @@ Requirements:
               errors.push({ row: i, field, message: `string length ${value.length} exceeds maximum ${rules.max}` });
             }
             if (rules.pattern) {
-              let regex: RegExp;
-              try {
-                regex = new RegExp(rules.pattern);
-              } catch {
-                // Pattern compilation failure is a schema authoring error — skip check, log once
-                process.stderr.write(`[${NAME}] validate_schema: invalid regex pattern for field "${field}": ${rules.pattern}\n`);
-                continue;
-              }
-              if (!regex.test(value)) {
+              const regex = compiledPatterns.get(field);
+              if (regex && !regex.test(value)) {
                 errors.push({ row: i, field, message: `value "${value.length > 50 ? value.slice(0, 50) + "…" : value}" does not match pattern ${rules.pattern}` });
               }
             }
@@ -1014,8 +1020,8 @@ Requirements:
       return safeStringify({
         valid,
         rowCount: data.length,
-        errorCount: errors.length + (errorsTruncated ? 1 : 0), // +1 signals truncation happened
-        errorsTruncated: errorsTruncated ? true : undefined,
+        errorCount: errors.length,  // count of errors in the errors[] array; check errorsTruncated for more
+        ...(errorsTruncated ? { errorsTruncated: true } : {}),
         schemaFields: Object.keys(schema),
         errors,
       }, 2);
