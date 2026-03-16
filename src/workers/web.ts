@@ -438,20 +438,30 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
           headers: { "Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0 (compatible; A2A-Web-Agent/1.0)" },
         });
       } catch (err) {
-        process.stderr.write(`[${NAME}] extract_links: fetch failed for ${url}: ${err}\n`);
-        return `extract_links: could not fetch ${url} — ${err instanceof Error ? err.message : String(err)}`;
+        // Fix #2: distinguish timeout from DNS/network failure
+        const isTimeout = err instanceof Error && err.name === "AbortError";
+        process.stderr.write(`[${NAME}] extract_links: fetch ${isTimeout ? "timed out" : "failed"} for ${url}: ${err}\n`);
+        return isTimeout
+          ? `extract_links: request timed out after ${FETCH_TIMEOUT_MS}ms for ${url}`
+          : `extract_links: could not fetch ${url} — ${err instanceof Error ? err.message : String(err)}`;
       }
 
       if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
       const ct = res.headers.get("content-type") ?? "";
       if (!ct.includes("text/html") && !ct.includes("application/xhtml")) {
-        return `extract_links expects HTML content (got ${ct}); use fetch_url for other content types`;
+        // Fix #4: log content-type mismatch and handle empty ct
+        process.stderr.write(`[${NAME}] extract_links: unexpected content-type "${ct || "(none)"}" for ${url}\n`);
+        return `extract_links expects HTML content (got ${ct || "(no content-type header)"}); use fetch_url for other content types`;
       }
 
       const contentLength = parseInt(res.headers.get("content-length") ?? "0", 10);
       if (contentLength > MAX_RESPONSE_BYTES) return `Response too large: ${contentLength} bytes (max ${MAX_RESPONSE_BYTES})`;
       const html = await readBodyWithLimit(res, MAX_RESPONSE_BYTES);
-      if (html === null) return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
+      if (html === null) {
+        // Fix #6: log body-size limit with URL
+        process.stderr.write(`[${NAME}] extract_links: response body exceeded ${MAX_RESPONSE_BYTES} bytes during streaming for ${url}\n`);
+        return `Response too large: exceeded ${MAX_RESPONSE_BYTES} byte limit during streaming`;
+      }
 
       // Determine base origin for internal/external classification
       const baseOrigin = new URL(url).origin;
@@ -459,15 +469,17 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
       // Extract anchor hrefs from full HTML (no content-area isolation — we want all links)
       const links: Array<{ text: string; href: string; type: "internal" | "external" }> = [];
       const seen = new Set<string>();
+      // Fix #1: track malformed hrefs that fail URL parsing
+      let skippedMalformed = 0;
       const linkRe = /<a[^>]+href=["']([^"'#][^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
       let lm: RegExpExecArray | null;
       while ((lm = linkRe.exec(html)) !== null && links.length < maxLinks) {
         const rawHref = (lm[1] ?? "").trim();
         const linkText = decodeEntities((lm[2] ?? "").replace(/<[^>]+>/g, "").trim());
         if (!rawHref) continue;
-        // Resolve to absolute URL; skip malformed hrefs silently
+        // Resolve to absolute URL; skip and count malformed hrefs
         let resolved: string;
-        try { resolved = new URL(rawHref, url).href; } catch { continue; }
+        try { resolved = new URL(rawHref, url).href; } catch { skippedMalformed++; continue; }
         // Skip non-http(s) schemes (mailto:, tel:, javascript:, etc.)
         if (!resolved.startsWith("http://") && !resolved.startsWith("https://")) continue;
         if (seen.has(resolved)) continue;
@@ -477,20 +489,50 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         links.push({ text: linkText.slice(0, 150) || "(no text)", href: resolved, type: linkType });
       }
 
+      // Fix #1: log and surface malformed href count
+      if (skippedMalformed > 0) {
+        process.stderr.write(`[${NAME}] extract_links: skipped ${skippedMalformed} malformed href(s) on ${url}\n`);
+      }
+
+      // Fix #5: detect maxLinks truncation
+      const truncated = links.length === maxLinks && linkRe.exec(html) !== null;
+
+      // Fix #3: detect zero-link conditions for diagnostic note
+      let note: string | undefined;
+      if (links.length === 0) {
+        const hasAnchors = /<a\s/i.test(html);
+        if (!hasAnchors) {
+          note = "no <a> tags found in the HTML — the page may be JavaScript-rendered or require authentication";
+          process.stderr.write(`[${NAME}] extract_links: no anchor tags found in HTML for ${url}\n`);
+        } else if (filter !== "all") {
+          note = `no ${filter} links found — page has anchor tags but none match filter "${filter}"`;
+          process.stderr.write(`[${NAME}] extract_links: filter "${filter}" eliminated all links for ${url}\n`);
+        } else {
+          note = "anchor tags exist but none matched the href regex — page may use non-standard quoting or template syntax";
+          process.stderr.write(`[${NAME}] extract_links: regex matched 0 anchors despite <a> tags present for ${url}\n`);
+        }
+      } else if (truncated) {
+        note = `result capped at maxLinks=${maxLinks}; increase maxLinks (max 500) to retrieve more`;
+      }
+
       // Optionally extract image src URLs
       const images: Array<{ alt: string; src: string }> = [];
       if (includeImages) {
+        let skippedImgMalformed = 0;
         const imgRe = /<img[^>]+src=["']([^"']*)["'][^>]*>/gi;
         let im: RegExpExecArray | null;
         while ((im = imgRe.exec(html)) !== null && images.length < maxLinks) {
           const rawSrc = (im[1] ?? "").trim();
           if (!rawSrc) continue;
           let resolved: string;
-          try { resolved = new URL(rawSrc, url).href; } catch { continue; }
+          try { resolved = new URL(rawSrc, url).href; } catch { skippedImgMalformed++; continue; }
           if (!resolved.startsWith("http://") && !resolved.startsWith("https://")) continue;
           const altMatch = im[0].match(/alt=["']([^"']*)["']/i);
           const alt = altMatch?.[1] ? decodeEntities(altMatch[1]) : "";
           images.push({ alt: alt.slice(0, 150), src: resolved });
+        }
+        if (skippedImgMalformed > 0) {
+          process.stderr.write(`[${NAME}] extract_links: skipped ${skippedImgMalformed} malformed image src(s) on ${url}\n`);
         }
       }
 
@@ -498,6 +540,9 @@ async function handleSkill(skillId: string, args: Record<string, unknown>, text:
         url,
         linkCount: links.length,
         filter,
+        truncated: truncated ? true : undefined,
+        skippedMalformed: skippedMalformed > 0 ? skippedMalformed : undefined,
+        note,
         links,
       };
       if (includeImages) result.images = images;
