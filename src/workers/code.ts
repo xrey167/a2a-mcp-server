@@ -370,8 +370,10 @@ BREAKING CHANGES:
     process.stderr.write(`[${NAME}] convert_code: AI response missing expected structure. Got: ${result.slice(0, 200)}\n`);
     throw new Error("convert_code: AI response did not follow the expected format — missing 'CONVERTED CODE:' section. Retry or check model behavior.");
   }
-  // Guard against structurally-valid-but-empty CONVERTED CODE section
-  const codeSection = result.split("CONVERTED CODE:")[1]?.split("NOTES:")[0] ?? "";
+  // Guard against structurally-valid-but-empty CONVERTED CODE section.
+  // Split on line-anchored "\nNOTES:" so source comments like "# NOTES: see README"
+  // inside the converted code body don't prematurely truncate the section.
+  const codeSection = result.split("CONVERTED CODE:")[1]?.split(/\nNOTES:/)[0] ?? "";
   if (!codeSection.trim()) {
     process.stderr.write(`[${NAME}] convert_code: CONVERTED CODE section is empty. Full response: ${result.slice(0, 300)}\n`);
     throw new Error("convert_code: AI returned a response with an empty CONVERTED CODE section — retry or check model behavior.");
