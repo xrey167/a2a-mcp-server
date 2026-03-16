@@ -62,7 +62,7 @@ const AGENT_CARD = {
     { id: "list_dir", name: "List Directory", description: "List files and subdirectories in a directory (non-recursive). Returns name and type (file/dir) for each entry." },
     { id: "shell_brief", name: "Shell Brief", description: "Execute a shell command and ask Claude to explain the output in plain language. Useful for interpreting git log, diff, ps, df, netstat, and other diagnostic commands." },
     { id: "find_files", name: "Find Files", description: "Recursively search a directory for files or directories matching a glob pattern (e.g. '*.ts', 'src/**'). Returns structured JSON with path, type, sizeBytes, and modifiedAt. Skips symlinks to prevent loops. Supports depth and result-count limits." },
-    { id: "tail_file", name: "Tail File", description: "Read the last N lines of a file (default 100, max 10 000). Ideal for inspecting log files, build output, and append-only data without loading the entire file." },
+    { id: "tail_file", name: "Tail File", description: "Read the last N lines of a text file (default 100, max 10 000). Ideal for inspecting log files and build output. Returns structured JSON with totalLines, returnedLines, and content." },
     { id: "remember", name: "Remember", description: "Store a key-value pair in persistent memory" },
     { id: "recall", name: "Recall", description: "Retrieve a value from persistent memory (or all memories)" },
   ],
@@ -364,12 +364,34 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
       try {
         parsed = ShellSchemas.tail_file.parse({ path: args.path ?? text, ...args });
       } catch (err) {
-        process.stderr.write(`[${NAME}] tail_file: Zod parse error: ${err instanceof Error ? err.message : String(err)}\n`);
-        throw err;
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: Zod parse error: ${msg}\n`);
+        return `tail_file: invalid arguments — ${msg}`;
       }
       const { path, lines } = parsed;
-      const safePath = sanitizePath(path);
+      // Fix #5: wrap sanitizePath to log traversal probes and return a clean string
+      let safePath: string;
+      try {
+        safePath = sanitizePath(path);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[${NAME}] tail_file: rejected unsafe path "${path}": ${msg}\n`);
+        return `tail_file: unsafe path rejected — ${msg}`;
+      }
       if (!existsSync(safePath)) return `File not found: ${safePath}`;
+      // Fix #1: check isFile() — reject directories, device files, FIFOs, sockets
+      const stat = statSync(safePath);
+      if (!stat.isFile()) {
+        const kind = stat.isDirectory() ? "directory" : stat.isBlockDevice() || stat.isCharacterDevice() ? "device file" : "non-regular file";
+        process.stderr.write(`[${NAME}] tail_file: path is a ${kind}, not a regular file: ${safePath}\n`);
+        return `tail_file: ${safePath} is a ${kind}, not a regular file`;
+      }
+      // Fix #2: size guard — reject files larger than 100 MB to avoid OOM
+      const MAX_TAIL_BYTES = 100 * 1024 * 1024;
+      if (stat.size > MAX_TAIL_BYTES) {
+        process.stderr.write(`[${NAME}] tail_file: file too large (${stat.size} bytes) for ${safePath}; use run_shell with tail -n\n`);
+        return `tail_file: file too large (${stat.size} bytes, max ${MAX_TAIL_BYTES}); use run_shell with "tail -n ${lines} ${safePath}"`;
+      }
       let content: string;
       try {
         content = readFileSync(safePath, "utf-8");
@@ -378,7 +400,14 @@ Be specific about numbers and file names. Do not speculate beyond what the outpu
         process.stderr.write(`[${NAME}] tail_file: readFileSync failed for ${safePath}: ${msg}\n`);
         return `tail_file: could not read file — ${msg}`;
       }
-      const allLines = content.split("\n");
+      // Fix #4: binary file guard — null bytes indicate non-text content
+      if (content.includes("\x00")) {
+        process.stderr.write(`[${NAME}] tail_file: binary file detected at ${safePath}; use run_shell with xxd or file\n`);
+        return `tail_file: ${safePath} appears to be a binary file; use run_shell with "xxd ${safePath} | head" or "file ${safePath}"`;
+      }
+      // Fix #3: strip trailing newline before splitting to avoid phantom empty last line
+      const normalized = content.endsWith("\n") ? content.slice(0, -1) : content;
+      const allLines = normalized.length === 0 ? [] : normalized.split("\n");
       const tail = allLines.slice(-lines);
       const totalLines = allLines.length;
       return safeStringify({ path: safePath, totalLines, returnedLines: tail.length, content: tail.join("\n") }, 2);
